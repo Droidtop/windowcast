@@ -1,0 +1,16 @@
+[package]
+name = "windowcast-directory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+windowcast-identity = { path = "../identity" }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+argon2 = "0.5"
+password-hash = { version = "0.5", features = ["std"] }
+serde.workspace = true
+serde_json = "1"
+bincode.workspace = true
+rand_core.workspace = true
+thiserror.workspace = true

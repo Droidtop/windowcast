@@ -4,6 +4,7 @@ members = [
     "protocol",
     "identity",
     "pairing",
+    "directory",
     "transport",
     "client-core",
     "agent-linux",

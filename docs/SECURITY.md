@@ -10,9 +10,25 @@ that path can substitute their own fingerprint and sit in the middle — a
 PIN that's only checked out-of-band, and never actually bound into the key
 agreement, doesn't stop that.
 
-windowcast's model has two tiers.
+windowcast has **two separate credential types**, not one model stretched
+to cover both cases:
 
-## First pairing: PIN-authenticated key exchange, not just a PIN check
+- A **device credential** identifies one specific machine — the client
+  device itself is the identity, and it's the same identity no matter who
+  is sitting at it. This is the Moonlight/GameStream shape: pair once with
+  a device, stream to that device from then on.
+- An **account credential** identifies a person, who may connect from any
+  client device. This is the RDP/RemoteApp/NoMachine shape: a user logs
+  in, and it doesn't matter which machine they're logging in from.
+
+Real deployments need both — "pair my handheld with my home PC" is a
+device relationship; "let anyone on my team remote into their own desktop
+from whatever machine they're at" is an account relationship. Neither one
+is a special case of the other, so windowcast keeps them as two credential
+types that both feed the *same* downstream mechanism (authenticating a
+WebRTC session's DTLS fingerprint) from two different trust roots.
+
+## Device credential: PIN-authenticated key exchange, not just a PIN check
 
 Pairing uses [SPAKE2](https://datatracker.ietf.org/doc/html/rfc9382) (a
 password-authenticated key exchange), seeded with a short PIN the host
@@ -35,7 +51,7 @@ password-guessing oracle). A wrong PIN instead makes both sides derive
 actually detects and fails on that. Skipping that step defeats the whole
 design.
 
-## Every connection after the first: pinned Ed25519 identity
+## Device credential, every connection after the first: pinned Ed25519 identity
 
 During that first PAKE-authenticated pairing, client and host each
 generate a persistent Ed25519 keypair (`windowcast-identity`) if they don't
@@ -46,6 +62,52 @@ bootstrap, not something re-entered per session.
 
 A paired peer's public key is a revocable grant (`TrustStore::revoke`), not
 a permanent "once paired, forever trusted" record.
+
+## Account credential: directory-issued session certificates
+
+`windowcast-directory` is a self-contained account/login system: a real
+account database (Argon2id-hashed passwords, no external dependency for
+v1 — OIDC/SSO is a deliberate later extension point, not built now) and a
+certificate authority the directory itself operates.
+
+At login, the directory verifies the account's password, then mints a
+**session certificate**: a small signed claims structure (account name,
+role, expiry, and — critically — the *client's own* Ed25519 public key for
+this login session) signed with the directory's CA key. A host that trusts
+this directory (by pinning the CA's public key, not each individual user's
+key) accepts any certificate that CA vouches for.
+
+Two checks matter, not one: verifying the certificate's signature proves
+the *claims* genuinely came from a trusted directory, but a host must
+*also* require the presenter to sign a fresh nonce/DTLS fingerprint with
+the private key matching `session_peer_id` in those claims — otherwise a
+captured certificate (the claims are not secret) could be replayed by
+anyone, not just the account holder who actually logged in. The
+certificate proves the directory vouches for this account; the signature
+proves whoever is connecting right now actually holds that session's key.
+
+Session certificates are short-lived (`DEFAULT_SESSION_TTL_SECONDS`, 12
+hours) and re-minted per login, not per connection — a revoked account
+(`AccountStore::revoke`) simply can't log in again to get a new one, and
+existing certificates age out on their own rather than needing active
+revocation-list distribution to every host.
+
+This is deliberately *not* a device credential in disguise: the same
+account can hold a different `session_peer_id` on every device it logs in
+from, and a host authorizing "this account" is authorizing the person, not
+whichever machine happens to be running the client this time.
+
+## Directory-mediated sessions: authenticate-and-broker, not intercept
+
+A directory can also help two peers behind restrictive NATs actually
+connect, via a **blind TURN relay** (`transport::Session::with_relay`) —
+this is standard WebRTC TURN, not a windowcast-specific protocol. The
+directory relays opaque DTLS-SRTP packets it cannot decrypt; it never
+becomes a party to the encrypted session and never sees window content.
+This was a deliberate choice, not a limitation to work around later: a
+terminating proxy (one that decrypts and re-encrypts to inspect or log
+content) is a fundamentally different trust model — a real, designed-in
+man-in-the-middle — and nothing in windowcast does that today.
 
 ## Bulk media/data encryption
 

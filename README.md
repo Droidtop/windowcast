@@ -31,8 +31,9 @@ agents don't exist yet at all.
 |---|---|
 | `protocol` | Real, tested (message schema + codec + version check) |
 | `identity` | Real, tested (persistent Ed25519 identity, pinned-peer trust store) |
-| `pairing` | Real, tested (SPAKE2 PAKE + HKDF + HMAC fingerprint authentication) |
-| `transport` | Real WebRTC session/fingerprint plumbing; SDP signaling and per-window tracks not wired yet |
+| `pairing` | Real, tested (SPAKE2 PAKE + HKDF + HMAC fingerprint authentication) — the *device* credential |
+| `directory` | Real, tested (accounts, Argon2 password hashing, CA-signed session certificates) — the *account* credential |
+| `transport` | Real WebRTC session/fingerprint plumbing + TURN relay wiring (`Session::with_relay`); SDP signaling and per-window tracks not wired yet |
 | `client-core` | FFI skeleton (session create/free, fingerprint extraction); frame delivery not wired yet |
 | `agent-linux` | Toplevel listing works against a real compositor (`zwlr_foreign_toplevel_manager_v1`); capture is an explicit `NotImplemented` (needs `ext-image-copy-capture-v1`, not vendored yet) |
 | `agent-windows` | Not started |
@@ -46,10 +47,23 @@ model. Short version: WebRTC gives fast, hardware-accelerated AEAD media
 encryption (AES-128-GCM via DTLS-SRTP) for free, and handles NAT traversal
 and congestion control — but its DTLS handshake is only as trustworthy as
 whatever channel carries the SDP fingerprint exchange. windowcast closes
-that gap with a SPAKE2 PAKE seeded by a PIN shown on the host: the PAKE
-run authenticates the fingerprint exchange itself, not just "a human typed
-something." After that first pairing, persistent Ed25519 identities take
-over — no PIN re-entry on reconnect.
+that gap two ways, for two distinct credential types:
+
+- **Device credential** (`pairing` + `identity`) — a SPAKE2 PAKE seeded by
+  a PIN shown on the host authenticates the fingerprint exchange itself,
+  then a persistent pinned Ed25519 identity takes over for every later
+  reconnect. One specific device is the identity (Moonlight-style) — no
+  accounts involved.
+- **Account credential** (`directory`) — a person logs into a directory
+  server (password today, OIDC later); the directory mints a short-lived
+  certificate, signed by its own CA key, binding that login to the
+  session's ephemeral key. A host that trusts the directory's CA key
+  accepts any account it vouches for, without individually pinning every
+  user (RDP/RemoteApp-style) — the account, not the device, is the
+  identity, so the same person can connect from anywhere.
+
+Both feed the same fingerprint-authentication mechanism in `transport` —
+they differ in trust root, not in mechanism.
 
 One `PeerConnection` (one DTLS handshake) is shared per client<->host
 *session*; each open window is a separate track/data-channel within it, so
