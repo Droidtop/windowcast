@@ -1,0 +1,20 @@
+[package]
+name = "windowcast-client-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "windowcast_client"
+# cdylib so this compiles into a shared library embedders (droidtop's JNI
+# bridge, a future desktop client, etc.) can link against directly; rlib
+# too so it's also usable as a normal Rust dependency (cli-tools does).
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+windowcast-protocol = { path = "../protocol" }
+windowcast-identity = { path = "../identity" }
+windowcast-pairing = { path = "../pairing" }
+windowcast-transport = { path = "../transport" }
+tokio.workspace = true
+tracing.workspace = true

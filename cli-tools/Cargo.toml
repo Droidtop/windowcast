@@ -1,0 +1,16 @@
+[package]
+name = "windowcast-cli-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "windowcast-client"
+path = "src/client.rs"
+
+[dependencies]
+windowcast-protocol = { path = "../protocol" }
+windowcast-identity = { path = "../identity" }
+windowcast-pairing = { path = "../pairing" }
+windowcast-transport = { path = "../transport" }
+tokio.workspace = true
