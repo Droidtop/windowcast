@@ -16,9 +16,11 @@ mod certificate;
 
 pub use accounts::{Account, AccountError, AccountStore};
 pub use certificate::{
-    verify, CertificateError, DirectoryCa, SessionCertificate, SessionClaims,
-    DEFAULT_SESSION_TTL_SECONDS,
+    verify, CertificateError, DirectoryCa, SessionClaims, DEFAULT_SESSION_TTL_SECONDS,
 };
+
+/// A PASETO v4.public token string — see `certificate` module docs.
+pub type SessionCertificate = String;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoginError {
@@ -64,7 +66,7 @@ mod tests {
         let cert = login(&accounts, &ca, "alice", "hunter2000", session_peer_id).unwrap();
         let claims = verify(&ca.public_key(), &cert).unwrap();
         assert_eq!(claims.account, "alice");
-        assert_eq!(claims.session_peer_id, session_peer_id);
+        assert_eq!(claims.session_peer_id_bytes().unwrap(), session_peer_id);
 
         assert!(login(&accounts, &ca, "alice", "wrong password", session_peer_id).is_err());
 

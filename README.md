@@ -37,7 +37,7 @@ agents don't exist yet at all.
 | `protocol` | Real, tested (message schema + codec + version check) |
 | `identity` | Real, tested (persistent Ed25519 identity, pinned-peer trust store) |
 | `pairing` | Real, tested (SPAKE2 PAKE + HKDF + HMAC fingerprint authentication) — the *device* credential |
-| `directory` | Real, tested (accounts, Argon2 password hashing, CA-signed session certificates) — the *account* credential |
+| `directory` | Real, tested (accounts, Argon2 password hashing, PASETO v4.public session certificates) — the *account* credential |
 | `apollo-client` | Real, tested `serverinfo` client + `applist` XML parser for a local Sunshine/Apollo host; the authenticated fetch itself needs `windowcast-moonlight` (not started) |
 | `transport` | Real WebRTC session/fingerprint plumbing + TURN relay wiring (`Session::with_relay`); SDP signaling and per-window tracks not wired yet |
 | `client-core` | FFI skeleton (session create/free, fingerprint extraction); frame delivery not wired yet |

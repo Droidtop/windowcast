@@ -71,11 +71,19 @@ v1 — OIDC/SSO is a deliberate later extension point, not built now) and a
 certificate authority the directory itself operates.
 
 At login, the directory verifies the account's password, then mints a
-**session certificate**: a small signed claims structure (account name,
-role, expiry, and — critically — the *client's own* Ed25519 public key for
-this login session) signed with the directory's CA key. A host that trusts
-this directory (by pinning the CA's public key, not each individual user's
-key) accepts any certificate that CA vouches for.
+**session certificate**: a [PASETO](https://paseto.io/) v4.public token
+(account name, role, expiry, and — critically — the *client's own* Ed25519
+public key for this login session), signed with the directory's CA key. A
+host that trusts this directory (by pinning the CA's public key, not each
+individual user's key) accepts any certificate that CA vouches for.
+
+This is a standard, audited claims-token format, not a hand-rolled
+"bincode-serialize-then-sign" scheme — deliberately, since inventing a
+custom signed-token format is exactly the kind of narrow, easy-to-get-
+subtly-wrong security code that's worth NOT writing when a well-reviewed
+standard already exists. PASETO's own default parser also enforces
+expiration automatically, so windowcast doesn't hand-roll that check
+either.
 
 Two checks matter, not one: verifying the certificate's signature proves
 the *claims* genuinely came from a trusted directory, but a host must

@@ -94,6 +94,14 @@ impl Identity {
     pub fn sign(&self, message: &[u8]) -> Signature {
         self.signing_key.sign(message)
     }
+
+    /// The raw 64-byte Ed25519 keypair (32-byte seed + 32-byte public key)
+    /// — the form other libraries that consume a raw Ed25519 key (e.g. a
+    /// PASETO v4.public signer) typically expect, rather than this crate's
+    /// own [`Identity`]/[`PeerId`] wrapper types.
+    pub fn to_keypair_bytes(&self) -> [u8; 64] {
+        self.signing_key.to_keypair_bytes()
+    }
 }
 
 pub fn verify(peer: &PeerId, message: &[u8], signature: &Signature) -> bool {
