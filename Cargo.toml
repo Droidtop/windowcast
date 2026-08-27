@@ -5,6 +5,7 @@ members = [
     "identity",
     "pairing",
     "directory",
+    "apollo-client",
     "transport",
     "client-core",
     "agent-linux",

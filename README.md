@@ -1,9 +1,14 @@
 # windowcast
 
-A protocol + SDK for streaming a single application **window** — not a
-whole desktop — from a host to a client, with per-window WebRTC channels,
-PAKE-bootstrapped mutual authentication, and pluggable host-capture agents
-per OS. GPL-3.0.
+A protocol + SDK for streaming application **windows** — not necessarily a
+whole desktop — from a host to a client. Many streams, of possibly
+different backends, can be live at once: windowcast's own per-window
+WebRTC capture for ordinary windows, with individual streams handed off to
+other embedded protocol libraries (GameStream/Moonlight today; RDP/VNC/etc.
+are anticipated, not yet built) when a different protocol suits that
+particular stream better — see [`StreamBackend`](protocol/src/lib.rs). PAKE-
+bootstrapped device pairing and directory-issued account credentials, and
+pluggable host-capture agents per OS. GPL-3.0.
 
 Built as the reusable core behind [droidtop](https://github.com/bi0shacker001/droidtop)'s
 remote-window streaming feature, but deliberately kept droidtop-agnostic —
@@ -33,11 +38,13 @@ agents don't exist yet at all.
 | `identity` | Real, tested (persistent Ed25519 identity, pinned-peer trust store) |
 | `pairing` | Real, tested (SPAKE2 PAKE + HKDF + HMAC fingerprint authentication) — the *device* credential |
 | `directory` | Real, tested (accounts, Argon2 password hashing, CA-signed session certificates) — the *account* credential |
+| `apollo-client` | Real, tested `serverinfo` client + `applist` XML parser for a local Sunshine/Apollo host; the authenticated fetch itself needs `windowcast-moonlight` (not started) |
 | `transport` | Real WebRTC session/fingerprint plumbing + TURN relay wiring (`Session::with_relay`); SDP signaling and per-window tracks not wired yet |
 | `client-core` | FFI skeleton (session create/free, fingerprint extraction); frame delivery not wired yet |
 | `agent-linux` | Toplevel listing works against a real compositor (`zwlr_foreign_toplevel_manager_v1`); capture is an explicit `NotImplemented` (needs `ext-image-copy-capture-v1`, not vendored yet) |
 | `agent-windows` | Not started |
 | `agent-macos` | Not started |
+| `windowcast-moonlight` | Not started — the actual GameStream/Moonlight *streaming* client library (`StreamBackend::Moonlight`'s handoff target); pairing has to be ported from moonlight-android's real protocol (salted-PIN AES challenge/response), not guessed at |
 | `cli-tools` | Reference client CLI; demonstrates identity + transport end to end locally |
 
 ## Design

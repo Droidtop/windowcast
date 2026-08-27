@@ -1,0 +1,13 @@
+[package]
+name = "windowcast-apollo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+windowcast-protocol = { path = "../protocol" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+quick-xml = { version = "0.36", features = ["serialize"] }
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
