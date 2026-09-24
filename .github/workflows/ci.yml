@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 # One agent push supersedes the previous one instead of racing it. Before
 # this, every push queued another full build and nothing cancelled the run
 # it had just obsoleted, so a five-push fix session burned five builds and
@@ -18,7 +21,9 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Install system dependencies
         run: |
@@ -26,9 +31,9 @@ jobs:
           sudo apt-get install -y libwayland-dev libxkbcommon-dev pkg-config
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Build workspace
         run: cargo build --workspace --all-targets
