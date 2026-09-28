@@ -1,25 +1,25 @@
 # windowcast
 
-A protocol + SDK for streaming application **windows** — not necessarily a
-whole desktop — from a host to a client. Many streams, of possibly
-different backends, can be live at once: windowcast's own per-window
-WebRTC capture for ordinary windows, with individual streams handed off to
-other embedded protocol libraries (GameStream/Moonlight today; RDP/VNC/etc.
-are anticipated, not yet built) when a different protocol suits that
-particular stream better — see [`StreamBackend`](protocol/src/lib.rs). PAKE-
-bootstrapped device pairing and directory-issued account credentials, and
-pluggable host-capture agents per OS. GPL-3.0.
+A protocol and SDK for streaming application **windows** — not necessarily
+a whole desktop — from a host to a client. Several streams can be live at
+once, possibly on different backends: windowcast's own per-window WebRTC
+capture for ordinary windows, handing an individual stream off to another
+embedded protocol library (GameStream/Moonlight today; RDP/VNC and others
+are anticipated but not built) when a different protocol suits that stream
+better — see [`StreamBackend`](protocol/src/lib.rs). It has PAKE-bootstrapped
+device pairing, directory-issued account credentials, and pluggable
+host-capture agents per OS. GPL-3.0.
 
-Built as the reusable core behind [droidtop](https://github.com/bi0shacker001/droidtop)'s
-remote-window streaming feature, but deliberately kept droidtop-agnostic —
-the goal is a library other projects (VR streaming, general remote desktop)
-can embed too, not a droidtop-only feature that happens to live in its own
-repo.
+I built this as the reusable core behind
+[droidtop](https://github.com/bi0shacker001/droidtop)'s remote-window
+streaming feature, but kept it droidtop-agnostic on purpose — the goal is
+a library other projects (VR streaming, general remote desktop) can embed
+too, not a droidtop-only feature that happens to live in its own repo.
 
-Real NoMachine's NX protocol is closed-source, and the old open NX/X2Go
+NoMachine's real NX protocol is closed-source, and the old open NX/X2Go
 lineage only knows how to do this trick for X11. windowcast doesn't try to
 be protocol-compatible with either — it's a new, from-scratch design built
-on WebRTC for the reasons in **Design** below.
+on WebRTC, for the reasons under **Design** below.
 
 ## Status
 
