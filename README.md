@@ -11,7 +11,7 @@ device pairing, directory-issued account credentials, and pluggable
 host-capture agents per OS. GPL-3.0.
 
 I built this as the reusable core behind
-[droidtop](https://github.com/bi0shacker001/droidtop)'s remote-window
+[droidtop](https://github.com/Droidtop/droidtop)'s remote-window
 streaming feature, but kept it droidtop-agnostic on purpose — the goal is
 a library other projects (VR streaming, general remote desktop) can embed
 too, not a droidtop-only feature that happens to live in its own repo.
