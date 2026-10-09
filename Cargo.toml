@@ -6,6 +6,7 @@ members = [
     "pairing",
     "directory",
     "apollo-client",
+    "rendezvous",
     "transport",
     "host-core",
     "client-core",
