@@ -1,14 +1,21 @@
 # windowcast
 
-A protocol and SDK for streaming application **windows** — not necessarily
-a whole desktop — from a host to a client. Several streams can be live at
-once, possibly on different backends: windowcast's own per-window WebRTC
-capture for ordinary windows, handing an individual stream off to another
-embedded protocol library (GameStream/Moonlight today; RDP/VNC and others
-are anticipated but not built) when a different protocol suits that stream
-better — see [`StreamBackend`](protocol/src/lib.rs). It has PAKE-bootstrapped
-device pairing, directory-issued account credentials, and pluggable
-host-capture agents per OS. GPL-3.0.
+A library for streaming application **windows** — not necessarily a
+whole desktop — from a host to a client, each window over the protocol
+that suits it: a text editor over RDP, a game over GameStream, a video
+player by passing its already-encoded video through, everything else over
+windowcast's own per-window WebRTC tracks. Several streams can be live at
+once, each on its own backend. It has PAKE-bootstrapped device pairing,
+directory-issued account credentials, and host agents per OS. GPL-3.0.
+
+**The shape.** windowcast is one library we write: protocol, pairing and
+identity, every backend, codecs and input. Host agents and clients are
+thin implementations of it on each end, and clients use it only through
+`client-core`'s C interface. The GameStream, RDP and media backends are
+our own implementations of those protocols inside the library, not
+wrappers around other projects' clients. See
+[`docs/BACKENDS.md`](docs/BACKENDS.md) for the backends and how a window's
+backend is chosen.
 
 I built this as the reusable core behind
 [droidtop](https://github.com/Droidtop/droidtop)'s remote-window
@@ -28,26 +35,28 @@ Early — see the crate-by-crate breakdown. The security-critical pieces
 connect for real: a client pairs with a host by PIN (or resumes with
 pinned identities), the offer and answer are authenticated end to end
 over an untrusted signaling stream, and the host can attach and detach
-per-window H.264 video tracks that the client receives as whole frames;
-loopback tests run all of it between two real WebRTC stacks. What's
-**not** done yet: any real capture or encoder feeding those tracks (the
-Linux agent lists windows but cannot capture them — see
+per-window video tracks in H.264, H.265 or AV1 that the client receives
+as whole frames. Two peers on the same device connect over loopback even
+with no network. Loopback tests run all of it between two real WebRTC
+stacks. What's **not** done yet: any real capture or encoder feeding
+those tracks (the Linux agent lists windows but cannot capture them — see
 `agent-linux/src/capture.rs`; there is no Windows or macOS agent),
-client-side decode, input, and audio.
+client-side decode, input, audio, and every backend except the native one
+(their seam is in place: see docs/BACKENDS.md).
 
 | Crate | Status |
 |---|---|
-| `protocol` | Real, tested (message schema + codec + version check) |
+| `protocol` | Real, tested (message schema + codec + version check; backend selection rules in `selection`) |
 | `identity` | Real, tested (persistent Ed25519 identity, pinned-peer trust store) |
 | `pairing` | Real, tested (SPAKE2 PAKE + HKDF + HMAC fingerprint authentication) — the *device* credential |
 | `directory` | Real, tested (accounts, Argon2 password hashing, PASETO v4.public session certificates) — the *account* credential |
-| `apollo-client` | Real, tested `serverinfo` client + `applist` XML parser for a local Sunshine/Apollo host; the authenticated fetch itself needs `windowcast-moonlight` (not started) |
-| `transport` | Real, tested: authenticated offer/answer signaling over any byte stream (`signaling::connect`/`accept`), the control data channel, per-window H.264 tracks with renegotiation over the control channel, keyframe requests, TURN relay wiring (`Session::with_relay`) |
-| `client-core` | FFI skeleton (session create/free, fingerprint extraction); does not expose signaling or frames yet |
+| `apollo-client` | Real, tested `serverinfo` client + `applist` XML parser for a local Sunshine/Apollo host; the authenticated fetch needs the GameStream backend's pairing (not started) |
+| `transport` | Real, tested (webrtc-rs 0.21): authenticated offer/answer signaling over any byte stream (`signaling::connect`/`accept`), the control data channel, per-window H.264/H.265/AV1 tracks with renegotiation over the control channel, keyframe requests, loopback candidates for same-device sessions, TURN relay wiring (`Session::with_relay`) |
+| `client-core` | FFI skeleton (session create/free); does not expose signaling or frames yet |
 | `agent-linux` | Serves clients over TCP (PIN pairing, then pinned resume) and answers window lists from a real compositor (`zwlr_foreign_toplevel_manager_v1`); capture is an explicit `NotImplemented` (needs `ext-image-copy-capture-v1`, not vendored yet) |
 | `agent-windows` | Not started |
 | `agent-macos` | Not started |
-| `windowcast-moonlight` | Not started — the actual GameStream/Moonlight *streaming* client library (`StreamBackend::Moonlight`'s handoff target); pairing has to be ported from moonlight-android's real protocol (salted-PIN AES challenge/response), not guessed at |
+| GameStream, RDP, VNC, passthrough, whole-desktop backends | Not started; the seam is in `protocol` (`StreamBackend`, `selection`). Each is our own implementation of its protocol; GameStream pairing follows the real protocol's salted-PIN AES challenge/response, read from reference sources, not guessed at |
 | `cli-tools` | Reference client CLI: pairs with or resumes to a host agent and lists its windows |
 
 ## Design
@@ -79,6 +88,10 @@ One `PeerConnection` (one DTLS handshake) is shared per client<->host
 *session*; each open window is a separate track/data-channel within it, so
 opening or closing a window never repeats the expensive asymmetric
 handshake.
+
+Each session binds UDP on every interface and on 127.0.0.1, so a client
+and host on the same device (droidtop and its own desktop container)
+connect over loopback even with no network up.
 
 ## Building
 
