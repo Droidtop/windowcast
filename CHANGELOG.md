@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.10.0] - 2026-10-09
 
 ### Added
 - A window's sound streams with its picture. Windows hosts capture what the window's application plays, and only that (WASAPI process loopback, Windows 10 2004 and later; a browser's sound from its child processes too), and send it as Opus on an audio track of the session. The Windows client plays it (with a mute switch in the reference app), and the Android library and viewer play it with MediaCodec and AudioTrack. Clients get each window's Opus packets from client-core (`next_audio`, and `windowcast_session_next_audio` in the C interface).
