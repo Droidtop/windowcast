@@ -1,0 +1,48 @@
+[package]
+name = "windowcast-agent-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "windowcast-agent-windows"
+path = "src/main.rs"
+
+[dependencies]
+windowcast-protocol = { path = "../protocol" }
+windowcast-host = { path = "../host-core" }
+tokio.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Software H.264 fallback encoder (BSD-2-Clause, built from source).
+openh264 = "0.9"
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Graphics",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(windows)'.dev-dependencies]
+tokio = { workspace = true, features = ["net"] }
+windowcast-client-core = { path = "../client-core" }
+windowcast-identity = { path = "../identity" }
+windowcast-cli-tools = { path = "../cli-tools" }
