@@ -1,11 +1,11 @@
 //! Reusable client SDK, exposed as a small C ABI so any embedder (droidtop
 //! via JNI, a future desktop client, a VR runtime) can link against it
 //! without depending on Rust directly. Deliberately minimal today: it
-//! stands up a session and exposes the raw control-channel + fingerprint
-//! primitives pairing needs, but does NOT yet do full SDP offer/answer
-//! signaling, per-window video-track attach, or decoded-frame delivery —
-//! those are real, separately-scoped follow-up work (see the project
-//! plan's v1 phasing), not silently missing pieces pretending to be done.
+//! stands up a session and exposes the local fingerprint. The transport
+//! underneath already signals, pairs and receives per-window frames
+//! (`windowcast_transport::signaling`, `RemoteWindow`); exposing those
+//! through this C ABI, and decoding the frames, is the next piece of work,
+//! not something silently missing.
 
 use std::ffi::c_void;
 use std::os::raw::c_int;

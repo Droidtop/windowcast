@@ -51,6 +51,36 @@ password-guessing oracle). A wrong PIN instead makes both sides derive
 actually detects and fails on that. Skipping that step defeats the whole
 design.
 
+## How the descriptions are authenticated on the wire
+
+`windowcast-transport::signaling` implements the two sections above and
+the next one as one exchange over any byte stream (a LAN TCP socket today):
+
+1. Both sides send `Hello`: protocol version, persistent Ed25519 public
+   key, a fresh 32-byte nonce, and the client's mode (`Pair` or `Resume`).
+2. `Pair` only: one SPAKE2 message each way, seeded with the PIN.
+3. The client's offer and the host's answer are each signed with the
+   sender's identity key over a transcript of: a domain label, the
+   description kind, the mode, both nonces, both public keys, and the
+   **complete SDP**. While pairing, each is also HMAC-SHA256-tagged with
+   the PIN-derived key over the same transcript.
+
+Authenticating the whole SDP rather than just the fingerprint line also
+covers the ICE credentials and the media sections, so nothing in a
+description can be swapped. The HMAC tag is what ties both public keys to
+the PIN (only someone who knew the PIN can produce it over a transcript
+naming their key); the signature proves the sender holds that key. On
+`Resume` there is no tag, and the signer must already be pinned. The
+nonces make every transcript unique, so a recorded exchange cannot be
+replayed. webrtc's DTLS handshake then refuses any certificate whose
+fingerprint differs from the one in the authenticated SDP.
+
+A host that fails any check sends one generic "authentication failed"
+and closes, so each wrong PIN costs a guesser a full connection, and the
+reference agent withdraws its PIN after three failures. After the
+connection is up, renegotiation (adding or removing a window track) rides
+the control data channel inside the already-authenticated DTLS session.
+
 ## Device credential, every connection after the first: pinned Ed25519 identity
 
 During that first PAKE-authenticated pairing, client and host each

@@ -24,13 +24,16 @@ on WebRTC, for the reasons under **Design** below.
 ## Status
 
 Early — see the crate-by-crate breakdown. The security-critical pieces
-(identity, pairing, protocol codec) are real and tested. The session
-transport stands up a real WebRTC `PeerConnection` and extracts a real
-local DTLS fingerprint. What's **not** done yet: SDP offer/answer signaling
-between two live peers, per-window video track attach, and the Linux
-agent's actual capture pipeline (window *listing* works today; window
-*capture* does not — see `agent-linux/src/capture.rs`). Windows and macOS
-agents don't exist yet at all.
+(identity, pairing, protocol codec) are real and tested. Two peers now
+connect for real: a client pairs with a host by PIN (or resumes with
+pinned identities), the offer and answer are authenticated end to end
+over an untrusted signaling stream, and the host can attach and detach
+per-window H.264 video tracks that the client receives as whole frames;
+loopback tests run all of it between two real WebRTC stacks. What's
+**not** done yet: any real capture or encoder feeding those tracks (the
+Linux agent lists windows but cannot capture them — see
+`agent-linux/src/capture.rs`; there is no Windows or macOS agent),
+client-side decode, input, and audio.
 
 | Crate | Status |
 |---|---|
@@ -39,13 +42,13 @@ agents don't exist yet at all.
 | `pairing` | Real, tested (SPAKE2 PAKE + HKDF + HMAC fingerprint authentication) — the *device* credential |
 | `directory` | Real, tested (accounts, Argon2 password hashing, PASETO v4.public session certificates) — the *account* credential |
 | `apollo-client` | Real, tested `serverinfo` client + `applist` XML parser for a local Sunshine/Apollo host; the authenticated fetch itself needs `windowcast-moonlight` (not started) |
-| `transport` | Real WebRTC session/fingerprint plumbing + TURN relay wiring (`Session::with_relay`); SDP signaling and per-window tracks not wired yet |
-| `client-core` | FFI skeleton (session create/free, fingerprint extraction); frame delivery not wired yet |
-| `agent-linux` | Toplevel listing works against a real compositor (`zwlr_foreign_toplevel_manager_v1`); capture is an explicit `NotImplemented` (needs `ext-image-copy-capture-v1`, not vendored yet) |
+| `transport` | Real, tested: authenticated offer/answer signaling over any byte stream (`signaling::connect`/`accept`), the control data channel, per-window H.264 tracks with renegotiation over the control channel, keyframe requests, TURN relay wiring (`Session::with_relay`) |
+| `client-core` | FFI skeleton (session create/free, fingerprint extraction); does not expose signaling or frames yet |
+| `agent-linux` | Serves clients over TCP (PIN pairing, then pinned resume) and answers window lists from a real compositor (`zwlr_foreign_toplevel_manager_v1`); capture is an explicit `NotImplemented` (needs `ext-image-copy-capture-v1`, not vendored yet) |
 | `agent-windows` | Not started |
 | `agent-macos` | Not started |
 | `windowcast-moonlight` | Not started — the actual GameStream/Moonlight *streaming* client library (`StreamBackend::Moonlight`'s handoff target); pairing has to be ported from moonlight-android's real protocol (salted-PIN AES challenge/response), not guessed at |
-| `cli-tools` | Reference client CLI; demonstrates identity + transport end to end locally |
+| `cli-tools` | Reference client CLI: pairs with or resumes to a host agent and lists its windows |
 
 ## Design
 
