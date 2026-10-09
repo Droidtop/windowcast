@@ -97,6 +97,22 @@ Java_dev_windowcast_Native_stopWindow(JNIEnv *env, jclass cls, jlong session, jl
     return windowcast_session_stop_window(SESSION(session), (uint64_t)window);
 }
 
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_sendInput(JNIEnv *env, jclass cls, jlong session, jstring json) {
+    const char *chars = (*env)->GetStringUTFChars(env, json, NULL);
+    int64_t result = windowcast_session_send_input(SESSION(session), chars);
+    (*env)->ReleaseStringUTFChars(env, json, chars);
+    return result;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_setClipboard(JNIEnv *env, jclass cls, jlong session, jstring text) {
+    const char *chars = (*env)->GetStringUTFChars(env, text, NULL);
+    int64_t result = windowcast_session_set_clipboard(SESSION(session), chars);
+    (*env)->ReleaseStringUTFChars(env, text, chars);
+    return result;
+}
+
 /* The next event as a JSON string, or null on timeout. */
 JNIEXPORT jstring JNICALL
 Java_dev_windowcast_Native_nextEvent(JNIEnv *env, jclass cls, jlong session, jint timeout_ms) {

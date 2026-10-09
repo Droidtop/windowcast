@@ -24,6 +24,13 @@ import dev.windowcast.WindowDecoder
 import dev.windowcast.WindowInfo
 import dev.windowcast.WindowcastClient
 import dev.windowcast.WindowcastSession
+import dev.windowcast.Gamepads
+import dev.windowcast.Input
+import dev.windowcast.Keys
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.view.KeyEvent
+import android.view.MotionEvent
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -35,6 +42,12 @@ import java.util.concurrent.Executors
 class MainActivity : Activity() {
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
+    /** Input goes out in order, off the main thread. */
+    private val inputWorker = Executors.newSingleThreadExecutor()
+    private val gamepads = Gamepads { send(it) }
+    private lateinit var clipboard: ClipboardManager
+    /** The last text the host put on the clipboard, so it is not sent back. */
+    private var fromHost: String? = null
 
     private lateinit var address: EditText
     private lateinit var pin: EditText
@@ -83,7 +96,16 @@ class MainActivity : Activity() {
             addView(status, MATCH_PARENT, WRAP_CONTENT)
             addView(list, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         }
-        surface = SurfaceView(this).apply { visibility = View.GONE }
+        surface = SurfaceView(this).apply {
+            visibility = View.GONE
+            setOnTouchListener { view, event -> touch(view, event) }
+        }
+        clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.addPrimaryClipChangedListener {
+            val text = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()
+            val s = session
+            if (text != null && text != fromHost && s != null) inputWorker.execute { s.setClipboard(text) }
+        }
         setContentView(FrameLayout(this).apply {
             addView(form, MATCH_PARENT, MATCH_PARENT)
             addView(surface, MATCH_PARENT, MATCH_PARENT)
@@ -121,6 +143,10 @@ class MainActivity : Activity() {
                     is Event.StreamStarted -> main.post { startDecoding(event) }
                     is Event.StreamRefused -> main.post { status.text = "Refused: ${event.reason}"; showForm() }
                     is Event.StreamStopped -> main.post { stopDecoding() }
+                    is Event.Clipboard -> main.post {
+                        fromHost = event.text
+                        clipboard.setPrimaryClip(ClipData.newPlainText("windowcast", event.text))
+                    }
                     is Event.Closed -> {
                         main.post { status.text = "Disconnected"; stopDecoding() }
                         break
@@ -180,7 +206,50 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun streaming(): Boolean = surface.visibility == View.VISIBLE && watching != null
+
+    private fun send(input: Input) {
+        val s = session ?: return
+        inputWorker.execute { s.send(input) }
+    }
+
+    /** Every finger, as touches on the streamed window. */
+    private fun touch(view: View, event: MotionEvent): Boolean {
+        val window = watching?.id ?: return false
+        fun put(index: Int, phase: Input.Touch) {
+            val x = event.getX(index) / view.width.coerceAtLeast(1)
+            val y = event.getY(index) / view.height.coerceAtLeast(1)
+            send(Input.touch(window, event.getPointerId(index), x, y, phase))
+        }
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> put(event.actionIndex, Input.Touch.Start)
+            MotionEvent.ACTION_MOVE -> for (i in 0 until event.pointerCount) put(i, Input.Touch.Move)
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> put(event.actionIndex, Input.Touch.End)
+            MotionEvent.ACTION_CANCEL -> for (i in 0 until event.pointerCount) put(i, Input.Touch.Cancel)
+        }
+        return true
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (!streaming() || event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
+        if (gamepads.onKey(event)) return true
+        val down = event.action == KeyEvent.ACTION_DOWN
+        val evdev = Keys.evdev(event.keyCode)
+        when {
+            evdev != null -> if (event.repeatCount == 0) send(Input.key(evdev, down))
+            down && event.unicodeChar != 0 -> send(Input.text(String(Character.toChars(event.unicodeChar))))
+            else -> return super.dispatchKeyEvent(event)
+        }
+        return true
+    }
+
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (streaming() && gamepads.onMotion(event)) return true
+        return super.dispatchGenericMotionEvent(event)
+    }
+
     private fun stopDecoding() {
+        gamepads.releaseAll()
         decoder?.let { d -> worker.execute { d.stop() } }
         decoder = null
         showForm()
@@ -204,6 +273,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        inputWorker.shutdown()
         listening = false
         decoder?.stop()
         session?.close()

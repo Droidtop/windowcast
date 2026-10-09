@@ -25,6 +25,8 @@ internal object Native {
     @JvmStatic external fun requestWindows(session: Long): Long
     @JvmStatic external fun startWindow(session: Long, window: Long, codecs: IntArray): Long
     @JvmStatic external fun stopWindow(session: Long, window: Long): Long
+    @JvmStatic external fun sendInput(session: Long, json: String): Long
+    @JvmStatic external fun setClipboard(session: Long, text: String): Long
     @JvmStatic external fun nextEvent(session: Long, timeoutMs: Int): String?
     @JvmStatic external fun nextFrame(
         session: Long,
