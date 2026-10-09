@@ -4,12 +4,15 @@
 //! [`run`]; this crate does the rest: listening, pairing by PIN and the
 //! PIN lockout, the trusted-client list, answering window lists, choosing
 //! each stream's backend and codec, attaching window tracks and feeding
-//! them frames, and keyframe requests.
+//! them frames, and keyframe requests. A host application watches and
+//! steers a running host through [`HostControl`]: the PIN, the trusted
+//! clients, who is connected and what each stream is doing.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::net::{TcpListener, TcpStream};
@@ -20,7 +23,9 @@ use windowcast_protocol::{
     BackendKind, ControlMessage, InputEvent, StreamBackend, StreamOptions, StreamTarget,
     VideoCodec, WindowId, WindowInfo,
 };
-use windowcast_transport::{accept, HostCredential, Session, TransportError, WindowTrack};
+use windowcast_transport::{
+    accept, is_keyframe, HostCredential, Session, TransportError, WindowTrack,
+};
 
 /// The default signaling address.
 pub const DEFAULT_LISTEN: &str = "0.0.0.0:47100";
@@ -62,6 +67,17 @@ pub trait WindowSource: Send + Sync + 'static {
     /// passed to the client as the refusal reason.
     fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String>;
 
+    /// The desktop backend: `window` cut out of a capture of the whole
+    /// screen it is on, so whatever covers it shows too. Only asked of
+    /// hosts that list [`BackendKind::Desktop`] in [`Self::backends`].
+    fn open_desktop(
+        &self,
+        _window: WindowId,
+        _codec: VideoCodec,
+    ) -> Result<Box<dyn FrameSource>, String> {
+        Err("this host does not capture whole screens".into())
+    }
+
     /// Delivers one input event. `focus` is the session's input focus: the
     /// last streamed window an event named, where keys, text and gamepads
     /// go. Called on the session's input thread, in order.
@@ -83,6 +99,12 @@ pub trait FrameSource: Send {
     /// `keyframe` set, that frame must be a keyframe with its parameter
     /// sets. `None` ends the stream (the window closed).
     fn next_frame(&mut self, keyframe: bool) -> Option<EncodedFrame>;
+
+    /// The encoder in use, for people watching the host (e.g. "NVIDIA
+    /// HEVC Encoder MFT"). Asked again whenever the picture size changes.
+    fn describe(&self) -> String {
+        String::new()
+    }
 }
 
 pub struct HostConfig {
@@ -122,6 +144,15 @@ impl Pairing {
         self.pin.lock().await.clone()
     }
 
+    /// Shows a new PIN, replacing any current one.
+    async fn reopen(&self) -> String {
+        let pin = windowcast_pairing::generate_pin();
+        show_pin(&pin);
+        *self.pin.lock().await = Some(pin.clone());
+        self.failures.store(0, Ordering::SeqCst);
+        pin
+    }
+
     async fn paired(&self) {
         *self.pin.lock().await = None;
         self.failures.store(0, Ordering::SeqCst);
@@ -158,11 +189,149 @@ fn show_pin(pin: &str) {
     println!("pairing PIN (enter this on the client): {pin}");
 }
 
-struct Host {
+/// A connected client, as a host application shows it.
+#[derive(Debug, Clone)]
+pub struct ClientStatus {
+    pub peer: PeerId,
+    pub address: String,
+    pub since: Instant,
+}
+
+/// One live stream and its counters since it started. Rates are the
+/// watcher's to work out: sample twice and divide by the time between.
+#[derive(Debug, Clone)]
+pub struct StreamStatus {
+    pub peer: PeerId,
+    pub window: WindowId,
+    /// The backend the client asked for.
+    pub requested: BackendKind,
+    /// The backend serving it.
+    pub backend: BackendKind,
+    pub codec: VideoCodec,
+    /// [`FrameSource::describe`].
+    pub encoder: String,
+    pub size: Option<(u32, u32)>,
+    pub frames: u64,
+    pub keyframes: u64,
+    pub bytes: u64,
+    /// Keyframes the client asked for (lost packets, a decoder behind).
+    pub keyframe_requests: u64,
+    pub since: Instant,
+}
+
+/// A running host, seen and steered by the application around it: its
+/// identity, the pairing PIN, the clients it trusts, who is connected and
+/// what each stream is doing. [`run`] and [`serve`] make one of their own;
+/// an application opens one with [`HostControl::open`] and passes it to
+/// [`serve_with`].
+pub struct HostControl {
     identity: Identity,
     trust: Mutex<TrustStore>,
     trust_path: PathBuf,
     pairing: Arc<Pairing>,
+    clients: std::sync::Mutex<HashMap<u64, ClientStatus>>,
+    streams: std::sync::Mutex<HashMap<u64, StreamStatus>>,
+    serial: AtomicU64,
+}
+
+impl HostControl {
+    /// Loads (or creates) the host's identity and trusted-client list from
+    /// `config.data_dir`, and opens pairing if `config.pairing` says so.
+    pub fn open(config: &HostConfig) -> std::io::Result<Arc<Self>> {
+        std::fs::create_dir_all(&config.data_dir)?;
+        let identity = Identity::load_or_generate(&config.data_dir.join("agent-identity.key"))
+            .map_err(std::io::Error::other)?;
+        let trust_path = config.data_dir.join("agent-trusted-clients");
+        let trust = TrustStore::load(&trust_path).map_err(std::io::Error::other)?;
+        println!("host identity: {}", identity.peer_id());
+        Ok(Arc::new(HostControl {
+            identity,
+            trust: Mutex::new(trust),
+            trust_path,
+            pairing: Pairing::new(config.pairing),
+            clients: Default::default(),
+            streams: Default::default(),
+            serial: AtomicU64::new(1),
+        }))
+    }
+
+    pub fn peer_id(&self) -> PeerId {
+        self.identity.peer_id()
+    }
+
+    /// The PIN a new client pairs with; `None` while pairing is closed.
+    pub async fn pin(&self) -> Option<String> {
+        self.pairing.current().await
+    }
+
+    /// Opens pairing with a new PIN (replacing any current one).
+    pub async fn open_pairing(&self) -> String {
+        self.pairing.reopen().await
+    }
+
+    /// Closes pairing: only clients paired earlier can connect.
+    pub async fn close_pairing(&self) {
+        self.pairing.paired().await;
+    }
+
+    /// The clients this host trusts.
+    pub async fn trusted(&self) -> Vec<PeerId> {
+        self.trust.lock().await.peers().copied().collect()
+    }
+
+    /// Stops trusting `peer`: it has to pair again. A session it has open
+    /// now is not cut.
+    pub async fn forget(&self, peer: &PeerId) -> std::io::Result<()> {
+        let mut trust = self.trust.lock().await;
+        trust.revoke(peer);
+        trust.save(&self.trust_path).map_err(std::io::Error::other)
+    }
+
+    /// The clients connected now.
+    pub fn clients(&self) -> Vec<ClientStatus> {
+        self.clients
+            .lock()
+            .expect("clients")
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// The streams live now.
+    pub fn streams(&self) -> Vec<StreamStatus> {
+        self.streams
+            .lock()
+            .expect("streams")
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn next_serial(&self) -> u64 {
+        self.serial.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn update_stream(&self, serial: u64, update: impl FnOnce(&mut StreamStatus)) {
+        if let Some(status) = self.streams.lock().expect("streams").get_mut(&serial) {
+            update(status);
+        }
+    }
+}
+
+/// Removes a status entry when its session or stream ends, however it ends.
+struct Listed<'a> {
+    map: &'a std::sync::Mutex<HashMap<u64, ClientStatus>>,
+    serial: u64,
+}
+
+impl Drop for Listed<'_> {
+    fn drop(&mut self) {
+        self.map.lock().expect("clients").remove(&self.serial);
+    }
+}
+
+struct Host {
+    control: Arc<HostControl>,
     source: Arc<dyn WindowSource>,
 }
 
@@ -179,21 +348,18 @@ pub async fn serve(
     config: HostConfig,
     source: Arc<dyn WindowSource>,
 ) -> std::io::Result<()> {
-    std::fs::create_dir_all(&config.data_dir)?;
-    let identity = Identity::load_or_generate(&config.data_dir.join("agent-identity.key"))
-        .map_err(std::io::Error::other)?;
-    let trust_path = config.data_dir.join("agent-trusted-clients");
-    let trust = TrustStore::load(&trust_path).map_err(std::io::Error::other)?;
-    println!("host identity: {}", identity.peer_id());
+    let control = HostControl::open(&config)?;
+    serve_with(listener, control, source).await
+}
 
-    let host = Arc::new(Host {
-        identity,
-        trust: Mutex::new(trust),
-        trust_path,
-        pairing: Pairing::new(config.pairing),
-        source,
-    });
-
+/// Runs a host on an already bound listener, watched and steered through
+/// `control`.
+pub async fn serve_with(
+    listener: TcpListener,
+    control: Arc<HostControl>,
+    source: Arc<dyn WindowSource>,
+) -> std::io::Result<()> {
+    let host = Arc::new(Host { control, source });
     loop {
         let (stream, address) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -204,11 +370,11 @@ pub async fn serve(
         };
         let host = Arc::clone(&host);
         tokio::spawn(async move {
-            match host.serve(stream).await {
+            match host.serve(stream, address.to_string()).await {
                 Ok(()) | Err(TransportError::Closed) => println!("{address}: session ended"),
                 Err(TransportError::AuthenticationFailed) => {
                     eprintln!("{address}: authentication failed");
-                    host.pairing.failed().await;
+                    host.control.pairing.failed().await;
                 }
                 Err(e) => eprintln!("{address}: {e}"),
             }
@@ -256,13 +422,27 @@ impl Host {
         )
         .await?;
 
+        let peer = established.peer;
         if established.paired {
-            self.pairing.paired().await;
-            self.pin_client(established.peer).await;
-            println!("paired with {}; pairing is now closed", established.peer);
+            control.pairing.paired().await;
+            self.pin_client(peer).await;
+            println!("paired with {peer}; pairing is now closed");
         } else {
-            println!("{} connected", established.peer);
+            println!("{peer} connected");
         }
+        let serial = control.next_serial();
+        control.clients.lock().expect("clients").insert(
+            serial,
+            ClientStatus {
+                peer,
+                address,
+                since: Instant::now(),
+            },
+        );
+        let _listed = Listed {
+            map: &control.clients,
+            serial,
+        };
 
         let session = Arc::new(established.session);
         let mut streams = std::collections::HashMap::<WindowId, Stream>::new();
@@ -306,15 +486,13 @@ impl Host {
                     target: StreamTarget::Window(window),
                     options,
                 } => {
-                    let response = match self.start(&session, window, &options).await {
-                        Ok((stream, track)) => {
+                    let response = match self.start(&session, peer, window, &options).await {
+                        Ok((stream, track, backend)) => {
                             streams.insert(window, stream);
                             ControlMessage::StreamStartResponse {
                                 target: StreamTarget::Window(window),
                                 accepted: true,
-                                backend: StreamBackend::Native {
-                                    codec: track.codec(),
-                                },
+                                backend,
                                 track_id: Some(track.track_id()),
                                 handoff: None,
                                 reason: None,
@@ -353,9 +531,9 @@ impl Host {
     }
 
     async fn pin_client(&self, peer: PeerId) {
-        let mut trust = self.trust.lock().await;
+        let mut trust = self.control.trust.lock().await;
         trust.pin(peer);
-        if let Err(e) = trust.save(&self.trust_path) {
+        if let Err(e) = trust.save(&self.control.trust_path) {
             eprintln!("could not save the trusted-client list: {e}");
         }
     }
@@ -365,15 +543,14 @@ impl Host {
     async fn start(
         self: &Arc<Self>,
         session: &Arc<Session>,
+        peer: PeerId,
         window: WindowId,
         options: &StreamOptions,
-    ) -> Result<(Stream, WindowTrack), String> {
-        // Every backend but native is a seam for now (docs/BACKENDS.md);
-        // whatever the client asked for, this host serves native.
-        let backend = selection::serve(options.backend, &self.source.backends());
-        if backend != BackendKind::Native {
-            return Err(format!("{backend:?} is not built yet"));
-        }
+    ) -> Result<(Stream, WindowTrack, StreamBackend), String> {
+        // Of the backends the client may ask for, the session-track ones
+        // are served here; one this host does not offer falls back to
+        // native (docs/BACKENDS.md).
+        let kind = selection::serve(options.backend, &self.source.backends());
         let encoders = self.source.encoders();
         let codec = options
             .codecs
@@ -381,24 +558,52 @@ impl Host {
             .copied()
             .find(|codec| encoders.contains(codec))
             .ok_or_else(|| "no codec both sides support".to_owned())?;
+        let backend = match kind {
+            BackendKind::Native => StreamBackend::Native { codec },
+            BackendKind::Desktop => StreamBackend::Desktop { codec },
+            other => return Err(format!("{other:?} is not built yet")),
+        };
 
         let source = Arc::clone(&self.source);
-        let frames = tokio::task::spawn_blocking(move || source.open(window, codec))
-            .await
-            .map_err(|e| e.to_string())??;
+        let frames = tokio::task::spawn_blocking(move || match kind {
+            BackendKind::Desktop => source.open_desktop(window, codec),
+            _ => source.open(window, codec),
+        })
+        .await
+        .map_err(|e| e.to_string())??;
         let track = session
             .attach_window(window, codec)
             .await
             .map_err(|e| e.to_string())?;
 
+        let serial = self.control.next_serial();
+        self.control.streams.lock().expect("streams").insert(
+            serial,
+            StreamStatus {
+                peer,
+                window,
+                requested: options.backend,
+                backend: kind,
+                codec,
+                encoder: String::new(),
+                size: None,
+                frames: 0,
+                keyframes: 0,
+                bytes: 0,
+                keyframe_requests: 0,
+                since: Instant::now(),
+            },
+        );
         let stop = Arc::new(AtomicBool::new(false));
         feed(
             Arc::clone(session),
             track.clone(),
             frames,
             Arc::clone(&stop),
+            Arc::clone(&self.control),
+            serial,
         );
-        Ok((Stream { stop }, track))
+        Ok((Stream { stop }, track, backend))
     }
 }
 
@@ -479,17 +684,22 @@ fn feed(
     track: WindowTrack,
     mut frames: Box<dyn FrameSource>,
     stop: Arc<AtomicBool>,
+    control: Arc<HostControl>,
+    serial: u64,
 ) {
     // The first frame is always a keyframe.
     let want_keyframe = Arc::new(AtomicBool::new(true));
     let requests = track.clone();
     let flag = Arc::clone(&want_keyframe);
+    let watched = Arc::clone(&control);
     let watcher = tokio::spawn(async move {
         loop {
             requests.keyframe_requested().await;
             flag.store(true, Ordering::SeqCst);
+            watched.update_stream(serial, |status| status.keyframe_requests += 1);
         }
     });
+    let codec = track.codec();
 
     let runtime = tokio::runtime::Handle::current();
     std::thread::spawn(move || {
@@ -508,7 +718,19 @@ fn feed(
                     height,
                 };
                 let _ = runtime.block_on(session.send_control(&resized));
+                let encoder = frames.describe();
+                control.update_stream(serial, |status| {
+                    status.size = Some((width, height));
+                    status.encoder = encoder;
+                });
             }
+            let key = is_keyframe(codec, &frame.data);
+            let bytes = frame.data.len() as u64;
+            control.update_stream(serial, |status| {
+                status.frames += 1;
+                status.bytes += bytes;
+                status.keyframes += u64::from(key);
+            });
             let written =
                 runtime.block_on(track.write_frame(Bytes::from(frame.data), frame.duration));
             if written.is_err() {
@@ -516,6 +738,7 @@ fn feed(
             }
         }
         watcher.abort();
+        control.streams.lock().expect("streams").remove(&serial);
         // A window that closed by itself is detached here; a stop request
         // was already detached by the session loop.
         if !stop.load(Ordering::SeqCst) {

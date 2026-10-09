@@ -158,6 +158,11 @@ impl TrustStore {
     pub fn is_pinned(&self, peer: &PeerId) -> bool {
         self.pinned.contains(peer)
     }
+
+    /// Every pinned peer, in no particular order.
+    pub fn peers(&self) -> impl Iterator<Item = &PeerId> {
+        self.pinned.iter()
+    }
 }
 
 #[cfg(test)]

@@ -418,7 +418,7 @@ impl RemoteWindow {
 
 /// Whether an access unit starts a decodable sequence: an IDR slice for
 /// H.264, an IRAP picture for H.265, a sequence header OBU for AV1.
-pub(crate) fn is_keyframe(codec: VideoCodec, data: &[u8]) -> bool {
+pub fn is_keyframe(codec: VideoCodec, data: &[u8]) -> bool {
     match codec {
         VideoCodec::H264 => annex_b_headers(data).any(|header| header & 0x1f == 5),
         VideoCodec::H265 => {
