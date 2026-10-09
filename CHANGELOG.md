@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-10-09
 
 ### Added
 - The reference application, `windowcast-app`: the minimal, complete demonstration of the library, a host, a client or both by its configuration, with a native window for each role. Pair by PIN, see the host's windows with what each shows and the backend the rules pick, set a backend per app, choose codec, encoder, frame rate and bitrate (changes reach running streams), switch input and clipboard sharing, watch live statistics, and keep paired hosts. Each streamed window opens in a window of its own, normal or fullscreen on a chosen display (F11 switches). `--connect HOST --stream APP` streams one window straight from the command line, and `--no-window` runs a host without its window. The host role is Windows-only for now.
