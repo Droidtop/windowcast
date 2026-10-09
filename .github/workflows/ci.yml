@@ -41,6 +41,14 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace
 
+      # Same-device sessions (droidtop and its own desktop container) must
+      # connect with no network up: run the two-peer tests again in a
+      # network namespace whose only interface is loopback.
+      - name: Loopback-only network
+        run: |
+          cargo test -p windowcast-transport --test loopback --no-run --message-format=json             | jq -r 'select(.profile.test == true and .target.name == "loopback") | .executable'             > loopback-test-path
+          sudo unshare -n sh -c "ip link set lo up && $(cat loopback-test-path)"
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
