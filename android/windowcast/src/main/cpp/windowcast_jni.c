@@ -165,3 +165,24 @@ Java_dev_windowcast_Native_nextAudio(JNIEnv *env, jclass cls, jlong session, jlo
     (*env)->SetIntArrayRegion(env, info, 0, 1, values);
     return len;
 }
+
+/* The microphone: start, one Opus packet from a direct buffer, stop. Each
+ * returns 0 or WINDOWCAST_ERROR. */
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_startMicrophone(JNIEnv *env, jclass cls, jlong session) {
+    return windowcast_session_start_microphone(SESSION(session));
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_sendMicrophone(JNIEnv *env, jclass cls, jlong session, jobject packet,
+                                          jint length) {
+    const uint8_t *data = (*env)->GetDirectBufferAddress(env, packet);
+    jlong cap = (*env)->GetDirectBufferCapacity(env, packet);
+    if (!data || length < 0 || length > cap) return WINDOWCAST_ERROR;
+    return windowcast_session_send_microphone(SESSION(session), data, (size_t)length);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_stopMicrophone(JNIEnv *env, jclass cls, jlong session) {
+    return windowcast_session_stop_microphone(SESSION(session));
+}

@@ -13,6 +13,7 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -28,6 +29,9 @@ import dev.windowcast.WindowcastSession
 import dev.windowcast.Gamepads
 import dev.windowcast.Input
 import dev.windowcast.Keys
+import dev.windowcast.Microphone
+import android.Manifest
+import android.content.pm.PackageManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.view.KeyEvent
@@ -56,6 +60,8 @@ class MainActivity : Activity() {
     private lateinit var list: ListView
     private lateinit var surface: SurfaceView
     private lateinit var form: LinearLayout
+    private lateinit var sendMicrophone: CheckBox
+    @Volatile private var microphone: Microphone? = null
 
     private var client: WindowcastClient? = null
     private var session: WindowcastSession? = null
@@ -87,6 +93,16 @@ class MainActivity : Activity() {
             }
         }
         status = TextView(this).apply { text = "Not connected" }
+        sendMicrophone = CheckBox(this).apply {
+            text = "Send my microphone to the host"
+            isEnabled = Microphone.available()
+            setOnCheckedChangeListener { _, on ->
+                if (!on) stopMicrophone()
+                else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), RECORD_REQUEST)
+                } else startMicrophone()
+            }
+        }
         list = ListView(this).apply {
             setOnItemClickListener { _, _, position, _ -> watch(windows[position]) }
         }
@@ -96,6 +112,7 @@ class MainActivity : Activity() {
             addView(address, MATCH_PARENT, WRAP_CONTENT)
             addView(pin, MATCH_PARENT, WRAP_CONTENT)
             addView(connect, MATCH_PARENT, WRAP_CONTENT)
+            addView(sendMicrophone, MATCH_PARENT, WRAP_CONTENT)
             addView(status, MATCH_PARENT, WRAP_CONTENT)
             addView(list, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         }
@@ -122,11 +139,13 @@ class MainActivity : Activity() {
         status.text = "Connecting to $address…"
         worker.execute {
             try {
+                stopMicrophone()
                 session?.close()
                 val s = client!!.connect(address, pin)
                 session = s
                 main.post {
                     status.text = (if (s.paired) "Paired with " else "Connected to ") + s.hostId.take(16) + "…"
+                    if (sendMicrophone.isChecked) startMicrophone()
                 }
                 listen(s)
                 s.requestWindows()
@@ -134,6 +153,29 @@ class MainActivity : Activity() {
                 main.post { status.text = "Could not connect: ${e.message}" }
             }
         }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        if (requestCode != RECORD_REQUEST) return
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) startMicrophone()
+        else {
+            sendMicrophone.isChecked = false
+            status.text = "The microphone needs permission to record"
+        }
+    }
+
+    /** Sends the microphone over the current session, if there is one. */
+    private fun startMicrophone() {
+        val s = session ?: return
+        if (microphone != null) return
+        microphone = Microphone(s).also { it.start() }
+    }
+
+    /** Stops sending; waits for the sender (at most one 20 ms frame) so the session can close after. */
+    private fun stopMicrophone() {
+        val m = microphone ?: return
+        microphone = null
+        m.stop()
     }
 
     /** Reads session events on their own thread. */
@@ -151,7 +193,7 @@ class MainActivity : Activity() {
                         clipboard.setPrimaryClip(ClipData.newPlainText("windowcast", event.text))
                     }
                     is Event.Closed -> {
-                        main.post { status.text = "Disconnected"; stopDecoding() }
+                        main.post { status.text = "Disconnected"; stopMicrophone(); stopDecoding() }
                         break
                     }
                     else -> {}
@@ -284,9 +326,14 @@ class MainActivity : Activity() {
         listening = false
         decoder?.stop()
         audio?.stop()
+        stopMicrophone()
         session?.close()
         client?.close()
         worker.shutdown()
         super.onDestroy()
+    }
+
+    companion object {
+        private const val RECORD_REQUEST = 1
     }
 }
