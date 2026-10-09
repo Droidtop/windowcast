@@ -5,8 +5,8 @@ whole desktop — from a host to a client, each window over the protocol
 that suits it: a text editor over RDP, a game over GameStream, a video
 player by passing its already-encoded video through, everything else over
 windowcast's own per-window WebRTC tracks. Several streams can be live at
-once, each on its own backend. It has PAKE-bootstrapped device pairing,
-directory-issued account credentials, and host agents per OS. GPL-3.0.
+once, each on its own backend. It has PAKE-bootstrapped device pairing
+and host agents per OS. GPL-3.0.
 
 **The shape.** windowcast is one library we write: protocol, pairing and
 identity, every backend, codecs and input. Host agents and clients are
@@ -86,7 +86,6 @@ docs/BACKENDS.md).
 | `protocol` | Real, tested (message schema + codec + version check; backend selection rules in `selection`) |
 | `identity` | Real, tested (persistent Ed25519 identity, pinned-peer trust store) |
 | `pairing` | Real, tested (SPAKE2 PAKE + HKDF + HMAC fingerprint authentication) — the *device* credential |
-| `directory` | Real, tested (accounts, Argon2 password hashing, PASETO v4.public session certificates) — the *account* credential |
 | `apollo-client` | Real, tested `serverinfo` client + `applist` XML parser for a local Sunshine/Apollo host; the authenticated fetch needs the GameStream backend's pairing (not started) |
 | `rendezvous` | Real, tested: finding a paired device away from the LAN the way Syncthing does (its global discovery, STUN, hole punching; addresses only, never data), shared with droidtop-agent |
 | `transport` | Real, tested (webrtc-rs 0.21): authenticated offer/answer signaling over any byte stream (`signaling::connect`/`accept`), the control data channel, per-window H.264/H.265/AV1 tracks with renegotiation over the control channel, keyframe requests, loopback candidates for same-device sessions; away from the LAN, signaling over a punched UDP stream (`punched`, `remote`) and ICE through the NATs (`Session::away`), with no relay |
@@ -108,23 +107,10 @@ model. Short version: WebRTC gives fast, hardware-accelerated AEAD media
 encryption (AES-128-GCM via DTLS-SRTP) for free, and handles NAT traversal
 and congestion control — but its DTLS handshake is only as trustworthy as
 whatever channel carries the SDP fingerprint exchange. windowcast closes
-that gap two ways, for two distinct credential types:
-
-- **Device credential** (`pairing` + `identity`) — a SPAKE2 PAKE seeded by
-  a PIN shown on the host authenticates the fingerprint exchange itself,
-  then a persistent pinned Ed25519 identity takes over for every later
-  reconnect. One specific device is the identity (Moonlight-style) — no
-  accounts involved.
-- **Account credential** (`directory`) — a person logs into a directory
-  server (password today, OIDC later); the directory mints a short-lived
-  certificate, signed by its own CA key, binding that login to the
-  session's ephemeral key. A host that trusts the directory's CA key
-  accepts any account it vouches for, without individually pinning every
-  user (RDP/RemoteApp-style) — the account, not the device, is the
-  identity, so the same person can connect from anywhere.
-
-Both feed the same fingerprint-authentication mechanism in `transport` —
-they differ in trust root, not in mechanism.
+that gap with its device credential (`pairing` + `identity`): a SPAKE2 PAKE
+seeded by a PIN shown on the host authenticates the fingerprint exchange
+itself, then a persistent pinned Ed25519 identity takes over for every
+later reconnect. One specific device is the identity (Moonlight-style).
 
 One `PeerConnection` (one DTLS handshake) is shared per client<->host
 *session*; each open window is a separate track/data-channel within it, so

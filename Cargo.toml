@@ -4,7 +4,6 @@ members = [
     "protocol",
     "identity",
     "pairing",
-    "directory",
     "apollo-client",
     "gamestream",
     "rendezvous",
