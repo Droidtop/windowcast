@@ -12,11 +12,8 @@ path = "src/main.rs"
 windowcast-protocol = { path = "../protocol" }
 windowcast-identity = { path = "../identity" }
 windowcast-pairing = { path = "../pairing" }
+windowcast-transport = { path = "../transport" }
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 thiserror.workspace = true
-
-# windowcast-transport (WebRTC session serving) and tokio are real
-# dependencies of the *next* piece of work here (wiring this agent up to
-# actually accept a session) — deliberately not added until main.rs
-# actually calls them, per "don't add for hypothetical future work."
+tokio = { workspace = true, features = ["net"] }
