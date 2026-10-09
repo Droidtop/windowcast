@@ -5,6 +5,7 @@
 //! yet — see `capture.rs` for exactly what's still missing and why.
 //!
 //! Usage: `windowcast-agent-linux [--listen ADDR:PORT] [--no-pairing]`
+//! (`--listen` defaults to 0.0.0.0:47100).
 
 mod capture;
 mod toplevels;
@@ -12,6 +13,7 @@ mod toplevels;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -22,8 +24,12 @@ use windowcast_transport::{accept, HostCredential, Session, TransportError};
 /// The agent's default signaling port.
 const DEFAULT_LISTEN: &str = "0.0.0.0:47100";
 
-/// Failed pairing attempts before the PIN is withdrawn.
+/// Failed pairing attempts before the PIN is withdrawn, and how long the
+/// agent waits before it shows a new one. SPAKE2 allows one PIN guess per
+/// connection; this caps the rate too, so a LAN peer cannot walk the PIN
+/// space (three guesses a minute at most).
 const MAX_PAIRING_FAILURES: u32 = 3;
+const PAIRING_LOCKOUT: Duration = Duration::from_secs(60);
 static PAIRING_FAILURES: AtomicU32 = AtomicU32::new(0);
 
 #[tokio::main]
@@ -81,25 +87,40 @@ async fn main() {
             match serve(stream, &identity, &trust, &pin, &trust_path).await {
                 Err(TransportError::AuthenticationFailed) => {
                     eprintln!("{address}: authentication failed");
-                    // SPAKE2 allows one PIN guess per connection; cap the
-                    // guesses too, instead of letting a LAN peer walk the
-                    // whole PIN space.
-                    let mut pin = pin.lock().await;
-                    if pin.is_some() {
-                        let failures = PAIRING_FAILURES.fetch_add(1, Ordering::SeqCst) + 1;
-                        if failures >= MAX_PAIRING_FAILURES {
-                            *pin = None;
-                            eprintln!(
-                                "pairing closed after {failures} failed attempts;                                  restart the agent for a new PIN"
-                            );
-                        }
-                    }
+                    pairing_failed(&pin).await;
                 }
+                Err(TransportError::Closed) => println!("{address}: session ended"),
                 Err(e) => eprintln!("{address}: {e}"),
                 Ok(()) => {}
             }
         });
     }
+}
+
+/// Counts a failed pairing; the third withdraws the PIN, and a new one is
+/// issued and shown after [`PAIRING_LOCKOUT`].
+async fn pairing_failed(pin: &Arc<Mutex<Option<String>>>) {
+    let mut current = pin.lock().await;
+    if current.is_none() {
+        return;
+    }
+    let failures = PAIRING_FAILURES.fetch_add(1, Ordering::SeqCst) + 1;
+    if failures < MAX_PAIRING_FAILURES {
+        return;
+    }
+    *current = None;
+    eprintln!(
+        "pairing paused after {failures} failed attempts; a new PIN follows in {} s",
+        PAIRING_LOCKOUT.as_secs()
+    );
+    let pin = Arc::clone(pin);
+    tokio::spawn(async move {
+        tokio::time::sleep(PAIRING_LOCKOUT).await;
+        let new_pin = windowcast_pairing::generate_pin();
+        println!("pairing PIN (enter this on the client): {new_pin}");
+        *pin.lock().await = Some(new_pin);
+        PAIRING_FAILURES.store(0, Ordering::SeqCst);
+    });
 }
 
 async fn serve(
