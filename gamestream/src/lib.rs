@@ -10,13 +10,23 @@
 //! - [`client`]: `serverinfo`, pairing, the app list, launch and quit over
 //!   HTTP and HTTPS with the host's certificate pinned.
 //! - [`server`]: a host's HTTP and HTTPS endpoints for Moonlight.
+//! - [`rtsp`], [`video`], [`control`]: the stream setup, the video packets
+//!   and the encrypted ENet control stream, both ends.
+//! - [`stream`]: a host's launched stream; [`windows`]: a windowcast host's
+//!   windows as the apps it offers.
 //!
-//! Streaming itself (RTSP, the video, audio and control streams) is next.
+//! Not yet: sound, input from the client, and our client's side of the
+//! stream (it pairs, lists and launches).
 
 pub mod client;
+pub mod control;
 pub mod crypto;
 pub mod pairing;
+pub mod rtsp;
 pub mod server;
+pub mod stream;
+pub mod video;
+pub mod windows;
 pub mod xml;
 
 #[derive(Debug, thiserror::Error)]
@@ -37,4 +47,6 @@ pub enum GameStreamError {
     NotPaired,
     #[error("i/o: {0}")]
     Io(#[from] std::io::Error),
+    #[error("rtsp: {0}")]
+    Rtsp(&'static str),
 }

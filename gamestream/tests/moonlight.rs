@@ -1,7 +1,7 @@
 //! Stock Moonlight (moonlight-qt, as Linux distributions package it)
 //! against windowcast's GameStream host: `moonlight pair` with a PIN,
-//! typed on our host as a person would, then `moonlight list` shows our
-//! apps. Needs moonlight-qt and a display for it (CI runs it under the
+//! typed on our host as a person would, `moonlight list` shows our apps,
+//! and `moonlight stream` plays the test pattern window. Needs moonlight-qt and a display for it (CI runs it under the
 //! headless sway), and the standard GameStream ports free; runs only with
 //! WINDOWCAST_TEST_MOONLIGHT set.
 
@@ -9,8 +9,9 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use windowcast_gamestream::client::App;
+use windowcast_cli_tools::testpattern::TestPatternSource;
 use windowcast_gamestream::server::{GameStreamServer, HTTPS_PORT};
+use windowcast_gamestream::windows::WindowApps;
 
 /// Runs moonlight with `args` until `done` says so (it is then given two
 /// seconds to finish) or `within` runs out, then ends it: `moonlight pair`
@@ -58,23 +59,11 @@ fn stock_moonlight_pairs_and_lists_our_apps() {
     let dir = std::env::temp_dir().join(format!("windowcast-gs-moonlight-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let runtime = tokio::runtime::Runtime::new().unwrap();
+    // The test pattern host's one window, as Moonlight's app.
     let server = GameStreamServer::open(
         "windowcast test host",
         &dir,
-        Box::new(|| {
-            vec![
-                App {
-                    id: 1,
-                    title: "Desktop".into(),
-                    hdr: false,
-                },
-                App {
-                    id: 42,
-                    title: "windowcast test pattern".into(),
-                    hdr: false,
-                },
-            ]
-        }),
+        Arc::new(WindowApps(Arc::new(TestPatternSource))),
     )
     .unwrap();
     let (http, https) = runtime.block_on(async {
@@ -87,7 +76,10 @@ fn stock_moonlight_pairs_and_lists_our_apps() {
                 .unwrap(),
         )
     });
-    runtime.spawn(Arc::clone(&server).serve(http, https));
+    let rtsp = runtime
+        .block_on(tokio::net::TcpListener::bind(("127.0.0.1", 48010)))
+        .unwrap();
+    runtime.spawn(Arc::clone(&server).serve(http, https, rtsp));
 
     // The person types the PIN Moonlight was given, here.
     let typist = {
@@ -125,6 +117,36 @@ fn stock_moonlight_pairs_and_lists_our_apps() {
     assert!(
         listed.contains("windowcast test pattern"),
         "our app is not listed"
+    );
+
+    // And streams it: Moonlight sets the stream up over RTSP, pings the
+    // video port, connects the control stream, and decodes what comes.
+    let streamed = moonlight(
+        &[
+            "stream",
+            "127.0.0.1",
+            "windowcast test pattern",
+            "--resolution",
+            "640x360",
+            "--fps",
+            "30",
+            "--video-codec",
+            "H.264",
+            "--video-decoder",
+            "software",
+            "--display-mode",
+            "windowed",
+        ],
+        Duration::from_secs(15),
+        || false,
+    );
+    assert!(
+        streamed.contains("Received first video packet"),
+        "no video reached Moonlight"
+    );
+    assert!(
+        !streamed.contains("Terminating connection"),
+        "Moonlight gave up on the stream"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

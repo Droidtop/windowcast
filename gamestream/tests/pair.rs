@@ -9,6 +9,7 @@ use std::time::Duration;
 use windowcast_gamestream::client::{App, GameStreamClient, Host};
 use windowcast_gamestream::crypto::Credentials;
 use windowcast_gamestream::server::GameStreamServer;
+use windowcast_gamestream::stream::{Apps, StreamConfig, VideoSource};
 use windowcast_gamestream::GameStreamError;
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -18,6 +19,25 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
     dir
 }
 
+/// Apps that can be listed but not streamed.
+struct Listed(Vec<(u32, &'static str)>);
+
+impl Apps for Listed {
+    fn apps(&self) -> Vec<App> {
+        self.0
+            .iter()
+            .map(|(id, title)| App {
+                id: *id,
+                title: (*title).into(),
+                hdr: false,
+            })
+            .collect()
+    }
+    fn open(&self, _: u32, _: &StreamConfig) -> Result<Box<dyn VideoSource>, String> {
+        Err("listing only".into())
+    }
+}
+
 #[test]
 fn a_client_pairs_and_lists_apps_and_strangers_are_refused() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -25,20 +45,7 @@ fn a_client_pairs_and_lists_apps_and_strangers_are_refused() {
     let server = GameStreamServer::open(
         "test host",
         &dir,
-        Box::new(|| {
-            vec![
-                App {
-                    id: 1,
-                    title: "Desktop".into(),
-                    hdr: false,
-                },
-                App {
-                    id: 7,
-                    title: "A window & more".into(),
-                    hdr: false,
-                },
-            ]
-        }),
+        Arc::new(Listed(vec![(1, "Desktop"), (7, "A window & more")])),
     )
     .unwrap();
     let (http, https) = runtime.block_on(async {
@@ -51,7 +58,10 @@ fn a_client_pairs_and_lists_apps_and_strangers_are_refused() {
         http.local_addr().unwrap().port(),
         https.local_addr().unwrap().port(),
     );
-    runtime.spawn(Arc::clone(&server).serve(http, https));
+    let rtsp = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    runtime.spawn(Arc::clone(&server).serve(http, https, rtsp));
 
     let client = GameStreamClient::new(Credentials::generate("NVIDIA GameStream Client").unwrap());
     let host = Host {

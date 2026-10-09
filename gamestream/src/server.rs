@@ -1,9 +1,8 @@
-//! A GameStream host's HTTP side, enough for stock Moonlight to find, pair
-//! with and list the apps of a windowcast host: `serverinfo` (HTTP and
-//! HTTPS), `pair` (the host end of `pairing`, with the PIN the person
-//! types here from Moonlight's screen) and, over HTTPS with a paired
-//! client's certificate, `applist`. Responses follow Sunshine's
-//! `nvhttp.cpp`.
+//! A GameStream host for stock Moonlight: `serverinfo` (HTTP and HTTPS),
+//! `pair` (the host end of `pairing`, with the PIN the person types here
+//! from Moonlight's screen) and, over HTTPS with a paired client's
+//! certificate, `applist`, `launch`, `resume` and `cancel`; the launched
+//! stream itself is `stream`. Responses follow Sunshine's `nvhttp.cpp`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -17,9 +16,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-use crate::client::App;
 use crate::crypto::Credentials;
 use crate::pairing::HostPairing;
+use crate::stream::{Apps, Launch};
 use crate::{xml, GameStreamError};
 
 /// GameStream's HTTPS port.
@@ -48,7 +47,9 @@ pub struct GameStreamServer {
     name: String,
     unique_id: String,
     credentials: Credentials,
-    apps: Box<dyn Fn() -> Vec<App> + Send + Sync>,
+    apps: Arc<dyn Apps>,
+    /// The launched app, if any.
+    launch: Mutex<Option<Arc<Launch>>>,
     paired: Mutex<Vec<Vec<u8>>>,
     paired_path: PathBuf,
     pending: Mutex<HashMap<String, Pending>>,
@@ -56,15 +57,17 @@ pub struct GameStreamServer {
     pub codec_modes: u32,
     /// The HTTPS port `serverinfo` names: the one being served.
     https_port: std::sync::atomic::AtomicU16,
+    /// The RTSP port launches name: the one being served.
+    rtsp_port: std::sync::atomic::AtomicU16,
 }
 
 impl GameStreamServer {
     /// A host named `name` with its credentials and paired clients kept in
-    /// `dir`, offering what `apps` lists.
+    /// `dir`, offering `apps`.
     pub fn open(
         name: &str,
         dir: &std::path::Path,
-        apps: Box<dyn Fn() -> Vec<App> + Send + Sync>,
+        apps: Arc<dyn Apps>,
     ) -> Result<Arc<Self>, GameStreamError> {
         let credentials = Credentials::load_or_generate(dir, "windowcast GameStream Host")?;
         let paired_path = dir.join("gamestream-clients");
@@ -89,11 +92,13 @@ impl GameStreamServer {
             unique_id,
             credentials,
             apps,
+            launch: Mutex::new(None),
             paired: Mutex::new(paired),
             paired_path,
             pending: Mutex::default(),
             codec_modes: 1,
             https_port: std::sync::atomic::AtomicU16::new(HTTPS_PORT),
+            rtsp_port: std::sync::atomic::AtomicU16::new(crate::rtsp::RTSP_PORT),
         }))
     }
 
@@ -147,12 +152,33 @@ impl GameStreamServer {
         }
     }
 
-    /// Serves plain HTTP on `http` and HTTPS on `https` until either fails.
+    /// Serves plain HTTP on `http`, HTTPS on `https` and the launched
+    /// stream's RTSP on `rtsp` until one fails. Streams use the standard
+    /// GameStream UDP ports (47998, 47999, 48000).
     pub async fn serve(
         self: Arc<Self>,
         http: TcpListener,
         https: TcpListener,
+        rtsp: TcpListener,
     ) -> std::io::Result<()> {
+        self.rtsp_port.store(
+            rtsp.local_addr()?.port(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        {
+            let server = Arc::clone(&self);
+            tokio::spawn(async move {
+                while let Ok((stream, _)) = rtsp.accept().await {
+                    let launch = server.launch.lock().expect("launch").clone();
+                    let apps = Arc::clone(&server.apps);
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::stream::serve_rtsp(stream, launch, apps).await {
+                            eprintln!("gamestream: rtsp: {e}");
+                        }
+                    });
+                }
+            });
+        }
         let tls = Arc::new(self.tls_config().map_err(std::io::Error::other)?);
         self.https_port.store(
             https.local_addr()?.port(),
@@ -165,7 +191,8 @@ impl GameStreamServer {
                 loop {
                     let (stream, from) = http.accept().await?;
                     let server = Arc::clone(&server);
-                    tokio::spawn(async move { server.connection(stream, from, None).await });
+                    let local = stream.local_addr()?;
+                    tokio::spawn(async move { server.connection(stream, from, local, None).await });
                 }
                 #[allow(unreachable_code)]
                 Ok::<(), std::io::Error>(())
@@ -176,6 +203,7 @@ impl GameStreamServer {
                 return Err(std::io::Error::other("the HTTP listener stopped"));
             }
             let (stream, from) = https.accept().await?;
+            let local = stream.local_addr()?;
             let server = Arc::clone(&self);
             let acceptor = acceptor.clone();
             tokio::spawn(async move {
@@ -188,7 +216,7 @@ impl GameStreamServer {
                     .peer_certificates()
                     .and_then(|certs| certs.first())
                     .map(|c| c.as_ref().to_vec());
-                server.connection(tls, from, Some(peer)).await;
+                server.connection(tls, from, local, Some(peer)).await;
             });
         }
     }
@@ -212,6 +240,7 @@ impl GameStreamServer {
         &self,
         mut stream: S,
         from: SocketAddr,
+        local: SocketAddr,
         peer: Option<Option<Vec<u8>>>,
     ) {
         let Some((path, query)) = read_request(&mut stream).await else {
@@ -227,7 +256,7 @@ impl GameStreamServer {
         };
         let body = match path.as_str() {
             "/serverinfo" => {
-                self.server_info(from, cert.as_deref().is_some_and(|c| self.is_paired(c)))
+                self.server_info(local, cert.as_deref().is_some_and(|c| self.is_paired(c)))
             }
             "/pair" => match self.pair(&query, from, https, cert.as_deref()).await {
                 Some(body) => body,
@@ -235,14 +264,12 @@ impl GameStreamServer {
             },
             "/applist" if cert.as_deref().is_some_and(|c| self.is_paired(c)) => self.app_list(),
             "/launch" | "/resume" if cert.as_deref().is_some_and(|c| self.is_paired(c)) => {
-                let _ = arg("appid");
-                xml::response(
-                    503,
-                    Some("Streaming over GameStream is not built into this windowcast host yet"),
-                    &[("gamesession", "0".into())],
-                )
+                self.launch(path == "/resume", &arg, local)
             }
             "/cancel" if cert.as_deref().is_some_and(|c| self.is_paired(c)) => {
+                if let Some(launch) = self.launch.lock().expect("launch").take() {
+                    launch.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 xml::response(200, None, &[("cancel", "1".into())])
             }
             "/applist" | "/launch" | "/resume" | "/cancel" => xml::response(
@@ -276,8 +303,109 @@ impl GameStreamServer {
                 ("LocalIP", local.ip().to_string()),
                 ("ServerCodecModeSupport", self.codec_modes.to_string()),
                 ("PairStatus", u8::from(paired).to_string()),
-                ("currentgame", "0".into()),
-                ("state", "SUNSHINE_SERVER_FREE".into()),
+                ("currentgame", self.current_game().to_string()),
+                (
+                    "state",
+                    if self.current_game() > 0 {
+                        "SUNSHINE_SERVER_BUSY"
+                    } else {
+                        "SUNSHINE_SERVER_FREE"
+                    }
+                    .into(),
+                ),
+            ],
+        )
+    }
+
+    fn current_game(&self) -> u32 {
+        self.launch
+            .lock()
+            .expect("launch")
+            .as_ref()
+            .filter(|l| !l.stop.load(std::sync::atomic::Ordering::SeqCst))
+            .map_or(0, |l| l.app)
+    }
+
+    /// `/launch` (or `/resume` of the running app): keeps the client's input
+    /// key and mode for the stream and answers with its RTSP address.
+    fn launch(
+        &self,
+        resume: bool,
+        arg: &dyn Fn(&str) -> Option<String>,
+        local: SocketAddr,
+    ) -> String {
+        let key = arg("rikey")
+            .and_then(|k| xml::decode_hex(&k))
+            .and_then(|k| <[u8; 16]>::try_from(k).ok());
+        let key_id = arg("rikeyid").and_then(|k| k.parse::<i64>().ok());
+        let (Some(key), Some(key_id)) = (key, key_id) else {
+            return xml::response(
+                400,
+                Some("Missing a required launch parameter"),
+                &[("resume", "0".into())],
+            );
+        };
+        let mut launch = self.launch.lock().expect("launch");
+        let running = launch
+            .as_ref()
+            .filter(|l| !l.stop.load(std::sync::atomic::Ordering::SeqCst));
+        let app = if resume {
+            match running {
+                Some(l) => l.app,
+                None => {
+                    return xml::response(
+                        503,
+                        Some("No app is running to resume"),
+                        &[("resume", "0".into())],
+                    )
+                }
+            }
+        } else {
+            if running.is_some() {
+                return xml::response(
+                    400,
+                    Some("An app is already running on this host"),
+                    &[("resume", "0".into())],
+                );
+            }
+            match arg("appid").and_then(|a| a.parse::<u32>().ok()) {
+                Some(app) if self.apps.apps().iter().any(|a| a.id == app) => app,
+                _ => {
+                    return xml::response(404, Some("No such app"), &[("gamesession", "0".into())])
+                }
+            }
+        };
+        let mode: Vec<u32> = arg("mode")
+            .unwrap_or_default()
+            .split('x')
+            .filter_map(|v| v.parse().ok())
+            .collect();
+        let mode = (
+            mode.first().copied().unwrap_or(1280),
+            mode.get(1).copied().unwrap_or(720),
+            mode.get(2).copied().filter(|f| *f > 0).unwrap_or(60),
+        );
+        if let Some(old) = launch.take() {
+            old.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        *launch = Some(Launch::new(app, key, key_id as u32, mode));
+        let host = match local.ip() {
+            std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+            ip => ip.to_string(),
+        };
+        xml::response(
+            200,
+            None,
+            &[
+                (
+                    "sessionUrl0",
+                    format!(
+                        "rtsp://{host}:{}",
+                        self.rtsp_port.load(std::sync::atomic::Ordering::SeqCst)
+                    ),
+                ),
+                ("gamesession", "1".into()),
+                ("resume", u8::from(resume).to_string()),
             ],
         )
     }
@@ -285,7 +413,7 @@ impl GameStreamServer {
     fn app_list(&self) -> String {
         let mut out =
             String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<root status_code=\"200\">");
-        for app in (self.apps)() {
+        for app in self.apps.apps() {
             out.push_str(&format!(
                 "<App><IsHdrSupported>{}</IsHdrSupported><AppTitle>{}</AppTitle><ID>{}</ID></App>",
                 u8::from(app.hdr),

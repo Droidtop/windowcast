@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+windowcast-protocol = { path = "../protocol" }
+windowcast-host = { path = "../host-core" }
+windowcast-transport = { path = "../transport" }
 thiserror.workspace = true
 rand_core.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "time", "macros"] }
@@ -18,6 +21,12 @@ rcgen = { version = "0.13", default-features = false, features = ["crypto", "rin
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 ureq = { version = "2", default-features = false, features = ["tls"] }
+# ENet, which GameStream's control stream runs on (MIT; a transpilation of
+# ENet 1.3.17, the protocol Moonlight and Sunshine use).
+rusty_enet = "0.4"
+# AES-GCM for the control stream.
+aes-gcm = "0.10"
 
 [dev-dependencies]
+windowcast-cli-tools = { path = "../cli-tools" }
 tokio = { workspace = true, features = ["net", "io-util", "time", "macros", "rt-multi-thread"] }
