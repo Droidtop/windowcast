@@ -3,12 +3,14 @@
 //! by anything embedding windowcast without pulling in WebRTC or capture
 //! backends it doesn't need.
 
+pub mod selection;
+
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to the message shapes below. A peer
 /// that receives a mismatched version should refuse the session rather
 /// than guess at how to interpret an unknown wire format.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
@@ -22,6 +24,21 @@ pub struct WindowInfo {
     pub width: u32,
     pub height: u32,
     pub focused: bool,
+    /// What the host thinks the window shows ([`selection::classify`]);
+    /// selection rules key on it.
+    pub content: ContentHint,
+}
+
+/// What kind of content a window shows, as far as choosing a backend goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ContentHint {
+    General,
+    /// Mostly text: editors, terminals, documents.
+    Text,
+    /// A game: latency and controller input matter most.
+    Game,
+    /// A video player: the content is already encoded video.
+    Video,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -70,10 +87,8 @@ pub enum InputEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GameId(pub u32);
 
-/// One app a local GameStream-protocol host (Sunshine/Apollo) has
-/// configured as streamable — sourced by querying that host's own
-/// `serverinfo`/`applist` endpoints (see `windowcast-apollo`), not
-/// anything windowcast's own capture agents produce themselves.
+/// One game the host can stream through the GameStream backend (see
+/// [`StreamBackend::GameStream`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GameEntry {
     pub id: GameId,
@@ -81,10 +96,9 @@ pub struct GameEntry {
     pub artwork_uri: Option<String>,
 }
 
-/// What a client is asking to stream, and — for [`ControlMessage::StreamStartResponse`]
-/// — what it got. Windows and games are deliberately not unified into one
-/// id space: a window is captured and streamed by windowcast itself, a
-/// game is handed off to a different backend entirely (see [`StreamBackend`]).
+/// What a client is asking to stream. A window is the normal case; a game
+/// is an entry from the host's game list, not a window; `Desktop` is the
+/// host's whole desktop as one stream.
 ///
 /// Other target kinds (an SSH/PTY session, something reached over a
 /// web-facing protocol) are real, anticipated additions — but their
@@ -97,57 +111,106 @@ pub struct GameEntry {
 pub enum StreamTarget {
     Window(WindowId),
     Game(GameId),
+    Desktop,
 }
 
-/// Which underlying mechanism actually drives a stream once accepted. Every
-/// value is driven by a library the client links in and controls directly
-/// — never a separate spawned application — this field only says which
-/// library, not how it's invoked. Many streams, of possibly different
-/// backends, can be live on one session at once — this isn't a
-/// session-wide mode switch, it's per [`StreamTarget`].
-///
-/// Deliberately open-ended: windowcast isn't just a Moonlight-or-native
-/// choice. RDP and VNC are obvious next backends (existing Rust client
-/// crates exist for both — FreeRDP bindings, `vnc-rs`/`libvncclient`
-/// bindings — matching the same "embed a library, don't spawn a process"
-/// rule everything else here follows); SSH is a real but structurally
-/// different case (a PTY/text channel, not a video stream); some future
-/// backend might be reached over a web-facing protocol the client embeds
-/// an HTTP/WebSocket client for rather than a native decoder. None of
-/// these beyond `Native` and `Moonlight` are implemented yet — see each
-/// variant's doc comment for its actual status.
+/// Video codecs a session track can carry. The client lists the ones it
+/// can decode in hardware; the host picks the first it can produce (or,
+/// for passthrough, the one the media already is).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VideoCodec {
+    H264,
+    H265,
+    Av1,
+}
+
+/// Which backend carries one stream. Every backend is windowcast's own
+/// implementation inside this library, on both ends; none wraps another
+/// project's client or server (see docs/BACKENDS.md). Many streams with
+/// different backends can be live on one session at once: this is per
+/// [`StreamTarget`], not a session-wide mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StreamBackend {
-    /// windowcast's own WebRTC video track, on this same session. Real,
-    /// implemented (modulo the per-window capture pipeline itself — see
-    /// `agent-linux/src/capture.rs`).
-    Native,
-    /// Handed off to an embedded GameStream/Moonlight-protocol client
-    /// library, connecting directly to [`HandoffTarget`] — the video/audio
-    /// never rides this session's WebRTC transport once handed off, only
-    /// this negotiation does. `windowcast-apollo` implements the
-    /// unauthenticated `serverinfo`/`applist`-XML half of this; the actual
-    /// paired streaming client (`windowcast-moonlight`) doesn't exist yet.
-    Moonlight,
-    /// RDP handoff. Not implemented anywhere in this repo yet.
+    /// The window is captured and encoded by the host agent and sent as a
+    /// video track on this session. The default for everything.
+    Native { codec: VideoCodec },
+    /// Video the window is already playing, forwarded as it was encoded on
+    /// a video track of this session: no second encode. Not built yet.
+    Passthrough { codec: VideoCodec },
+    /// Cut out of a capture of the whole desktop, for hosts that cannot
+    /// capture single windows, and for [`StreamTarget::Desktop`]. A video
+    /// track on this session. Not built yet.
+    Desktop { codec: VideoCodec },
+    /// windowcast's own GameStream implementation, for games: its own
+    /// low-latency video, audio and controller channels to the
+    /// [`HandoffTarget`]. Not built yet.
+    GameStream,
+    /// windowcast's own RDP implementation, for text-heavy windows. Not
+    /// built yet.
     Rdp,
-    /// VNC handoff. Not implemented anywhere in this repo yet.
+    /// windowcast's own VNC implementation. Not built yet.
     Vnc,
     /// Anything not yet a first-class variant — carries a protocol name so
-    /// experimental/custom backends don't need a protocol version bump to
-    /// exist, at the cost of no compile-time guarantee any given client
-    /// actually implements it.
+    /// experimental backends don't need a protocol version bump to exist,
+    /// at the cost of no compile-time guarantee any given peer implements it.
     Other(String),
 }
 
-/// Where to reach a [`StreamBackend`] handoff — normally the same physical
-/// machine as the windowcast host answering the request (e.g. a local
-/// Sunshine/Apollo install for `Moonlight`), reached on its own port,
-/// independent of this WebRTC session's address.
+impl StreamBackend {
+    pub fn kind(&self) -> BackendKind {
+        match self {
+            StreamBackend::Native { .. } => BackendKind::Native,
+            StreamBackend::Passthrough { .. } => BackendKind::Passthrough,
+            StreamBackend::Desktop { .. } => BackendKind::Desktop,
+            StreamBackend::GameStream => BackendKind::GameStream,
+            StreamBackend::Rdp => BackendKind::Rdp,
+            StreamBackend::Vnc => BackendKind::Vnc,
+            StreamBackend::Other(_) => BackendKind::Other,
+        }
+    }
+
+    /// The codec of the video track this backend sends on this session,
+    /// or `None` for a backend with its own connection.
+    pub fn session_codec(&self) -> Option<VideoCodec> {
+        match self {
+            StreamBackend::Native { codec }
+            | StreamBackend::Passthrough { codec }
+            | StreamBackend::Desktop { codec } => Some(*codec),
+            _ => None,
+        }
+    }
+}
+
+/// [`StreamBackend`] without its parameters: what selection rules and
+/// user overrides name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BackendKind {
+    Native,
+    Passthrough,
+    Desktop,
+    GameStream,
+    Rdp,
+    Vnc,
+    Other,
+}
+
+/// Where to reach a backend that runs its own connection (GameStream,
+/// RDP, VNC): normally the same machine as the host agent, on its own port.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandoffTarget {
     pub address: String,
     pub port: u16,
+}
+
+/// What the client asks for with a stream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StreamOptions {
+    /// The backend the client's rules chose ([`selection::choose_backend`]).
+    /// The host uses it if it can serve it and falls back to `Native`
+    /// otherwise ([`selection::serve`]); the response says which it used.
+    pub backend: BackendKind,
+    /// Codecs the client decodes, most preferred first.
+    pub codecs: Vec<VideoCodec>,
 }
 
 /// Control-channel request/response traffic, independent of the actual
@@ -157,24 +220,26 @@ pub enum ControlMessage {
     ListWindowsRequest,
     ListWindowsResponse(Vec<WindowInfo>),
 
-    /// Apollo/Sunshine-backed games this host can hand a client off to —
-    /// always [`StreamBackend::Moonlight`], never captured by windowcast's
-    /// own agents.
+    /// Games the host can stream through its GameStream backend.
     ListGamesRequest,
     ListGamesResponse(Vec<GameEntry>),
 
-    /// Client asks to start streaming a window or a game. The agent may
-    /// require a one-time host-user approval before answering (see the
-    /// security model's authorization section) — this can be a slow
-    /// round-trip, not just a lookup.
-    StreamStartRequest(StreamTarget),
+    /// Client asks to start streaming a window, a game or the desktop. The
+    /// agent may require a one-time host-user approval before answering
+    /// (see the security model's authorization section) — this can be a
+    /// slow round-trip, not just a lookup.
+    StreamStartRequest {
+        target: StreamTarget,
+        options: StreamOptions,
+    },
     StreamStartResponse {
         target: StreamTarget,
         accepted: bool,
         backend: StreamBackend,
-        /// WebRTC track id the video will arrive on — only set when `backend == Native`.
+        /// Session track id the video arrives on, for backends that send on
+        /// this session ([`StreamBackend::session_codec`] is `Some`).
         track_id: Option<String>,
-        /// Where to hand off to — only set for a non-`Native` backend.
+        /// Where to connect, for backends with their own connection.
         handoff: Option<HandoffTarget>,
         reason: Option<String>,
     },
@@ -207,6 +272,11 @@ pub enum ControlMessage {
     },
     /// Which streamed window has keyboard focus on the host now.
     WindowFocused(WindowId),
+
+    /// The sender is closing the session. Handled inside
+    /// `windowcast-transport`: the receiver's session ends at once instead
+    /// of waiting for the connection to time out.
+    Goodbye,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,6 +395,7 @@ mod tests {
             width: 800,
             height: 600,
             focused: true,
+            content: ContentHint::Text,
         }]);
         let bytes = encode(&msg).unwrap();
         assert_eq!(decode(&bytes).unwrap(), msg);
@@ -333,13 +404,15 @@ mod tests {
     #[test]
     fn a_window_stream_and_a_game_handoff_are_independent_targets() {
         // windowcast's core premise: many streams can be live at once, not
-        // just one at a time -- a native window track and a Moonlight
+        // just one at a time -- a native window track and a GameStream
         // handoff are independently started/stopped, each keeping its own
         // response shape.
         let window_response = ControlMessage::StreamStartResponse {
             target: StreamTarget::Window(WindowId(3)),
             accepted: true,
-            backend: StreamBackend::Native,
+            backend: StreamBackend::Native {
+                codec: VideoCodec::H265,
+            },
             track_id: Some("track-3".into()),
             handoff: None,
             reason: None,
@@ -347,7 +420,7 @@ mod tests {
         let game_response = ControlMessage::StreamStartResponse {
             target: StreamTarget::Game(GameId(101)),
             accepted: true,
-            backend: StreamBackend::Moonlight,
+            backend: StreamBackend::GameStream,
             track_id: None,
             handoff: Some(HandoffTarget {
                 address: "127.0.0.1".into(),

@@ -135,6 +135,7 @@ pub fn list_windows() -> Result<Vec<WindowInfo>, ToplevelError> {
         .into_iter()
         .map(|(id, info)| WindowInfo {
             id: WindowId(id as u64),
+            content: windowcast_protocol::selection::classify(&info.app_id, &info.title),
             title: info.title,
             app_id: info.app_id,
             // Real per-window size isn't exposed by foreign-toplevel-management

@@ -6,9 +6,9 @@
 //! GameStream hosts answer it to anyone, precisely so a client can check
 //! pair state before attempting to pair) and is implemented for real here.
 //! `applist` DOES need an already-paired mutual-TLS session — pairing
-//! itself isn't implemented anywhere in this repo yet (that's
-//! `windowcast-moonlight`'s job, not started — see
-//! `windowcast_protocol::StreamBackend::Moonlight`), so this crate
+//! itself isn't implemented anywhere in this repo yet (that's the
+//! GameStream backend's job, not started — see
+//! `windowcast_protocol::StreamBackend::GameStream`), so this crate
 //! only provides [`parse_app_list_xml`] (real, tested, reusable) rather
 //! than pretending to fetch it end to end.
 
