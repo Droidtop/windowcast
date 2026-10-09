@@ -4,13 +4,14 @@
 //! (ext-foreign-toplevel-list), captures one with ext-image-copy-capture
 //! (or, for the desktop backend, its output with the window cut out),
 //! encodes it with OpenH264, and delivers input through a virtual pointer
-//! and keyboard. Window positions and focus come from sway's IPC, so input
+//! and keyboard, and the client's gamepads as uinput pads. Window positions and focus come from sway's IPC, so input
 //! and the desktop backend need sway; listing and capture work on any
 //! compositor with the ext protocols (wlroots 0.19 and later, sway 1.11 and
 //! later).
 
 pub mod audio;
 pub mod capture;
+pub mod gamepad;
 pub mod input;
 pub mod microphone;
 mod source;

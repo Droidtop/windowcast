@@ -4,8 +4,8 @@
 //! whose modifier state it tracks and reports. Where a window is, and
 //! focusing it, come from sway's IPC: a pointer position is mapped from the
 //! streamed picture onto the window's rectangle, and keys and text go to
-//! the session's focus window after it is focused. Gamepads are not
-//! delivered on Linux yet (they need a uinput device).
+//! the session's focus window after it is focused. Gamepads do not come
+//! here: they are uinput pads (`crate::gamepad`).
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -325,6 +325,7 @@ impl Injector {
                     TouchPhase::Move => {}
                 }
             }
+            // Delivered to the session's pads by host-core.
             InputEvent::Gamepad { .. } | InputEvent::GamepadGone { .. } => {}
         }
         let _ = self.conn.flush();

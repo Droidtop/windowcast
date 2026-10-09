@@ -27,6 +27,8 @@ rustix = { version = "1", features = ["fs", "mm", "event"] }
 serde_json = "1"
 # The PulseAudio client API (PulseAudio, or PipeWire's pulse server).
 libpulse-binding = "2"
+# Virtual gamepads through uinput (and reading them back in tests).
+evdev = "0.13"
 thiserror.workspace = true
 tokio.workspace = true
 

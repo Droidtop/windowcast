@@ -163,6 +163,10 @@ impl WindowSource for WindowsSource {
         Ok(Box::new(self.open_stream(window, codec, true)))
     }
 
+    fn gamepads(&self) -> Option<Result<Box<dyn windowcast_host::gamepad::GamepadSink>, String>> {
+        Some(crate::gamepad::WindowsPads::open().map(|pads| Box::new(pads) as _))
+    }
+
     fn microphone(
         &self,
     ) -> Option<Result<Box<dyn windowcast_host::audio::MicrophoneSink>, String>> {

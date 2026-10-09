@@ -15,6 +15,8 @@ pub mod clipboard;
 #[cfg(windows)]
 pub mod encoder;
 #[cfg(windows)]
+pub mod gamepad;
+#[cfg(windows)]
 mod gpu_convert;
 #[cfg(windows)]
 pub mod input;

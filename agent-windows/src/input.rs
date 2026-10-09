@@ -2,10 +2,9 @@
 //! coordinates mapped from the window's captured picture, keys as scan
 //! codes (the evdev keycodes windowcast sends are the XT set-1 codes for
 //! the main block), typed text as Unicode characters. A touch drives the
-//! pointer (the first finger only). Gamepads need a virtual gamepad driver
-//! Windows does not have built in, so they are not delivered yet.
+//! pointer (the first finger only). Gamepads do not come here: they are
+//! ViGEmBus pads (`crate::gamepad`).
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use windowcast_protocol::{InputEvent, PointerButton, TouchPhase, WindowId};
@@ -26,7 +25,6 @@ const WHEEL_DELTA: f32 = 120.0;
 pub struct Injector {
     /// The touch that drives the pointer while it is down.
     primary_touch: Mutex<Option<u32>>,
-    gamepad_noted: AtomicBool,
 }
 
 impl Injector {
@@ -105,11 +103,8 @@ impl Injector {
                 y,
                 phase,
             } => self.touch(*window, *id, *x, *y, *phase),
-            InputEvent::Gamepad { .. } | InputEvent::GamepadGone { .. } => {
-                if !self.gamepad_noted.swap(true, Ordering::SeqCst) {
-                    eprintln!("gamepad input is not delivered on Windows yet (needs a virtual gamepad driver)");
-                }
-            }
+            // Delivered to the session's pads by host-core.
+            InputEvent::Gamepad { .. } | InputEvent::GamepadGone { .. } => {}
         }
     }
 

@@ -23,6 +23,9 @@ tokio.workspace = true
 [target.'cfg(windows)'.dependencies]
 # For #[implement] (the audio activation's completion handler).
 windows-core = "0.62"
+# Virtual Xbox 360 pads through the ViGEmBus driver (which Parsec and
+# others install).
+vigem-client = "0.1"
 windows = { version = "0.62", features = [
     "Foundation",
     "Graphics",
@@ -46,6 +49,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Memory",
     "Win32_System_LibraryLoader",
     "Win32_System_Ole",
+    "Win32_UI_Input_XboxController",
     "Win32_System_Threading",
     "Win32_System_Variant",
     "Win32_System_WinRT",

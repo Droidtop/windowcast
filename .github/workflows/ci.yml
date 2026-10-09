@@ -49,6 +49,14 @@ jobs:
           cargo test -p windowcast-transport --test loopback --no-run --message-format=json             | jq -r 'select(.profile.test == true and .target.name == "loopback") | .executable'             > loopback-test-path
           sudo unshare -n sh -c "ip link set lo up && $(cat loopback-test-path)"
 
+      # Virtual gamepads through uinput, read back from /dev/input. Root for
+      # the device nodes; the module may live in the kernel's extra modules.
+      - name: Gamepads through uinput
+        run: |
+          sudo modprobe uinput || { sudo apt-get install -y "linux-modules-extra-$(uname -r)" && sudo modprobe uinput; }
+          cargo test -p windowcast-agent-linux --test gamepad --no-run --message-format=json             | jq -r 'select(.profile.test == true and .target.name == "gamepad") | .executable'             > gamepad-test-path
+          sudo WINDOWCAST_TEST_UINPUT=1 "$(cat gamepad-test-path)" --nocapture
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
