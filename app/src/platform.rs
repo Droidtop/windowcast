@@ -1,6 +1,7 @@
-//! The host agent for the platform the app is built for. Windows has one
-//! (agent-windows); elsewhere the host role says it is not available yet
-//! and the client role works alone.
+//! The host agent for the platform the app is built for: agent-windows on
+//! Windows, agent-linux on Linux (a Wayland session; input and the desktop
+//! backend under sway). Elsewhere the host role says it is not available
+//! yet and the client role works alone.
 
 #[cfg(windows)]
 mod imp {
@@ -58,7 +59,43 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod imp {
+    use windowcast_agent_linux::{LinuxSource, Options};
+    use windowcast_protocol::VideoCodec;
+
+    use crate::config::HostSettings;
+
+    pub type Agent = LinuxSource;
+    pub const NAME: &str = "Linux";
+
+    fn options(settings: &HostSettings) -> Options {
+        Options {
+            fps: settings.fps.max(1),
+            bitrate_1080p: (settings.bitrate_mbps * 1_000_000.0) as u32,
+        }
+    }
+
+    pub fn open_agent(settings: &HostSettings) -> Result<Agent, String> {
+        if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+            return Err("the Linux host needs a Wayland session (no WAYLAND_DISPLAY)".into());
+        }
+        Ok(LinuxSource::new(options(settings)))
+    }
+
+    pub fn configure(agent: &Agent, settings: &HostSettings) -> Result<(), String> {
+        agent.set_options(options(settings));
+        Ok(())
+    }
+
+    pub fn encoders() -> Vec<(&'static str, Vec<VideoCodec>)> {
+        vec![("auto", vec![VideoCodec::H264])]
+    }
+
+    pub fn init() {}
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 mod imp {
     use windowcast_host::{FrameSource, WindowSource};
     use windowcast_protocol::{VideoCodec, WindowId, WindowInfo};
