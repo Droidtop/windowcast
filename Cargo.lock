@@ -4504,6 +4504,7 @@ dependencies = [
  "opus",
  "tokio",
  "windowcast-client-core",
+ "windowcast-gamestream",
  "windowcast-host",
  "windowcast-identity",
  "windowcast-protocol",

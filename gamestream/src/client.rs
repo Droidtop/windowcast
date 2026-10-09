@@ -248,7 +248,6 @@ impl GameStreamClient {
             ("remoteControllersBitmap", launch.gamepads.to_string()),
             ("gcmap", launch.gamepads.to_string()),
             ("gcpersist", "0".into()),
-            ("corever", "1".into()),
         ];
         let answer = self.secure(
             host,
@@ -259,6 +258,41 @@ impl GameStreamClient {
         xml::ok(&answer)?;
         xml::text(&answer, "sessionUrl0")
             .ok_or(GameStreamError::Pairing("the host gave no session URL"))
+    }
+
+    /// Launches `app` and sets its stream up: a new input key for this
+    /// launch, RTSP, then frames as they come (`session`). Plain RTSP: this
+    /// client does not say it speaks the encrypted kind (`corever`), so
+    /// hosts answer with `rtsp://`.
+    pub fn stream(
+        &self,
+        host: &Host,
+        app: u32,
+        request: &crate::session::StreamRequest,
+    ) -> Result<crate::session::Stream, GameStreamError> {
+        let key: [u8; 16] = crate::crypto::random();
+        let key_id = u32::from_le_bytes(crate::crypto::random()) & 0x7fff_ffff;
+        let launch = Launch {
+            app_id: app,
+            width: request.width,
+            height: request.height,
+            fps: request.fps,
+            input_key: key,
+            input_key_id: key_id,
+            host_audio: false,
+            surround_audio_info: 196_610,
+            gamepads: 0,
+        };
+        let url = self.launch(host, &launch, false)?;
+        let address: std::net::IpAddr = host
+            .address
+            .trim_matches(['[', ']'])
+            .parse()
+            .map_err(|_| GameStreamError::Rtsp("the host's address is not an IP address"))?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(crate::session::start(address, &url, key, request))
     }
 
     /// Quits the running app.

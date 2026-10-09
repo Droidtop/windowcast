@@ -12,10 +12,15 @@ path = "src/client.rs"
 name = "windowcast-testhost"
 path = "src/testhost.rs"
 
+[[bin]]
+name = "windowcast-gamestream"
+path = "src/gamestream.rs"
+
 [dependencies]
 windowcast-protocol = { path = "../protocol" }
 windowcast-host = { path = "../host-core" }
 windowcast-client-core = { path = "../client-core" }
+windowcast-gamestream = { path = "../gamestream" }
 tokio = { workspace = true, features = ["net"] }
 # Software H.264 for the test pattern host and the client's decode check;
 # builds OpenH264 (BSD-2-Clause) from source.

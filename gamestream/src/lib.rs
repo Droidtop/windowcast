@@ -24,6 +24,7 @@ pub mod crypto;
 pub mod pairing;
 pub mod rtsp;
 pub mod server;
+pub mod session;
 pub mod stream;
 pub mod video;
 pub mod windows;
