@@ -5,48 +5,61 @@
 //! headless sway), and the standard GameStream ports free; runs only with
 //! WINDOWCAST_TEST_MOONLIGHT set.
 
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use windowcast_cli_tools::testpattern::TestPatternWithTone;
 use windowcast_gamestream::server::{GameStreamServer, HTTPS_PORT};
 use windowcast_gamestream::windows::WindowApps;
 
-/// Runs moonlight with `args` until `done` says so (it is then given two
-/// seconds to finish) or `within` runs out, then ends it: `moonlight pair`
-/// stays open on its result. Returns what it printed.
-fn moonlight(args: &[&str], within: Duration, done: impl Fn() -> bool) -> String {
+/// Runs moonlight with `args` until `done`, shown what it has printed so
+/// far, says so (it is then given two seconds to finish) or `within` runs
+/// out, then ends it: `moonlight pair` stays open on its result. Returns
+/// what it printed.
+fn moonlight(args: &[&str], within: Duration, done: impl Fn(&str) -> bool) -> String {
     let mut child = Command::new("moonlight")
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("moonlight");
+    let printed = Arc::new(Mutex::new(String::new()));
+    let readers: Vec<_> = [
+        Box::new(child.stdout.take().expect("stdout")) as Box<dyn Read + Send>,
+        Box::new(child.stderr.take().expect("stderr")),
+    ]
+    .into_iter()
+    .map(|pipe| {
+        let printed = Arc::clone(&printed);
+        std::thread::spawn(move || {
+            for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                let mut printed = printed.lock().unwrap();
+                printed.push_str(&line);
+                printed.push('\n');
+            }
+        })
+    })
+    .collect();
     let start = Instant::now();
     loop {
         if child.try_wait().unwrap().is_some() {
             break;
         }
-        if done() || start.elapsed() > within {
+        if done(&printed.lock().unwrap()) || start.elapsed() > within {
             std::thread::sleep(Duration::from_secs(2));
             let _ = Command::new("kill").arg(child.id().to_string()).status();
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let output = child.wait_with_output().expect("moonlight output");
-    let printed = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    println!(
-        "moonlight {}: {}
-{printed}",
-        args.join(" "),
-        output.status
-    );
+    let status = child.wait().expect("moonlight status");
+    for reader in readers {
+        let _ = reader.join();
+    }
+    let printed = printed.lock().unwrap().clone();
+    println!("moonlight {}: {status}\n{printed}", args.join(" "));
     printed
 }
 
@@ -85,30 +98,41 @@ fn stock_moonlight_pairs_and_lists_our_apps() {
         .unwrap();
     runtime.spawn(Arc::clone(&server).serve(http, https, rtsp));
 
-    // The person types the PIN Moonlight was given, here.
-    let typist = {
-        let server = Arc::clone(&server);
-        std::thread::spawn(move || {
-            let start = Instant::now();
-            while start.elapsed() < Duration::from_secs(60) {
-                if let Some(request) = server.pairing_requests().first() {
-                    println!(
-                        "{} asks to pair from {}",
-                        request.device_name, request.address
-                    );
-                    return server.enter_pin("4721", None);
+    // The person types the PIN Moonlight was given, here. moonlight-qt
+    // builds its PIN key with QByteArray(hash.constData()), which stops at
+    // the first zero byte (nvpairingmanager.cpp, generateAesKey), so about
+    // one salt in sixteen gives it a key the host cannot know and it says
+    // "Incorrect PIN"; a person pairs again, and so does this test.
+    let mut pair = String::new();
+    for _attempt in 0..4 {
+        let typist = {
+            let server = Arc::clone(&server);
+            std::thread::spawn(move || {
+                let start = Instant::now();
+                while start.elapsed() < Duration::from_secs(60) {
+                    if let Some(request) = server.pairing_requests().first() {
+                        println!(
+                            "{} asks to pair from {}",
+                            request.device_name, request.address
+                        );
+                        return server.enter_pin("4721", None);
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
                 }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            false
-        })
-    };
-    let pair = moonlight(
-        &["pair", "127.0.0.1", "--pin", "4721"],
-        Duration::from_secs(60),
-        || server.paired_clients() == 1,
-    );
-    assert!(typist.join().unwrap(), "Moonlight never asked to pair");
+                false
+            })
+        };
+        pair = moonlight(
+            &["pair", "127.0.0.1", "--pin", "4721"],
+            Duration::from_secs(60),
+            |printed| server.paired_clients() == 1 || printed.contains("Incorrect PIN"),
+        );
+        assert!(typist.join().unwrap(), "Moonlight never asked to pair");
+        if !pair.contains("Incorrect PIN") {
+            break;
+        }
+        println!("Moonlight's PIN key had a zero byte; pairing again");
+    }
     // Moonlight ends pairing with the HTTPS check, our certificates both
     // ways.
     assert!(
@@ -117,7 +141,7 @@ fn stock_moonlight_pairs_and_lists_our_apps() {
     );
     assert_eq!(server.paired_clients(), 1);
 
-    let listed = moonlight(&["list", "127.0.0.1"], Duration::from_secs(60), || false);
+    let listed = moonlight(&["list", "127.0.0.1"], Duration::from_secs(60), |_| false);
     assert!(
         listed.contains("windowcast test pattern"),
         "our app is not listed"
@@ -143,7 +167,7 @@ fn stock_moonlight_pairs_and_lists_our_apps() {
             "windowed",
         ],
         Duration::from_secs(15),
-        || false,
+        |_| false,
     );
     assert!(
         streamed.contains("Received first video packet"),
