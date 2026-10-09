@@ -1575,7 +1575,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -2983,6 +2983,18 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna 0.5.2",
+]
+
+[[package]]
+name = "rcgen"
 version = "0.14.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"
@@ -2992,7 +3004,7 @@ dependencies = [
  "rustls-pki-types",
  "time",
  "x509-parser 0.18.1",
- "yasna",
+ "yasna 0.6.0",
 ]
 
 [[package]]
@@ -3072,7 +3084,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -3130,7 +3142,7 @@ dependencies = [
  "log",
  "pem 3.0.6",
  "rand",
- "rcgen",
+ "rcgen 0.14.10",
  "rtc-crypto",
  "rtc-datachannel",
  "rtc-dtls",
@@ -3199,7 +3211,7 @@ dependencies = [
  "der-parser 9.0.0",
  "log",
  "pem 3.0.6",
- "rcgen",
+ "rcgen 0.14.10",
  "rkyv",
  "rtc-crypto",
  "rtc-shared",
@@ -3441,6 +3453,7 @@ version = "0.23.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -4178,6 +4191,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "ureq"
+version = "2.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02d1a66277ed75f640d608235660df48c8e3c19f3b4edb6a263315626cc3c01d"
+dependencies = [
+ "base64 0.22.1",
+ "log",
+ "once_cell",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "url",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4483,6 +4513,15 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.9",
+]
+
+[[package]]
+name = "webpki-roots"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
@@ -4717,6 +4756,7 @@ dependencies = [
  "windowcast-host",
  "windowcast-identity",
  "windowcast-protocol",
+ "windowcast-transport",
  "windows",
 ]
 
@@ -4724,6 +4764,7 @@ dependencies = [
 name = "windowcast-cli-tools"
 version = "0.14.0"
 dependencies = [
+ "libc",
  "openh264",
  "opus",
  "tokio",
@@ -4731,6 +4772,7 @@ dependencies = [
  "windowcast-host",
  "windowcast-identity",
  "windowcast-protocol",
+ "windowcast-transport",
 ]
 
 [[package]]
@@ -4788,6 +4830,7 @@ dependencies = [
  "windowcast-identity",
  "windowcast-pairing",
  "windowcast-protocol",
+ "windowcast-rendezvous",
  "windowcast-transport",
 ]
 
@@ -4823,6 +4866,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "windowcast-rendezvous"
+version = "0.14.0"
+dependencies = [
+ "ed25519-dalek",
+ "rand_core 0.6.4",
+ "rcgen 0.13.2",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "ureq",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
 name = "windowcast-transport"
 version = "0.14.0"
 dependencies = [
@@ -4830,6 +4888,7 @@ dependencies = [
  "bytes",
  "rand_core 0.6.4",
  "rtc",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -4837,6 +4896,7 @@ dependencies = [
  "windowcast-identity",
  "windowcast-pairing",
  "windowcast-protocol",
+ "windowcast-rendezvous",
 ]
 
 [[package]]
@@ -5219,6 +5279,15 @@ name = "xml-rs"
 version = "0.8.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
+]
 
 [[package]]
 name = "yasna"

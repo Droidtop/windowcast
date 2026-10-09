@@ -11,11 +11,13 @@ windowcast-pairing = { path = "../pairing" }
 webrtc = "0.21"
 rtc = "0.21"
 async-trait = "0.1"
-tokio = { workspace = true, features = ["io-util"] }
+tokio = { workspace = true, features = ["io-util", "net", "time", "macros"] }
 tracing.workspace = true
 thiserror.workspace = true
 rand_core.workspace = true
 bytes = "1"
+windowcast-rendezvous = { path = "../rendezvous" }
+serde_json = "1"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["io-util", "net"] }
+tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread"] }

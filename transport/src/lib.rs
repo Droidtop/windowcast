@@ -25,6 +25,8 @@
 mod audio;
 mod keyframes;
 mod media;
+pub mod punched;
+pub mod remote;
 pub mod signaling;
 
 use std::collections::HashMap;
@@ -67,31 +69,6 @@ const LOCAL_UDP_BIND_ADDRS: [&str; 1] = ["127.0.0.1:0"];
 /// renegotiation. On a LAN all of these take well under a second; this
 /// only bounds a peer that went away.
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Credentials for a TURN relay a directory operator can offer as a
-/// fallback when direct P2P ICE fails (symmetric NAT, restrictive
-/// firewalls). Deliberately a plain relay, not a terminating proxy: TURN
-/// forwards opaque encrypted WebRTC/DTLS-SRTP traffic without being able
-/// to decrypt it, so a directory offering this never sees window content
-/// (docs/SECURITY.md, "Directory-mediated sessions").
-#[derive(Debug, Clone)]
-pub struct RelayConfig {
-    /// e.g. `["turn:relay.example.com:3478"]` — STUN URLs may also be
-    /// included alongside TURN ones; ICE tries all of them.
-    pub urls: Vec<String>,
-    pub username: String,
-    pub credential: String,
-}
-
-impl RelayConfig {
-    fn to_ice_server(&self) -> RTCIceServer {
-        RTCIceServer {
-            urls: self.urls.clone(),
-            username: self.username.clone(),
-            credential: self.credential.clone(),
-        }
-    }
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
@@ -196,10 +173,9 @@ type EndedWindows = Arc<std::sync::Mutex<HashMap<WindowId, Vec<watch::Sender<boo
 
 impl Session {
     /// Builds a fresh peer connection plus the always-present control data
-    /// channel, using no STUN/TURN servers — LAN-only and same-device
-    /// sessions (droidtop's primary use case today) need nothing beyond
-    /// host candidates. For a session that might cross a NAT/firewall, use
-    /// [`Session::with_relay`] instead.
+    /// channel, using no STUN servers: LAN and same-device sessions need
+    /// nothing beyond host candidates. A session away from the LAN uses
+    /// [`Session::away`].
     pub async fn new() -> Result<Self, TransportError> {
         Self::build(vec![], &UDP_BIND_ADDRS).await
     }
@@ -212,14 +188,21 @@ impl Session {
         Self::build(vec![], &LOCAL_UDP_BIND_ADDRS).await
     }
 
-    /// Same as [`Session::new`], but with a TURN relay available as an ICE
-    /// candidate for when direct P2P connectivity fails. This does NOT
-    /// force traffic through the relay — ICE still prefers a direct path
-    /// when one works, falling back to relaying opaque encrypted traffic
-    /// only when it doesn't. See [`RelayConfig`] for why this stays a
-    /// blind relay rather than a terminating proxy.
-    pub async fn with_relay(relay: &RelayConfig) -> Result<Self, TransportError> {
-        Self::build(vec![relay.to_ice_server()], &UDP_BIND_ADDRS).await
+    /// A session that crosses NATs: ICE also gathers the addresses the
+    /// NATs give it from these STUN servers (`host:port`), and both peers'
+    /// connectivity checks punch through, as on the rendezvous socket. No
+    /// relay is ever offered: if no direct path works, the session fails
+    /// rather than send a byte through a third party.
+    pub async fn away(stun: &[String]) -> Result<Self, TransportError> {
+        let servers = if stun.is_empty() {
+            vec![]
+        } else {
+            vec![RTCIceServer {
+                urls: stun.iter().map(|s| format!("stun:{s}")).collect(),
+                ..Default::default()
+            }]
+        };
+        Self::build(servers, &UDP_BIND_ADDRS).await
     }
 
     async fn build(

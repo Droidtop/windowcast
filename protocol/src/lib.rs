@@ -396,6 +396,13 @@ pub enum ControlMessage {
     /// `windowcast-transport`: the receiver's session ends at once instead
     /// of waiting for the connection to time out.
     Goodbye,
+
+    /// This side's discovery ID, for finding it away from the LAN later
+    /// (`windowcast-transport`'s `remote`). Each side sends its own when a
+    /// session starts; the other keeps it with the pinned identity.
+    Rendezvous {
+        discovery_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

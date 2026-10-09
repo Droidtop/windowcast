@@ -1,5 +1,6 @@
 //! Bringing a session up: one offer and one answer exchanged over an
-//! untrusted byte stream (a LAN TCP socket today; a directory relay later),
+//! untrusted byte stream (a LAN TCP socket, or away from the LAN a stream
+//! over a punched UDP socket, `punched`),
 //! authenticated end to end so whoever carries the stream cannot substitute
 //! a description.
 //!
