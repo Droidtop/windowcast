@@ -15,10 +15,10 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use windowcast_client::{Client, ClientSession, Event, FramePoll};
+use windowcast_client::{Client, ClientSession, FramePoll};
 use windowcast_host::quality::Quality;
 use windowcast_host::video::OpenH264;
-use windowcast_host::{EncodedFrame, FrameSource, HostConfig, WindowSource};
+use windowcast_host::{EncodedFrame, FrameSource, HostConfig, HostControl, WindowSource};
 use windowcast_identity::{Identity, TrustStore};
 use windowcast_protocol::{ContentHint, StreamQuality, VideoCodec, WindowId, WindowInfo};
 
@@ -130,26 +130,26 @@ fn tc(args: &str) {
     assert!(status.success(), "tc {args}");
 }
 
-/// Reads frames and events until `done` says a quality report is the one
-/// wanted, or `within` runs out. Returns that report and every report seen.
+/// Reads the client's frames, and watches the host's view of the stream
+/// (what it holds the encoder to and what it sends; the client's reports of
+/// the same ride the control channel, which a choked link delays), until
+/// `done` says it is the one wanted or `within` runs out.
 fn watch(
     session: &ClientSession,
+    control: &HostControl,
     within: Duration,
     done: impl Fn(&StreamQuality) -> bool,
-) -> (Option<StreamQuality>, Vec<(Duration, StreamQuality)>) {
+) -> Option<StreamQuality> {
     let start = Instant::now();
-    let mut seen = Vec::new();
+    let mut last_print = Instant::now() - Duration::from_secs(1);
     while start.elapsed() < within {
         while let FramePoll::Frame(_) = session.next_frame(WINDOW, Duration::ZERO) {}
-        let event = session.next_event(Duration::from_millis(50));
-        if let Some(other) = event
-            .as_ref()
-            .filter(|e| !matches!(e, Event::StreamQuality { .. }))
-        {
-            println!("event: {other:?}");
-        }
-        if let Some(Event::StreamQuality { quality, .. }) = event {
-            seen.push((start.elapsed(), quality));
+        let _ = session.next_event(Duration::from_millis(50));
+        let Some(quality) = control.streams().first().map(|s| s.quality) else {
+            continue;
+        };
+        if last_print.elapsed() >= Duration::from_secs(1) {
+            last_print = Instant::now();
             println!(
                 "{:5.1} s: held to {:?} kbit/s, sent {} kbit/s, {} fps, {}x{}, loss {:.1}%, round trip {:?} ms",
                 start.elapsed().as_secs_f32(),
@@ -161,12 +161,12 @@ fn watch(
                 quality.loss_percent,
                 quality.rtt_ms
             );
-            if done(&quality) {
-                return (Some(quality), seen);
-            }
+        }
+        if done(&quality) {
+            return Some(quality);
         }
     }
-    (None, seen)
+    None
 }
 
 #[test]
@@ -199,13 +199,15 @@ fn the_stream_fits_a_bottleneck_and_recovers() {
         .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
         .unwrap();
     let address = listener.local_addr().unwrap().to_string();
-    runtime.spawn(windowcast_host::serve(
+    let control = HostControl::open(&HostConfig {
+        listen: address.clone(),
+        pairing: false,
+        data_dir: host_dir.clone(),
+    })
+    .unwrap();
+    runtime.spawn(windowcast_host::serve_with(
         listener,
-        HostConfig {
-            listen: address.clone(),
-            pairing: false,
-            data_dir: host_dir.clone(),
-        },
+        Arc::clone(&control),
         Arc::new(Busy),
     ));
     let client = Client::new(&client_dir).unwrap();
@@ -215,8 +217,12 @@ fn the_stream_fits_a_bottleneck_and_recovers() {
     session.start_window(WINDOW, &[VideoCodec::H264]).unwrap();
 
     // Clear network: the stream runs at its own rate, nothing held.
-    let (_, clear) = watch(&session, Duration::from_secs(6), |_| false);
-    let free = clear.last().expect("no quality reports").1;
+    let free = watch(&session, &control, Duration::from_secs(8), |q| {
+        q.sent_kbps > 0
+    })
+    .expect("the stream never started");
+    std::thread::sleep(Duration::from_secs(3));
+    let free = control.streams().first().map_or(free, |s| s.quality);
     assert!(
         free.sent_kbps > 1200,
         "the busy picture sends only {} kbit/s",
@@ -225,14 +231,14 @@ fn the_stream_fits_a_bottleneck_and_recovers() {
 
     // A 600 kbit/s bottleneck with a short queue: the host must get under it.
     tc("qdisc add dev lo root netem rate 600kbit delay 10ms limit 40");
-    let (fitted, _) = watch(&session, Duration::from_secs(25), |q| {
+    let fitted = watch(&session, &control, Duration::from_secs(25), |q| {
         q.target_kbps.is_some_and(|t| t <= 600) && q.sent_kbps <= 650
     });
     let fitted = fitted.expect("the host never brought the stream under 600 kbit/s");
 
     // Lifted: back up past the bottleneck's rate.
     tc("qdisc del dev lo root");
-    let (recovered, _) = watch(&session, Duration::from_secs(45), |q| {
+    let recovered = watch(&session, &control, Duration::from_secs(45), |q| {
         q.target_kbps.is_none_or(|t| t >= 1200) && q.sent_kbps >= 1000
     });
     let recovered = recovered.expect("the stream did not climb back after the bottleneck went");
