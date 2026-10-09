@@ -15,9 +15,10 @@ pub mod ffi;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tokio::runtime::Runtime;
@@ -118,6 +119,16 @@ impl Client {
             established.paired,
         ))
     }
+
+    /// Stops trusting the host whose identity is `host_id` (hex, as
+    /// [`ClientSession::host_id`] gives it): it has to be paired again.
+    pub fn forget(&self, host_id: &str) -> Result<(), ClientError> {
+        let peer = windowcast_identity::PeerId::from_hex(host_id)?;
+        let mut trust = self.trust.lock().expect("trust store");
+        trust.revoke(&peer);
+        trust.save(&self.trust_path)?;
+        Ok(())
+    }
 }
 
 /// Something that happened on a session. Serialized as JSON for the C
@@ -179,11 +190,16 @@ struct WindowSlot {
     /// Taken by the frame pump when the window's track arrives; dropping it
     /// ends the queue.
     sender: Mutex<Option<SyncSender<WindowFrame>>>,
+    /// Set by [`ClientSession::request_keyframe`]; the frame pump asks the
+    /// host for one with the next frame it sees.
+    keyframe: Arc<AtomicBool>,
 }
 
 struct Shared {
     events: Mutex<Receiver<Event>>,
     slots: Mutex<HashMap<WindowId, Arc<WindowSlot>>>,
+    /// When the unanswered ping went out, and the last round trip.
+    ping: Mutex<(Option<Instant>, Option<Duration>)>,
 }
 
 impl Shared {
@@ -203,11 +219,11 @@ impl Shared {
 
     /// The sender for a newly arrived track: the waiting slot's, or a
     /// fresh slot's when that one's sender is already in use.
-    fn take_sender(&self, window: WindowId) -> SyncSender<WindowFrame> {
+    fn take_sender(&self, window: WindowId) -> (SyncSender<WindowFrame>, Arc<AtomicBool>) {
         let mut slots = self.slots.lock().expect("slots");
         let slot = slots.entry(window).or_insert_with(new_slot);
         if let Some(sender) = slot.sender.lock().expect("sender").take() {
-            return sender;
+            return (sender, Arc::clone(&slot.keyframe));
         }
         let fresh = new_slot();
         let sender = fresh
@@ -216,8 +232,9 @@ impl Shared {
             .expect("sender")
             .take()
             .expect("new slot");
+        let keyframe = Arc::clone(&fresh.keyframe);
         *slot = fresh;
-        sender
+        (sender, keyframe)
     }
 }
 
@@ -229,6 +246,7 @@ fn new_slot() -> Arc<WindowSlot> {
             held: None,
         }),
         sender: Mutex::new(Some(tx)),
+        keyframe: Arc::new(AtomicBool::new(false)),
     })
 }
 
@@ -252,6 +270,7 @@ impl ClientSession {
         let shared = Arc::new(Shared {
             events: Mutex::new(event_rx),
             slots: Mutex::new(HashMap::new()),
+            ping: Mutex::new((None, None)),
         });
         let windows = Arc::new(Mutex::new(Vec::new()));
 
@@ -385,6 +404,26 @@ impl ClientSession {
         }
     }
 
+    /// Asks the host for a keyframe of `window`, e.g. after the client
+    /// reset its decoder; it comes within about one frame.
+    pub fn request_keyframe(&self, window: WindowId) {
+        if let Some(slot) = self.shared.existing_slot(window) {
+            slot.keyframe.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Measures the round trip to the host over the control channel; the
+    /// result is [`Self::round_trip`] once the host answers.
+    pub fn ping(&self) -> Result<(), ClientError> {
+        self.shared.ping.lock().expect("ping").0 = Some(Instant::now());
+        self.send(ControlMessage::Ping)
+    }
+
+    /// The last round trip [`Self::ping`] measured.
+    pub fn round_trip(&self) -> Option<Duration> {
+        self.shared.ping.lock().expect("ping").1
+    }
+
     /// Ends the session; the host is told at once.
     pub fn close(&self) {
         let _ = self.runtime.block_on(self.session.close());
@@ -465,6 +504,13 @@ async fn pump_events(
             },
             ControlMessage::WindowFocused(window) => Event::WindowFocused { window: window.0 },
             ControlMessage::Clipboard(text) => Event::Clipboard { text },
+            ControlMessage::Pong => {
+                let mut ping = shared.ping.lock().expect("ping");
+                if let Some(sent) = ping.0.take() {
+                    ping.1 = Some(sent.elapsed());
+                }
+                continue;
+            }
             _ => continue,
         };
         if events.send(event).is_err() {
@@ -477,14 +523,21 @@ async fn pump_events(
 /// window's queue.
 async fn pump_windows(session: Arc<Session>, shared: Arc<Shared>) {
     while let Ok(remote) = session.next_remote_window().await {
-        let sender = shared.take_sender(remote.window());
-        tokio::spawn(pump_frames(remote, sender));
+        let (sender, keyframe) = shared.take_sender(remote.window());
+        tokio::spawn(pump_frames(remote, sender, keyframe));
     }
 }
 
-async fn pump_frames(mut remote: RemoteWindow, queue: SyncSender<WindowFrame>) {
+async fn pump_frames(
+    mut remote: RemoteWindow,
+    queue: SyncSender<WindowFrame>,
+    keyframe: Arc<AtomicBool>,
+) {
     let mut skipping = false;
     while let Ok(frame) = remote.next_frame().await {
+        if keyframe.swap(false, Ordering::SeqCst) {
+            remote.request_keyframe().await;
+        }
         if skipping && !frame.keyframe {
             continue;
         }
