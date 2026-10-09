@@ -22,6 +22,22 @@ struct Gated {
     agent: Agent,
     input: AtomicBool,
     clipboard: AtomicBool,
+    microphone: Arc<AtomicBool>,
+}
+
+/// A virtual microphone that stays silent while the host does not allow
+/// clients' microphones.
+struct GatedMicrophone {
+    sink: Box<dyn windowcast_host::audio::MicrophoneSink>,
+    allowed: Arc<AtomicBool>,
+}
+
+impl windowcast_host::audio::MicrophoneSink for GatedMicrophone {
+    fn play(&mut self, samples: &[i16]) {
+        if self.allowed.load(Ordering::SeqCst) {
+            self.sink.play(samples);
+        }
+    }
 }
 
 impl WindowSource for Gated {
@@ -69,6 +85,27 @@ impl WindowSource for Gated {
         if self.clipboard.load(Ordering::SeqCst) {
             self.agent.set_clipboard(text);
         }
+    }
+
+    fn open_audio(
+        &self,
+        window: WindowId,
+    ) -> Option<Result<Box<dyn windowcast_host::audio::AudioSource>, String>> {
+        self.agent.open_audio(window)
+    }
+
+    fn microphone(
+        &self,
+    ) -> Option<Result<Box<dyn windowcast_host::audio::MicrophoneSink>, String>> {
+        if !self.microphone.load(Ordering::SeqCst) {
+            return Some(Err("this host does not take clients' microphones".into()));
+        }
+        Some(self.agent.microphone()?.map(|sink| {
+            Box::new(GatedMicrophone {
+                sink,
+                allowed: Arc::clone(&self.microphone),
+            }) as _
+        }))
     }
 }
 
@@ -167,6 +204,7 @@ impl HostRole {
             agent,
             input: AtomicBool::new(settings.input),
             clipboard: AtomicBool::new(settings.clipboard),
+            microphone: Arc::new(AtomicBool::new(settings.microphone)),
         });
         runtime.spawn(windowcast_host::serve_with(
             listener,
@@ -304,6 +342,9 @@ impl HostRole {
         self.source
             .clipboard
             .store(settings.clipboard, Ordering::SeqCst);
+        self.source
+            .microphone
+            .store(settings.microphone, Ordering::SeqCst);
         self.store.update(|config| config.host = settings);
         Ok(())
     }

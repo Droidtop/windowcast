@@ -195,6 +195,10 @@ impl App {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut settings.input, "Clients may drive streamed windows");
                 ui.checkbox(&mut settings.clipboard, "Share the clipboard");
+                ui.checkbox(
+                    &mut settings.microphone,
+                    "Clients may use their microphone here",
+                );
             });
             ui.separator();
 
@@ -634,6 +638,16 @@ fn stream_window_ui(ui: &mut egui::Ui, client: &ClientRole) {
             });
         ui.checkbox(&mut send_input, "Send pointer and keys");
     });
+    let mut microphone = client.microphone_on();
+    if ui
+        .checkbox(&mut microphone, "Send my microphone to the host")
+        .changed()
+    {
+        client.set_microphone(microphone);
+    }
+    if let Some(error) = client.microphone_error() {
+        ui.colored_label(ui.visuals().error_fg_color, format!("microphone: {error}"));
+    }
     ui.label(
         RichText::new(
             "Each stream opens in its own window; F11 or a double click switches it to fullscreen.",

@@ -20,10 +20,14 @@ mod decoder;
 #[cfg(windows)]
 mod keys;
 #[cfg(windows)]
+mod microphone;
+#[cfg(windows)]
 mod present;
 #[cfg(windows)]
 mod window;
 
+#[cfg(windows)]
+pub use microphone::Microphone;
 #[cfg(windows)]
 pub use window::{open, StreamWindow};
 

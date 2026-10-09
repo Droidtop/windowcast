@@ -70,6 +70,11 @@ pub struct HostSettings {
     pub input: bool,
     /// Share the clipboard's text with clients, both ways.
     pub clipboard: bool,
+    /// Play a client's microphone into this host's virtual microphone.
+    pub microphone: bool,
+    /// Where it plays (Windows: part of a virtual cable's output name);
+    /// empty picks one.
+    pub microphone_device: String,
 }
 
 impl Default for HostSettings {
@@ -83,6 +88,8 @@ impl Default for HostSettings {
             bitrate_mbps: 8.0,
             input: false,
             clipboard: false,
+            microphone: false,
+            microphone_device: String::new(),
         }
     }
 }

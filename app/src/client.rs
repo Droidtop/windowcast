@@ -114,6 +114,9 @@ pub struct ClientRole {
     store: Arc<Store>,
     state: Mutex<State>,
     overrides: Mutex<Overrides>,
+    #[cfg(windows)]
+    microphone: Mutex<Option<windowcast_client_windows::Microphone>>,
+    microphone_error: Mutex<Option<String>>,
 }
 
 impl ClientRole {
@@ -124,6 +127,9 @@ impl ClientRole {
             store,
             state: Mutex::new(State::default()),
             overrides: Mutex::default(),
+            #[cfg(windows)]
+            microphone: Mutex::new(None),
+            microphone_error: Mutex::new(None),
         }))
     }
 
@@ -229,6 +235,8 @@ impl ClientRole {
     }
 
     pub fn disconnect(&self) {
+        #[cfg(windows)]
+        self.microphone.lock().expect("microphone").take();
         let (session, mut streams) = {
             let mut state = self.state.lock().expect("state");
             state.generation += 1;
@@ -475,6 +483,56 @@ impl ClientRole {
         if let Ok(session) = self.session() {
             session.set_rules(self.store.get().client.rules);
         }
+    }
+
+    /// Whether this client sends its microphone.
+    pub fn microphone_on(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.microphone.lock().expect("microphone").is_some()
+        }
+        #[cfg(not(windows))]
+        false
+    }
+
+    /// Starts or stops sending this PC's microphone to the host.
+    pub fn set_microphone(&self, on: bool) {
+        *self.microphone_error.lock().expect("microphone error") = None;
+        #[cfg(windows)]
+        {
+            let mut microphone = self.microphone.lock().expect("microphone");
+            if !on {
+                microphone.take();
+                return;
+            }
+            let started = self
+                .session()
+                .and_then(windowcast_client_windows::Microphone::start);
+            match started {
+                Ok(started) => *microphone = Some(started),
+                Err(e) => *self.microphone_error.lock().expect("microphone error") = Some(e),
+            }
+        }
+        #[cfg(not(windows))]
+        if on {
+            *self.microphone_error.lock().expect("microphone error") =
+                Some("this platform cannot send its microphone yet".into());
+        }
+    }
+
+    pub fn microphone_error(&self) -> Option<String> {
+        #[cfg(windows)]
+        {
+            let mut microphone = self.microphone.lock().expect("microphone");
+            if let Some(e) = microphone.as_mut().and_then(|m| m.failed()) {
+                *self.microphone_error.lock().expect("microphone error") = Some(e);
+                microphone.take();
+            }
+        }
+        self.microphone_error
+            .lock()
+            .expect("microphone error")
+            .clone()
     }
 
     pub fn muted(&self, window: u64) -> bool {
