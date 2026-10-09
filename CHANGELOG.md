@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.14.0] - 2026-10-09
 
 ### Added
 - Adaptive quality (Droidtop/tracker#114): the host holds each stream's encoder to what the network carries, cutting the bitrate on packet loss (the client's RTCP receiver reports) or a growing round trip (the host now pings the client too, and clients answer), and growing it back on a clean network until the settings rule again; when the rate is thin for the picture it lowers the frame rate to 30, then the picture to three quarters and half size, then 20 and 15 fps, and climbs back in reverse. Encoders change bitrate mid-stream where they can (NVENC, OpenH264; others are reopened), and the picture is scaled on the GPU (Windows) or by a box filter (Linux, read-back pictures).
