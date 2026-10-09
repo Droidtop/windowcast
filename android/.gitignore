@@ -1,0 +1,7 @@
+.gradle/
+build/
+local.properties
+.cxx/
+# Built by `cargo ndk` from client-core before Gradle runs (see
+# .github/workflows/android.yml); never committed.
+windowcast/src/main/jniLibs/
