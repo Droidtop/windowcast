@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-10-09
+
+### Added
+- Input from the client: mouse, keyboard, typed text, touch and gamepads. Windows hosts click, type and scroll in the streamed window (a touch moves and clicks the pointer); gamepads reach the host but are not delivered on Windows yet.
+- The clipboard's text is shared both ways while a session is open.
+- The Android viewer sends touches, keyboard keys and gamepads, and shares the clipboard.
+- The client is told a window's picture size before its first frame and whenever it changes.
+
+### Security
+- Input reaches only the windows the session is streaming; a client cannot click or type into any other window on the host.
+
+### Changed
+- The protocol version is now 4; older peers are refused.
+
 ## [0.5.0] - 2026-10-09
 
 ### Added
