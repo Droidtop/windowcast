@@ -10,10 +10,8 @@ path = "src/main.rs"
 
 [dependencies]
 windowcast-protocol = { path = "../protocol" }
-windowcast-identity = { path = "../identity" }
-windowcast-pairing = { path = "../pairing" }
-windowcast-transport = { path = "../transport" }
+windowcast-host = { path = "../host-core" }
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net"] }
+tokio.workspace = true
