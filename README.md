@@ -55,9 +55,17 @@ nothing else), sent as Opus on an audio track beside the picture, and
 played by the Windows client (WASAPI) and the Android library (MediaCodec,
 AudioTrack); Linux hosts send it too, recording the application's own
 streams through the PulseAudio API (PipeWire's pulse server included).
+A client's microphone goes back the same way (Opus on its own track) when
+the host allows it: Linux hosts make a virtual microphone,
+`windowcast_microphone`, that applications record from; Windows has no
+virtual microphone of its own, so a Windows host plays the client's voice
+into a virtual audio cable (VB-CABLE, VoiceMeeter, Virtual Audio Cable, or
+one named with `--microphone-device`) and applications record from the
+cable's other end. The Windows client and the Android viewer send their
+microphone (Android 10 and later, which encode Opus).
 What's **not** done yet: macOS, gamepads on Windows (they need a virtual
 gamepad driver) and Linux, the clipboard and GPU encoding on Linux, the
-microphone back to the host, and every backend
+microphone from the Linux client, and every backend
 except the native and desktop ones (their seam is in place: see
 docs/BACKENDS.md).
 

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- A client's microphone reaches the host, as Opus on its own track of the session, when the host allows it (off by default; "Clients may use their microphone here" in the reference app). Linux hosts make a virtual microphone through the PulseAudio API (a null sink and a source remapped from its monitor, `windowcast_microphone`), removed again when the client stops. Windows hosts play the voice into a virtual audio cable that applications record from (VB-CABLE, VoiceMeeter, Virtual Audio Cable or the Steam streaming microphone are picked up; `--microphone-device` names another).
+- The Windows client sends the default recording device ("Send my microphone to the host" in the reference app), and the Android library (`Microphone`) and viewer send the device's microphone on Android 10 and later. client-core gains `start_microphone`, `send_microphone` and `stop_microphone` (and the same in the C interface).
+
 ## [0.11.0] - 2026-10-09
 
 ### Added
