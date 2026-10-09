@@ -4,12 +4,14 @@
 use std::time::{Duration, Instant};
 
 use windowcast_host::{EncodedFrame, FrameSource, WindowSource};
-use windowcast_protocol::{VideoCodec, WindowId, WindowInfo};
+use windowcast_protocol::{InputEvent, VideoCodec, WindowId, WindowInfo};
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 
 use crate::capture::{self, Capture};
+use crate::clipboard;
 use crate::convert;
 use crate::encoder::{self, Encoder, EncoderChoice, Settings};
+use crate::input::Injector;
 use crate::windows_list;
 
 /// Agent options, from the command line.
@@ -34,6 +36,7 @@ impl Default for Options {
 pub struct WindowsSource {
     options: Options,
     codecs: Vec<VideoCodec>,
+    injector: Injector,
 }
 
 impl WindowsSource {
@@ -47,7 +50,11 @@ impl WindowsSource {
         if codecs.is_empty() {
             return Err(format!("no encoder available for {:?}", options.encoder));
         }
-        Ok(WindowsSource { options, codecs })
+        Ok(WindowsSource {
+            options,
+            codecs,
+            injector: Injector::default(),
+        })
     }
 }
 
@@ -58,6 +65,18 @@ impl WindowSource for WindowsSource {
 
     fn encoders(&self) -> Vec<VideoCodec> {
         self.codecs.clone()
+    }
+
+    fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
+        self.injector.inject(event, focus);
+    }
+
+    fn clipboard(&self) -> Option<(u64, String)> {
+        Some((clipboard::sequence(), clipboard::text().unwrap_or_default()))
+    }
+
+    fn set_clipboard(&self, text: &str) {
+        clipboard::set_text(text);
     }
 
     fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
@@ -74,6 +93,7 @@ impl WindowSource for WindowsSource {
             last_sent: Instant::now(),
             frames: 0,
             pending: Default::default(),
+            announce: None,
         }))
     }
 }
@@ -95,6 +115,8 @@ struct WindowStream {
     last_sent: Instant,
     frames: u64,
     pending: std::collections::VecDeque<Vec<u8>>,
+    /// The picture size to announce with the next frame sent.
+    announce: Option<(u32, u32)>,
 }
 
 impl WindowStream {
@@ -102,7 +124,11 @@ impl WindowStream {
         let data = self.pending.pop_front()?;
         let duration = self.last_sent.elapsed();
         self.last_sent = Instant::now();
-        Some(EncodedFrame { data, duration })
+        Some(EncodedFrame {
+            data,
+            duration,
+            size: self.announce.take(),
+        })
     }
 }
 
@@ -200,6 +226,7 @@ impl FrameSource for WindowStream {
                     }
                 };
                 state.size = size;
+                self.announce = Some((size.0 as u32, size.1 as u32));
                 keyframe = true;
             }
             let time = frame_time * self.frames as u32;

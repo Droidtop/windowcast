@@ -9,7 +9,11 @@ pub mod convert;
 #[cfg(windows)]
 pub mod capture;
 #[cfg(windows)]
+pub mod clipboard;
+#[cfg(windows)]
 pub mod encoder;
+#[cfg(windows)]
+pub mod input;
 #[cfg(windows)]
 mod source;
 #[cfg(windows)]
