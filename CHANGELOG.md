@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.11.0] - 2026-10-09
 
 ### Added
 - Linux hosts send a window's sound too: through the PulseAudio API (PulseAudio, or PipeWire's pulse server) the window's application's own playback streams are recorded, and nothing else (found by its process, and the processes it started, from sway's tree). An application that starts playing later is picked up.
