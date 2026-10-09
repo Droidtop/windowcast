@@ -8,8 +8,18 @@ license.workspace = true
 name = "windowcast-client"
 path = "src/client.rs"
 
+[[bin]]
+name = "windowcast-testhost"
+path = "src/testhost.rs"
+
 [dependencies]
 windowcast-protocol = { path = "../protocol" }
-windowcast-identity = { path = "../identity" }
-windowcast-transport = { path = "../transport" }
+windowcast-host = { path = "../host-core" }
+windowcast-client-core = { path = "../client-core" }
 tokio = { workspace = true, features = ["net"] }
+# Software H.264 for the test pattern host and the client's decode check;
+# builds OpenH264 (BSD-2-Clause) from source.
+openh264 = "0.9"
+
+[dev-dependencies]
+windowcast-identity = { path = "../identity" }

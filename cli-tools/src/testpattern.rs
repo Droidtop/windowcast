@@ -1,0 +1,122 @@
+//! A window that is a moving test pattern, encoded with OpenH264 (software,
+//! BSD-licensed). For trying a client against a host with no capture yet:
+//! the pixels are generated, the encoding and everything after it are real.
+
+use std::time::{Duration, Instant};
+
+use openh264::encoder::{Encoder, EncoderConfig, FrameRate, IntraFramePeriod};
+use openh264::formats::YUVBuffer;
+use openh264::OpenH264API;
+use windowcast_host::{EncodedFrame, FrameSource, WindowSource};
+use windowcast_protocol::{ContentHint, VideoCodec, WindowId, WindowInfo};
+
+pub const WINDOW: WindowId = WindowId(1);
+pub const WIDTH: usize = 640;
+pub const HEIGHT: usize = 360;
+const FPS: u32 = 30;
+
+/// A host's window list with one window: the test pattern.
+pub struct TestPatternSource;
+
+impl WindowSource for TestPatternSource {
+    fn list_windows(&self) -> Vec<WindowInfo> {
+        vec![WindowInfo {
+            id: WINDOW,
+            title: "windowcast test pattern".into(),
+            app_id: "windowcast.testpattern".into(),
+            width: WIDTH as u32,
+            height: HEIGHT as u32,
+            focused: true,
+            content: ContentHint::General,
+        }]
+    }
+
+    fn encoders(&self) -> Vec<VideoCodec> {
+        vec![VideoCodec::H264]
+    }
+
+    fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
+        if window != WINDOW {
+            return Err("no such window".into());
+        }
+        if codec != VideoCodec::H264 {
+            return Err("the test pattern only encodes H.264".into());
+        }
+        let config = EncoderConfig::new()
+            .max_frame_rate(FrameRate::from_hz(FPS as f32))
+            // Keyframes on request, plus one every two seconds.
+            .intra_frame_period(IntraFramePeriod::from_num_frames(FPS * 2));
+        let encoder = Encoder::with_api_config(OpenH264API::from_source(), config)
+            .map_err(|e| format!("encoder: {e}"))?;
+        Ok(Box::new(TestPattern {
+            encoder,
+            frame: 0,
+            next_at: Instant::now(),
+        }))
+    }
+}
+
+struct TestPattern {
+    encoder: Encoder,
+    frame: u64,
+    next_at: Instant,
+}
+
+const FRAME_TIME: Duration = Duration::from_nanos(1_000_000_000 / FPS as u64);
+
+impl FrameSource for TestPattern {
+    fn next_frame(&mut self, keyframe: bool) -> Option<EncodedFrame> {
+        let now = Instant::now();
+        if self.next_at > now {
+            std::thread::sleep(self.next_at - now);
+        }
+        self.next_at += FRAME_TIME;
+
+        let picture = YUVBuffer::from_vec(draw(self.frame), WIDTH, HEIGHT);
+        if keyframe {
+            self.encoder.force_intra_frame();
+        }
+        let data = self.encoder.encode(&picture).ok()?.to_vec();
+        self.frame += 1;
+        Some(EncodedFrame {
+            data,
+            duration: FRAME_TIME,
+        })
+    }
+}
+
+/// One I420 picture: a luma ramp, a bar that sweeps across, and the frame
+/// number in binary as a row of blocks along the top.
+fn draw(frame: u64) -> Vec<u8> {
+    let (w, h) = (WIDTH, HEIGHT);
+    let mut yuv = vec![0u8; w * h * 3 / 2];
+    let (luma, chroma) = yuv.split_at_mut(w * h);
+    let bar = (frame as usize * 8) % w;
+    for y in 0..h {
+        for x in 0..w {
+            let mut value = (x * 200 / w + 16) as u8;
+            if x >= bar && x < bar + 24 {
+                value = 235;
+            }
+            if y < 32 {
+                let bit = x / (w / 16);
+                value = if (frame >> (15 - bit)) & 1 == 1 {
+                    235
+                } else {
+                    16
+                };
+            }
+            luma[y * w + x] = value;
+        }
+    }
+    let (u, v) = chroma.split_at_mut(w * h / 4);
+    for cy in 0..h / 2 {
+        for cx in 0..w / 2 {
+            let x = cx * 2;
+            let in_bar = x >= bar && x < bar + 24 && cy * 2 >= 32;
+            u[cy * (w / 2) + cx] = if in_bar { 90 } else { 128 };
+            v[cy * (w / 2) + cx] = if in_bar { 240 } else { 128 };
+        }
+    }
+    yuv
+}
