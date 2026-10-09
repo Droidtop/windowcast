@@ -95,6 +95,8 @@ pub struct HostStream {
     pub mbps: f64,
     pub keyframes: u64,
     pub keyframe_requests: u64,
+    /// Opus packets sent, when the stream has sound.
+    pub audio_packets: Option<u64>,
     pub seconds: u64,
 }
 
@@ -284,6 +286,7 @@ impl HostRole {
                     mbps: sample.mbps,
                     keyframes: stream.keyframes,
                     keyframe_requests: stream.keyframe_requests,
+                    audio_packets: stream.audio_packets,
                     seconds: stream.since.elapsed().as_secs(),
                 }
             })

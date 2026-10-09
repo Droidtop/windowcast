@@ -76,6 +76,7 @@ pub struct ClientWindow {
 
 #[derive(Clone)]
 pub struct ClientStream {
+    pub window: u64,
     pub title: String,
     pub requested: Option<BackendKind>,
     pub backend: Option<BackendKind>,
@@ -476,6 +477,21 @@ impl ClientRole {
         }
     }
 
+    pub fn muted(&self, window: u64) -> bool {
+        self.state
+            .lock()
+            .expect("state")
+            .streams
+            .get(&window)
+            .is_some_and(|stream| stream.shared.muted.load(Ordering::SeqCst))
+    }
+
+    pub fn set_muted(&self, window: u64, muted: bool) {
+        if let Some(stream) = self.state.lock().expect("state").streams.get(&window) {
+            stream.shared.muted.store(muted, Ordering::SeqCst);
+        }
+    }
+
     pub fn set_send_input(&self, on: bool) {
         self.store.update(|config| config.client.send_input = on);
         for stream in self.state.lock().expect("state").streams.values() {
@@ -514,6 +530,7 @@ impl ClientRole {
             .streams
             .iter()
             .map(|(window, stream)| ClientStream {
+                window: *window,
                 title: state
                     .windows
                     .iter()

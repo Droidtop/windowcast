@@ -215,6 +215,7 @@ impl App {
                             "fps",
                             "Mbit/s",
                             "Keyframes",
+                            "Sound",
                             "Time",
                         ] {
                             ui.strong(heading);
@@ -246,6 +247,10 @@ impl App {
                                 "{} ({} asked)",
                                 stream.keyframes, stream.keyframe_requests
                             ));
+                            ui.label(match stream.audio_packets {
+                                Some(packets) => format!("{packets} packets"),
+                                None => "none".into(),
+                            });
                             ui.label(format!("{} s", stream.seconds));
                             ui.end_row();
                         }
@@ -478,6 +483,20 @@ impl App {
                             String::new()
                         }
                     ));
+                    ui.horizontal(|ui| {
+                        ui.label(if stats.audio {
+                            format!("Sound: {} Opus packets played", stats.audio_packets)
+                        } else {
+                            "Sound: none yet".into()
+                        });
+                        let mut muted = client.muted(stream.window);
+                        if ui.checkbox(&mut muted, "Mute").changed() {
+                            client.set_muted(stream.window, muted);
+                        }
+                    });
+                    if let Some(error) = &stats.audio_error {
+                        ui.colored_label(ui.visuals().error_fg_color, format!("sound: {error}"));
+                    }
                     if let Some(error) = &stats.error {
                         ui.colored_label(ui.visuals().error_fg_color, error);
                     }

@@ -65,6 +65,12 @@ pub fn open(
 ) -> StreamWindow {
     let hwnd = Arc::new(AtomicIsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
+    crate::audio::play(
+        Arc::clone(&session),
+        window,
+        Arc::clone(&stop),
+        Arc::clone(&shared),
+    );
     let thread = {
         let (hwnd, stop, shared) = (Arc::clone(&hwnd), Arc::clone(&stop), Arc::clone(&shared));
         std::thread::spawn(move || {

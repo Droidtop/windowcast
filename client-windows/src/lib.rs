@@ -10,7 +10,11 @@
 //! - `window`: the stream window itself, on a thread of its own: it pulls
 //!   frames from `client-core`, decodes and presents them, and turns the
 //!   user's pointer and keys into windowcast input when that is switched on.
+//! - `audio`: the window's sound, Opus decoded and played through WASAPI
+//!   on a thread beside it.
 
+#[cfg(windows)]
+mod audio;
 #[cfg(windows)]
 mod decoder;
 #[cfg(windows)]
@@ -66,6 +70,11 @@ pub struct StreamStats {
     pub latency_ms: f64,
     /// Decoder errors that made the window ask for a keyframe.
     pub resets: u64,
+    /// The window has sound, and its Opus packets played so far.
+    pub audio: bool,
+    pub audio_packets: u64,
+    /// Why its sound stopped, if it did.
+    pub audio_error: Option<String>,
     /// Set when the window closed (by the user, the stream ending, or an
     /// error, in `error`).
     pub closed: bool,
@@ -78,6 +87,8 @@ pub struct Shared {
     pub stats: Mutex<StreamStats>,
     /// Pointer and keys go to the host while this is set.
     pub send_input: AtomicBool,
+    /// The window's sound is silenced while this is set.
+    pub muted: AtomicBool,
 }
 
 pub type SharedStats = Arc<Shared>;
