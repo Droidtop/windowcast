@@ -4,13 +4,16 @@
 //! "windowcast-microphone", that applications record from like any
 //! microphone. Both are unloaded again when the client stops.
 
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use libpulse_binding as pulse;
+use pulse::callbacks::ListResult;
 use pulse::context::{Context, FlagSet as ContextFlags, State as ContextState};
 use pulse::mainloop::standard::{IterateResult, Mainloop};
-use pulse::operation::State as OperationState;
+use pulse::operation::{Operation, State as OperationState};
 use pulse::sample::{Format, Spec};
 use pulse::stream::{FlagSet as StreamFlags, SeekMode, State as StreamState, Stream};
 use windowcast_host::audio::MicrophoneSink;
@@ -88,6 +91,7 @@ impl Device {
             context,
             mainloop,
         };
+        let speakers = device.default_sink()?;
         device.load(
             "module-null-sink",
             &format!(
@@ -100,6 +104,7 @@ impl Device {
                 "master={SINK}.monitor source_name={SOURCE} source_properties=device.description=windowcast-microphone"
             ),
         )?;
+        device.keep_speakers(speakers)?;
         let spec = Spec {
             format: Format::S16le,
             channels: 2,
@@ -126,19 +131,91 @@ impl Device {
         Ok(device)
     }
 
-    /// Loads a module and remembers it for unloading.
-    fn load(&mut self, name: &str, arguments: &str) -> Result<(), String> {
-        let index = std::rc::Rc::new(std::cell::Cell::new(None));
-        let into = std::rc::Rc::clone(&index);
-        let operation = self
-            .context
-            .introspect()
-            .load_module(name, arguments, move |i| into.set(Some(i)));
+    /// Runs the main loop until `operation` is done.
+    fn wait<C: ?Sized>(&mut self, operation: &Operation<C>) -> Result<(), String> {
         while operation.get_state() == OperationState::Running {
             if let IterateResult::Err(e) = self.mainloop.iterate(true) {
                 return Err(format!("Pulse: {e}"));
             }
         }
+        Ok(())
+    }
+
+    fn default_sink(&mut self) -> Result<Option<String>, String> {
+        let name = Rc::new(RefCell::new(None));
+        let into = Rc::clone(&name);
+        let operation = self.context.introspect().get_server_info(move |info| {
+            *into.borrow_mut() = info.default_sink_name.as_ref().map(|n| n.to_string());
+        });
+        self.wait(&operation)?;
+        Ok(name.take())
+    }
+
+    fn sink_index(&mut self, name: &str) -> Result<Option<u32>, String> {
+        let index = Rc::new(Cell::new(None));
+        let into = Rc::clone(&index);
+        let operation = self
+            .context
+            .introspect()
+            .get_sink_info_by_name(name, move |result| {
+                if let ListResult::Item(sink) = result {
+                    into.set(Some(sink.index));
+                }
+            });
+        self.wait(&operation)?;
+        Ok(index.get())
+    }
+
+    /// A new sink can take over as the default and pull the desktop's
+    /// playback with it (module-switch-on-connect does; so does
+    /// module-always-sink, giving up its placeholder when nothing else
+    /// plays), which would send the desktop's sound into the virtual
+    /// microphone. Puts the default back and moves those streams back to
+    /// it. Where the speakers were only that placeholder there is nothing to
+    /// go back to.
+    fn keep_speakers(&mut self, speakers: Option<String>) -> Result<(), String> {
+        let Some(speakers) = speakers.filter(|s| s != SINK) else {
+            return Ok(());
+        };
+        let (Some(to), Some(ours)) = (self.sink_index(&speakers)?, self.sink_index(SINK)?) else {
+            return Ok(());
+        };
+        if self.default_sink()?.as_deref() == Some(SINK) {
+            let operation = self.context.set_default_sink(&speakers, |_| {});
+            self.wait(&operation)?;
+        }
+        let moved = Rc::new(RefCell::new(Vec::new()));
+        let into = Rc::clone(&moved);
+        let operation = self
+            .context
+            .introspect()
+            .get_sink_input_info_list(move |result| {
+                if let ListResult::Item(input) = result {
+                    if input.sink == ours {
+                        into.borrow_mut().push(input.index);
+                    }
+                }
+            });
+        self.wait(&operation)?;
+        for input in moved.take() {
+            let operation = self
+                .context
+                .introspect()
+                .move_sink_input_by_index(input, to, None);
+            self.wait(&operation)?;
+        }
+        Ok(())
+    }
+
+    /// Loads a module and remembers it for unloading.
+    fn load(&mut self, name: &str, arguments: &str) -> Result<(), String> {
+        let index = Rc::new(Cell::new(None));
+        let into = Rc::clone(&index);
+        let operation = self
+            .context
+            .introspect()
+            .load_module(name, arguments, move |i| into.set(Some(i)));
+        self.wait(&operation)?;
         match index.get() {
             Some(i) if i != u32::MAX => {
                 self.modules.push(i);

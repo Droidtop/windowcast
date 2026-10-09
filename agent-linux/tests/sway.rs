@@ -141,8 +141,9 @@ fn check_sound(session: &ClientSession, window: WindowId) {
     });
 }
 
-/// Sends a 440 Hz tone as the client's microphone and records it back from
-/// the host's virtual microphone with parec.
+/// Sends a 660 Hz tone as the client's microphone and records it back from
+/// the host's virtual microphone with parec. The window's own 440 Hz tone
+/// keeps playing, so its leaking into the microphone shows in the level.
 fn check_microphone(session: &ClientSession) {
     use std::io::Read;
     session.start_microphone().unwrap();
@@ -150,17 +151,21 @@ fn check_microphone(session: &ClientSession) {
         opus::Encoder::new(48_000, opus::Channels::Stereo, opus::Application::Voip).unwrap();
     let mut phase = 0f32;
     let mut packet = vec![0u8; 4000];
-    let mut talk = |packets: usize| {
-        for _ in 0..packets {
+    // Paced to real time on an absolute schedule, as a microphone delivers;
+    // sleeping 20 ms after each packet runs slow and leaves gaps.
+    let mut talk = |packets: u32| {
+        let start = Instant::now();
+        for n in 0..packets {
             let mut pcm = Vec::with_capacity(1920);
             for _ in 0..960 {
                 let v = (phase.sin() * 8192.0) as i16;
                 pcm.extend([v, v]);
-                phase = (phase + 440.0 * std::f32::consts::TAU / 48_000.0) % std::f32::consts::TAU;
+                phase = (phase + 660.0 * std::f32::consts::TAU / 48_000.0) % std::f32::consts::TAU;
             }
             let len = encoder.encode(&pcm, &mut packet).unwrap();
             session.send_microphone(&packet[..len]).unwrap();
-            std::thread::sleep(Duration::from_millis(20));
+            let due = start + Duration::from_millis(20) * (n + 1);
+            std::thread::sleep(due.saturating_duration_since(Instant::now()));
         }
     };
     // The host makes its virtual microphone when the first packets come.
@@ -181,10 +186,10 @@ fn check_microphone(session: &ClientSession) {
     );
     let mut stdout = recorder.0.stdout.take().unwrap();
     let reader = std::thread::spawn(move || {
-        let mut bytes = vec![0u8; 48_000 * 4];
+        let mut bytes = vec![0u8; 48_000 * 4 * 2];
         stdout.read_exact(&mut bytes).map(|()| bytes)
     });
-    talk(75);
+    talk(150);
     let bytes = reader.join().unwrap().expect("parec recorded nothing");
     drop(recorder);
     let left: Vec<f32> = bytes
@@ -193,7 +198,8 @@ fn check_microphone(session: &ClientSession) {
         .iter()
         .map(|frame| f32::from(i16::from_le_bytes([frame[0], frame[1]])) / 32768.0)
         .collect();
-    let sound = &left[12_000..];
+    // The second of the two seconds recorded, well after the sound settles.
+    let sound = &left[48_000..];
     let rms = (sound.iter().map(|s| s * s).sum::<f32>() / sound.len() as f32).sqrt();
     let crossings = sound
         .windows(2)
@@ -202,7 +208,9 @@ fn check_microphone(session: &ClientSession) {
     let pitch = crossings as f32 * 48_000.0 / sound.len() as f32;
     println!("microphone: level {rms:.3}, pitch {pitch:.0} Hz");
     assert!(rms > 0.05, "silence (level {rms})");
-    assert!((pitch - 440.0).abs() < 15.0, "pitch {pitch}");
+    assert!((pitch - 660.0).abs() < 15.0, "pitch {pitch}");
+    // The tone alone is 0.177; the window's tone on top makes 0.25.
+    assert!(rms < 0.21, "more than the client's voice (level {rms})");
     session.stop_microphone().unwrap();
 }
 
@@ -214,6 +222,41 @@ fn a_window_streams_and_takes_input_under_sway() {
     }
     // With a Pulse server (WINDOWCAST_TEST_PULSE), the window plays a tone.
     let pulse = std::env::var_os("WINDOWCAST_TEST_PULSE").is_some();
+    if pulse {
+        // Speakers for the window to play into. A server with no output
+        // has only module-always-sink's placeholder, which gives way to the
+        // first real sink (the virtual microphone's) and takes the
+        // window's sound with it: nothing a host can put back.
+        let speakers = Command::new("pactl")
+            .args([
+                "load-module",
+                "module-null-sink",
+                "sink_name=windowcast_test_speakers",
+            ])
+            .status()
+            .and_then(|_| {
+                Command::new("pactl")
+                    .args(["set-default-sink", "windowcast_test_speakers"])
+                    .status()
+            });
+        assert!(
+            speakers.is_ok_and(|s| s.success()),
+            "pactl could not make speakers"
+        );
+        // And a server that hands the default, and its streams, to every
+        // new sink, as some desktops do: the host must put them back.
+        let switching = Command::new("pactl")
+            .args([
+                "load-module",
+                "module-switch-on-connect",
+                "ignore_virtual=no",
+            ])
+            .status();
+        assert!(
+            switching.is_ok_and(|s| s.success()),
+            "pactl could not load module-switch-on-connect"
+        );
+    }
     let mut child = KillOnDrop(
         Command::new(env!("CARGO_BIN_EXE_windowcast-test-window"))
             .args([TITLE, "3366cc"])
