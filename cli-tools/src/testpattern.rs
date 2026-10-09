@@ -56,6 +56,63 @@ impl WindowSource for TestPatternSource {
     }
 }
 
+/// The test pattern with a sound: a 440 Hz tone, generated (no capture),
+/// for trying a client's audio playback.
+pub struct TestPatternWithTone;
+
+impl WindowSource for TestPatternWithTone {
+    fn list_windows(&self) -> Vec<WindowInfo> {
+        TestPatternSource.list_windows()
+    }
+
+    fn encoders(&self) -> Vec<VideoCodec> {
+        TestPatternSource.encoders()
+    }
+
+    fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
+        TestPatternSource.open(window, codec)
+    }
+
+    fn open_audio(
+        &self,
+        window: WindowId,
+    ) -> Option<Result<Box<dyn windowcast_host::audio::AudioSource>, String>> {
+        (window == WINDOW).then(|| {
+            Ok(Box::new(Tone {
+                phase: 0.0,
+                next_at: Instant::now(),
+            }) as _)
+        })
+    }
+}
+
+/// A 440 Hz sine at a quarter of full scale, in real time.
+struct Tone {
+    phase: f32,
+    next_at: Instant,
+}
+
+impl windowcast_host::audio::AudioSource for Tone {
+    fn next_samples(&mut self) -> Option<Vec<i16>> {
+        const CHUNK: Duration = Duration::from_millis(20);
+        let now = Instant::now();
+        if self.next_at > now {
+            std::thread::sleep(self.next_at - now);
+        }
+        self.next_at += CHUNK;
+        let mut samples = Vec::with_capacity(960 * 2);
+        for _ in 0..960 {
+            let value = (self.phase.sin() * 8192.0) as i16;
+            samples.extend([value, value]);
+            self.phase += 440.0 * std::f32::consts::TAU / 48_000.0;
+            if self.phase > std::f32::consts::TAU {
+                self.phase -= std::f32::consts::TAU;
+            }
+        }
+        Some(samples)
+    }
+}
+
 struct TestPattern {
     encoder: Encoder,
     frame: u64,

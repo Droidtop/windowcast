@@ -20,6 +20,8 @@ tokio = { workspace = true, features = ["net"] }
 # Software H.264 for the test pattern host and the client's decode check;
 # builds OpenH264 (BSD-2-Clause) from source.
 openh264 = "0.9"
+# Decodes a window's sound to report its level and pitch.
+opus = "0.3"
 
 [dev-dependencies]
 windowcast-identity = { path = "../identity" }

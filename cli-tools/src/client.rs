@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use windowcast_cli_tools::H264Check;
-use windowcast_client::{Client, Event, FramePoll};
+use windowcast_client::{AudioPoll, Client, Event, FramePoll};
 use windowcast_protocol::{VideoCodec, WindowId};
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -115,9 +115,13 @@ fn watch_window(
     }
 
     let mut check = H264Check::new().expect("software H.264 decoder");
+    let mut sound = Sound::new();
     let (mut received, mut keyframes, mut bytes) = (0usize, 0usize, 0usize);
     let started = std::time::Instant::now();
     while received < frames {
+        while let AudioPoll::Packet(packet) = session.next_audio(window, Duration::ZERO) {
+            sound.push(&packet.data);
+        }
         match session.next_frame(window, WAIT) {
             FramePoll::Frame(frame) => {
                 received += 1;
@@ -143,12 +147,59 @@ fn watch_window(
         check.dimensions.unwrap_or_default(),
         check.center
     );
+    if let Some(line) = sound.report() {
+        println!("{line}");
+    }
     if codec == VideoCodec::H264 && check.pictures == 0 {
         fail("nothing decoded");
     }
     session
         .stop_window(window)
         .expect("failed to stop the stream");
+}
+
+/// A window's sound as it arrives: Opus decoded, for its level and pitch.
+struct Sound {
+    decoder: opus::Decoder,
+    packets: usize,
+    left: Vec<f32>,
+}
+
+impl Sound {
+    fn new() -> Self {
+        Sound {
+            decoder: opus::Decoder::new(48_000, opus::Channels::Stereo).expect("Opus decoder"),
+            packets: 0,
+            left: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, packet: &[u8]) {
+        let mut pcm = vec![0f32; 5760 * 2];
+        if let Ok(frames) = self.decoder.decode_float(packet, &mut pcm, false) {
+            self.left.extend(pcm[..frames * 2].iter().step_by(2));
+            self.packets += 1;
+        }
+    }
+
+    /// "sound: N Opus packets, level L, pitch P Hz", if any came.
+    fn report(&self) -> Option<String> {
+        if self.packets == 0 {
+            return None;
+        }
+        let n = self.left.len().max(1) as f32;
+        let rms = (self.left.iter().map(|s| s * s).sum::<f32>() / n).sqrt();
+        let crossings = self
+            .left
+            .windows(2)
+            .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
+            .count();
+        Some(format!(
+            "sound: {} Opus packets, level {rms:.3}, pitch {:.0} Hz",
+            self.packets,
+            crossings as f32 * 48_000.0 / n
+        ))
+    }
 }
 
 fn fail(message: &str) -> ! {
