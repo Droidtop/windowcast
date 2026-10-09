@@ -49,7 +49,7 @@ client, and the clipboard both ways; the Windows agent delivers all but
 gamepads. What's **not** done yet: capture and input on Linux (the Linux
 agent lists windows but cannot capture them — see
 `agent-linux/src/capture.rs`) and macOS, gamepads on Windows (they need a
-virtual gamepad driver), audio, and every backend except the native one
+virtual gamepad driver), audio, and every backend except the native one and, on Windows, the desktop one
 (their seam is in place: see docs/BACKENDS.md).
 
 | Crate | Status |
@@ -64,9 +64,11 @@ virtual gamepad driver), audio, and every backend except the native one
 | `client-core` | Real, tested: the client surface, a Rust API and the C interface `include/windowcast.h` (connect/pair/resume, window list, streams, events as JSON, whole frames per window) |
 | `android/` | The Android library (JNI over the C interface, MediaCodec decoding onto a Surface) and a viewer app; built by CI for arm64-v8a and x86_64; not yet run on a device |
 | `agent-linux` | Thin over `host-core`: window lists from a real compositor (`zwlr_foreign_toplevel_manager_v1`); capture is an explicit refusal (needs `ext-image-copy-capture-v1`, not vendored yet) |
-| `agent-windows` | Real, tested: the desktop's windows, per-window capture (Windows.Graphics.Capture), BGRA to NV12/I420, encoders behind one interface chosen with `--encoder` (Media Foundation hardware, i.e. the GPU vendor's NVENC/AMF/Quick Sync MFT, with H.265 where offered; Microsoft's software H.264 MFT; OpenH264). CI captures a real window, encodes it with each encoder, streams it over loopback and decodes it. Input with SendInput (pointer mapped from the picture to the window, keys as scan codes, text as Unicode, touch as the pointer), clipboard text both ways; CI clicks and types into a real window through a client |
+| `agent-windows` | Real, tested: the desktop's windows, per-window capture (Windows.Graphics.Capture), BGRA to NV12/I420, encoders behind one interface chosen with `--encoder` (Media Foundation hardware, i.e. the GPU vendor's NVENC/AMF/Quick Sync MFT, or one vendor's on a machine with several, with H.265 and AV1 where offered; Microsoft's software H.264 MFT; OpenH264). CI captures a real window, encodes it with each encoder, streams it over loopback and decodes it. Input with SendInput (pointer mapped from the picture to the window, keys as scan codes, text as Unicode, touch as the pointer), clipboard text both ways; CI clicks and types into a real window through a client |
 | `agent-macos` | Not started |
-| GameStream, RDP, VNC, passthrough, whole-desktop backends | Not started; the seam is in `protocol` (`StreamBackend`, `selection`). Each is our own implementation of its protocol; GameStream pairing follows the real protocol's salted-PIN AES challenge/response, read from reference sources, not guessed at |
+| GameStream, RDP, VNC, passthrough backends; desktop on Linux | Not started; the seam is in `protocol` (`StreamBackend`, `selection`). Each is our own implementation of its protocol; GameStream pairing follows the real protocol's salted-PIN AES challenge/response, read from reference sources, not guessed at |
+| `client-windows` | The Windows client end: hardware decoding with Media Foundation on a Direct3D 11 device (H.264; H.265 and AV1 with Microsoft's Video Extensions), presented through the GPU's video processor into a flip-model swap chain in a native window per stream; pointer and keys back to the host |
+| `app` | The reference application `windowcast-app`: host, client or both by configuration, a native window per role (egui) and one per streamed window (`client-windows`); `--connect`/`--stream` for a stream straight from the command line. Host role on Windows only so far |
 | `cli-tools` | `windowcast-client` (pairs or resumes, lists windows, `--watch` streams one and decodes it) and `windowcast-testhost` (a host whose one window is an OpenH264 test pattern, Windows included) |
 
 ## Design
@@ -115,9 +117,12 @@ The Android library and viewer: build client-core with
 then `./gradlew :windowcast:assembleRelease :viewer:assembleDebug` in
 `android/` (CI does both, `.github/workflows/android.yml`).
 
-Trying it: run `windowcast-testhost` on one machine (it prints a PIN),
-then `windowcast-client HOST:47100 --pin PIN --watch 1` or the Android
-viewer with the same address and PIN.
+Trying it: run `windowcast-app --role host` on one machine and
+`windowcast-app --role client` on another (or both roles on one), enter
+the host's PIN in the client window and pick a window to stream; or
+`windowcast-app --role client --connect HOST:47100 --pin PIN --stream APP`. `windowcast-testhost` (a test
+pattern, any OS) with `windowcast-client HOST:47100 --pin PIN --watch 1`
+or the Android viewer works too.
 
 `agent-linux` needs Wayland client headers (`libwayland-dev`,
 `libxkbcommon-dev` on Debian/Ubuntu) to build.

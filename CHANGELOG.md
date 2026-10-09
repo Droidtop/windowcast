@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- The reference application, `windowcast-app`: the minimal, complete demonstration of the library, a host, a client or both by its configuration, with a native window for each role. Pair by PIN, see the host's windows with what each shows and the backend the rules pick, set a backend per app, choose codec, encoder, frame rate and bitrate (changes reach running streams), switch input and clipboard sharing, watch live statistics, and keep paired hosts. Each streamed window opens in a window of its own, normal or fullscreen on a chosen display (F11 switches). `--connect HOST --stream APP` streams one window straight from the command line, and `--no-window` runs a host without its window. The host role is Windows-only for now.
+- A Windows client end (`client-windows`): each streamed window is decoded on the graphics card by Windows' own decoder (Media Foundation with Direct3D 11) and shown through a flip-model swap chain, with no copy through the processor; pointer and keys go back when input is on. It decodes the codecs Windows has decoders for: H.264 always, H.265 and AV1 with Microsoft's HEVC and AV1 Video Extensions.
+- The whole-desktop backend on Windows: a window cut out of a capture of its whole screen, with whatever covers it.
+- Windows hosts can pick one graphics card's encoder (`--encoder nvenc`, `quicksync` or `amf`) on machines with more than one, and AV1 where the card encodes it.
+- A host application can watch and steer a running host (`HostControl`: the PIN, a new PIN, the trusted clients, who is connected and every stream's counters), and clients can measure the round trip to the host and ask for a keyframe.
+- Browser windows on video sites are detected as video.
+
+### Fixed
+- A window streamed a second time in one session never arrived at the client.
+- Windows hosts sent pictures faster than the frame rate they were set to.
+
+### Changed
+- A host listening on a loopback address, and a client connecting to one, open no network ports at all: the session uses loopback only.
+
 ## [0.6.0] - 2026-10-09
 
 ### Added

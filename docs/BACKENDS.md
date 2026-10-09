@@ -34,7 +34,7 @@ over it and keyed from it.
 |---|---|---|---|
 | `Native` | everything by default | a video track on the session; the host captures and encodes the window | built: tracks, codecs, keyframe requests; capture and encode per host OS are the agents' work (#104, #105) |
 | `Passthrough` | video players | a video track on the session, carrying the media as it was already encoded (no second encode) | seam only |
-| `Desktop` | hosts that cannot capture one window; whole-desktop streams | a video track on the session, cut from a whole-output capture | seam only (#112) |
+| `Desktop` | hosts that cannot capture one window; whole-desktop streams | a video track on the session, cut from a whole-output capture | built on Windows: the window cut from a capture of its screen, with whatever covers it; whole-desktop targets are #112 |
 | `GameStream` | games | its own low-latency video, audio and controller channels | seam only (#110) |
 | `Rdp` | text-heavy windows: editors, terminals, documents | its own connection; sharp text at low bandwidth | seam only (#111) |
 | `Vnc` | anything else that only speaks VNC | its own connection | seam only (#111) |
@@ -49,8 +49,8 @@ first it can produce (for passthrough, the codec the media already is).
 
 1. The host classifies each window when it lists windows (`classify`):
    `Game` for Steam games (app id `steam_app_<id>`) and gamescope, `Text`
-   for known terminals and editors, `Video` for known video players,
-   `General` otherwise. The app lists are in `selection.rs`.
+   for known terminals and editors, `Video` for known video players and
+   for browsers whose title names a video site, `General` otherwise. The app lists are in `selection.rs`.
 2. The client chooses (`choose_backend`): the user's own rules first, then
    the defaults. A per-app override is a user rule naming that app id; a
    rule can also match on title text or content hint.
