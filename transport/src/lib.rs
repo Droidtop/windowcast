@@ -543,10 +543,15 @@ impl Session {
         })
         .await?;
 
-        let answer = tokio::time::timeout(NEGOTIATION_TIMEOUT, answer_rx)
-            .await
-            .map_err(|_| TransportError::Timeout)?
-            .map_err(|_| TransportError::Closed)?;
+        // A peer that says goodbye mid-negotiation never answers: stop
+        // waiting then, rather than holding the session for the timeout.
+        let mut closed = self.closed.clone();
+        let answer = tokio::select! {
+            answer = tokio::time::timeout(NEGOTIATION_TIMEOUT, answer_rx) => answer
+                .map_err(|_| TransportError::Timeout)?
+                .map_err(|_| TransportError::Closed)?,
+            _ = closed.wait_for(|closed| *closed) => return Err(TransportError::Closed),
+        };
         self.set_remote_description(SdpKind::Answer, answer).await
     }
 }
