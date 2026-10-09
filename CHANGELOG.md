@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.15.0] - 2026-10-09
 
 ### Added
 - Away from the LAN (Droidtop/tracker#113): a host can be reachable by the clients it trusts from anywhere ("Reachable away from home", off by default; UDP 47101). Both sides find each other the way Syncthing's devices do, with the code droidtop-agent uses, now shared as the `windowcast-rendezvous` crate: STUN for the address the NAT gives the rendezvous socket, Syncthing's global discovery for announcing and looking it up, and hole punching. Signaling runs over a small reliable stream on the punched socket (`transport::punched`) and the session crosses the NATs with ICE (`Session::away`). Only addresses go to discovery and STUN; nothing is ever relayed. The two sides learn each other's discovery IDs on a trusted session (`ControlMessage::Rendezvous`); a client then looks for a paired host away when it does not answer on the LAN (the reference app, `Client::connect_away`, `windowcast_connect_away`). A host takes no pairing from away.
