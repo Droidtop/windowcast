@@ -38,11 +38,13 @@ over an untrusted signaling stream, and the host can attach and detach
 per-window video tracks in H.264, H.265 or AV1 that the client receives
 as whole frames. Two peers on the same device connect over loopback even
 with no network. Loopback tests run all of it between two real WebRTC
-stacks. What's **not** done yet: any real capture or encoder feeding
-those tracks (the Linux agent lists windows but cannot capture them — see
-`agent-linux/src/capture.rs`; there is no Windows or macOS agent),
-client-side decode, input, audio, and every backend except the native one
-(their seam is in place: see docs/BACKENDS.md).
+stacks. Real H.264 video streams end to end: the test-pattern host
+(`windowcast-testhost`, OpenH264) to any client through `client-core`,
+and the Android library decodes it with MediaCodec (not yet run on a
+device). What's **not** done yet: capturing real windows (the Linux agent
+lists windows but cannot capture them — see `agent-linux/src/capture.rs`;
+there is no Windows or macOS agent), input, audio, and every backend
+except the native one (their seam is in place: see docs/BACKENDS.md).
 
 | Crate | Status |
 |---|---|
@@ -52,12 +54,14 @@ client-side decode, input, audio, and every backend except the native one
 | `directory` | Real, tested (accounts, Argon2 password hashing, PASETO v4.public session certificates) — the *account* credential |
 | `apollo-client` | Real, tested `serverinfo` client + `applist` XML parser for a local Sunshine/Apollo host; the authenticated fetch needs the GameStream backend's pairing (not started) |
 | `transport` | Real, tested (webrtc-rs 0.21): authenticated offer/answer signaling over any byte stream (`signaling::connect`/`accept`), the control data channel, per-window H.264/H.265/AV1 tracks with renegotiation over the control channel, keyframe requests, loopback candidates for same-device sessions, TURN relay wiring (`Session::with_relay`) |
-| `client-core` | FFI skeleton (session create/free); does not expose signaling or frames yet |
-| `agent-linux` | Serves clients over TCP (PIN pairing, then pinned resume) and answers window lists from a real compositor (`zwlr_foreign_toplevel_manager_v1`); capture is an explicit `NotImplemented` (needs `ext-image-copy-capture-v1`, not vendored yet) |
+| `host-core` | Real, tested: the host side of the library (listening, PIN pairing with lockout and re-issue, trusted clients, window lists, backend and codec choice, feeding window tracks from an agent's encoder, keyframe requests). Agents implement `WindowSource` |
+| `client-core` | Real, tested: the client surface, a Rust API and the C interface `include/windowcast.h` (connect/pair/resume, window list, streams, events as JSON, whole frames per window) |
+| `android/` | The Android library (JNI over the C interface, MediaCodec decoding onto a Surface) and a viewer app; built by CI for arm64-v8a and x86_64; not yet run on a device |
+| `agent-linux` | Thin over `host-core`: window lists from a real compositor (`zwlr_foreign_toplevel_manager_v1`); capture is an explicit refusal (needs `ext-image-copy-capture-v1`, not vendored yet) |
 | `agent-windows` | Not started |
 | `agent-macos` | Not started |
 | GameStream, RDP, VNC, passthrough, whole-desktop backends | Not started; the seam is in `protocol` (`StreamBackend`, `selection`). Each is our own implementation of its protocol; GameStream pairing follows the real protocol's salted-PIN AES challenge/response, read from reference sources, not guessed at |
-| `cli-tools` | Reference client CLI: pairs with or resumes to a host agent and lists its windows |
+| `cli-tools` | `windowcast-client` (pairs or resumes, lists windows, `--watch` streams one and decodes it) and `windowcast-testhost` (a host whose one window is an OpenH264 test pattern, Windows included) |
 
 ## Design
 
@@ -99,6 +103,15 @@ connect over loopback even with no network up.
 cargo build --workspace
 cargo test --workspace
 ```
+
+The Android library and viewer: build client-core with
+`cargo ndk -t arm64-v8a -t x86_64 -P 26 -o android/windowcast/src/main/jniLibs build --release -p windowcast-client-core`,
+then `./gradlew :windowcast:assembleRelease :viewer:assembleDebug` in
+`android/` (CI does both, `.github/workflows/android.yml`).
+
+Trying it: run `windowcast-testhost` on one machine (it prints a PIN),
+then `windowcast-client HOST:47100 --pin PIN --watch 1` or the Android
+viewer with the same address and PIN.
 
 `agent-linux` needs Wayland client headers (`libwayland-dev`,
 `libxkbcommon-dev` on Debian/Ubuntu) to build.
