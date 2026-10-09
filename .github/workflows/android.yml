@@ -52,6 +52,21 @@ jobs:
         working-directory: android
         run: ./gradlew :windowcast:assembleRelease :viewer:assembleDebug --stacktrace
 
+      # Android loads the bridge's dependencies by name; a path from this
+      # machine in its NEEDED entries is a library that never loads.
+      - name: The JNI bridge needs the client library by name
+        run: |
+          set -eu
+          readelf=$(ls "$ANDROID_NDK_LATEST_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-readelf | head -1)
+          found=$(find android -path '*/build/*' -name libwindowcast_jni.so)
+          [ -n "$found" ]
+          for so in $found; do
+            needed=$("$readelf" -d "$so" | grep NEEDED)
+            echo "$so: $needed"
+            if echo "$needed" | grep -q '/'; then echo "a path in NEEDED"; exit 1; fi
+            echo "$needed" | grep -q '\[libwindowcast_client.so\]'
+          done
+
       - name: Upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
