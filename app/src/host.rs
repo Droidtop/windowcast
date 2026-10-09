@@ -20,7 +20,7 @@ use crate::platform::{self, Agent};
 /// settings.
 struct Gated {
     agent: Agent,
-    input: AtomicBool,
+    input: Arc<AtomicBool>,
     clipboard: AtomicBool,
     microphone: Arc<AtomicBool>,
 }
@@ -37,6 +37,27 @@ impl windowcast_host::audio::MicrophoneSink for GatedMicrophone {
         if self.allowed.load(Ordering::SeqCst) {
             self.sink.play(samples);
         }
+    }
+}
+
+/// A session's pads, driven only while the host lets clients drive it;
+/// switched off, a pad is unplugged rather than left holding its buttons.
+struct GatedPads {
+    sink: Box<dyn windowcast_host::gamepad::GamepadSink>,
+    allowed: Arc<AtomicBool>,
+}
+
+impl windowcast_host::gamepad::GamepadSink for GatedPads {
+    fn set(&mut self, pad: u8, state: &windowcast_protocol::GamepadState) {
+        if self.allowed.load(Ordering::SeqCst) {
+            self.sink.set(pad, state);
+        } else {
+            self.sink.remove(pad);
+        }
+    }
+
+    fn remove(&mut self, pad: u8) {
+        self.sink.remove(pad);
     }
 }
 
@@ -69,6 +90,15 @@ impl WindowSource for Gated {
         if self.input.load(Ordering::SeqCst) {
             self.agent.input(event, focus);
         }
+    }
+
+    fn gamepads(&self) -> Option<Result<Box<dyn windowcast_host::gamepad::GamepadSink>, String>> {
+        Some(self.agent.gamepads()?.map(|sink| {
+            Box::new(GatedPads {
+                sink,
+                allowed: Arc::clone(&self.input),
+            }) as _
+        }))
     }
 
     fn clipboard(&self) -> Option<(u64, String)> {
@@ -202,7 +232,7 @@ impl HostRole {
         println!("host listening on {listen}");
         let source = Arc::new(Gated {
             agent,
-            input: AtomicBool::new(settings.input),
+            input: Arc::new(AtomicBool::new(settings.input)),
             clipboard: AtomicBool::new(settings.clipboard),
             microphone: Arc::new(AtomicBool::new(settings.microphone)),
         });

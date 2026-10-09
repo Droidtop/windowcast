@@ -193,7 +193,10 @@ impl App {
             ui.heading("Encoding");
             encoding_ui(ui, &host, &snapshot, &mut settings);
             ui.horizontal(|ui| {
-                ui.checkbox(&mut settings.input, "Clients may drive streamed windows");
+                ui.checkbox(
+                    &mut settings.input,
+                    "Clients may drive streamed windows and use gamepads",
+                );
                 ui.checkbox(&mut settings.clipboard, "Share the clipboard");
                 ui.checkbox(
                     &mut settings.microphone,
