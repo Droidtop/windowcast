@@ -3,7 +3,9 @@
 //! afterwards), lists the host's windows and can stream one, checking that
 //! the frames decode.
 //!
-//! Usage: `windowcast-client HOST:PORT [--pin PIN] [--watch WINDOW] [--frames N]`
+//! Usage: `windowcast-client HOST:PORT [--pin PIN] [--watch WINDOW] [--frames N]
+//! [--codec h264|h265|av1]` (frames are checked by decoding them for H.264
+//! only; other codecs are counted).
 
 use std::time::Duration;
 
@@ -18,6 +20,7 @@ fn main() {
     let mut pin = None;
     let mut watch = None;
     let mut frames = 90usize;
+    let mut codec = VideoCodec::H264;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -34,6 +37,14 @@ fn main() {
                     .next()
                     .and_then(|n| n.parse().ok())
                     .expect("--frames needs a number")
+            }
+            "--codec" => {
+                codec = match args.next().as_deref() {
+                    Some("h264") => VideoCodec::H264,
+                    Some("h265") => VideoCodec::H265,
+                    Some("av1") => VideoCodec::Av1,
+                    _ => panic!("--codec is h264, h265 or av1"),
+                }
             }
             other if host.is_none() => host = Some(other.to_owned()),
             other => panic!("unknown argument {other}"),
@@ -74,14 +85,19 @@ fn main() {
     }
 
     if let Some(window) = watch {
-        watch_window(&session, window, frames);
+        watch_window(&session, window, frames, codec);
     }
     session.close();
 }
 
-fn watch_window(session: &windowcast_client::ClientSession, window: WindowId, frames: usize) {
+fn watch_window(
+    session: &windowcast_client::ClientSession,
+    window: WindowId,
+    frames: usize,
+    codec: VideoCodec,
+) {
     session
-        .start_window(window, &[VideoCodec::H264])
+        .start_window(window, &[codec])
         .expect("failed to ask for the stream");
     loop {
         match session.next_event(WAIT) {
@@ -107,6 +123,9 @@ fn watch_window(session: &windowcast_client::ClientSession, window: WindowId, fr
                 received += 1;
                 keyframes += usize::from(frame.keyframe);
                 bytes += frame.data.len();
+                if codec != VideoCodec::H264 {
+                    continue;
+                }
                 if let Err(e) = check.decode(&frame.data) {
                     fail(&format!("frame {received} does not decode: {e}"));
                 }
@@ -123,7 +142,7 @@ fn watch_window(session: &windowcast_client::ClientSession, window: WindowId, fr
         check.pictures,
         check.dimensions.unwrap_or_default()
     );
-    if check.pictures == 0 {
+    if codec == VideoCodec::H264 && check.pictures == 0 {
         fail("nothing decoded");
     }
     session
