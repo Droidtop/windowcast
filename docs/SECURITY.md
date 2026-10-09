@@ -135,17 +135,37 @@ account can hold a different `session_peer_id` on every device it logs in
 from, and a host authorizing "this account" is authorizing the person, not
 whichever machine happens to be running the client this time.
 
-## Directory-mediated sessions: authenticate-and-broker, not intercept
+## Away from the LAN: addresses through third parties, never data
 
-A directory can also help two peers behind restrictive NATs actually
-connect, via a **blind TURN relay** (`transport::Session::with_relay`) —
-this is standard WebRTC TURN, not a windowcast-specific protocol. The
-directory relays opaque DTLS-SRTP packets it cannot decrypt; it never
-becomes a party to the encrypted session and never sees window content.
-This was a deliberate choice, not a limitation to work around later: a
-terminating proxy (one that decrypts and re-encrypts to inspect or log
-content) is a fundamentally different trust model — a real, designed-in
-man-in-the-middle — and nothing in windowcast does that today.
+A host and a client it trusts find each other away from the LAN the way
+Syncthing's devices do, with the code droidtop-agent uses too
+(`windowcast-rendezvous`): each side learns the address its NAT gives its
+rendezvous socket from public STUN servers, announces it to Syncthing's
+global discovery under its discovery ID, looks the other up, and both send
+towards each other until the NATs let a stream through. Only addresses go
+to those servers. There is no relay of any kind: no TURN, no Syncthing
+relays; when two NATs cannot be punched (both changing the port for every
+destination), the session does not happen.
+
+- **Who can be found.** A discovery ID is the SHA-256 of a certificate made
+  from a key derived from the device's identity seed and the label
+  `windowcast discovery certificate v1`; it reveals nothing about the
+  identity itself. The two sides tell each other their IDs over a session
+  they already trust (`ControlMessage::Rendezvous`, on the LAN first) and
+  keep them beside the trust store (`remote-peers.json`, `remote-hosts.json`).
+  A host looks up only clients it trusts and punches only towards them.
+- **What the discovery servers learn.** That a device with this ID is at
+  this address, as for any Syncthing device. They see no identity, no
+  window, nothing of the session.
+- **Signaling over the punched stream** is the same authenticated
+  offer/answer as on the LAN: whoever sees or alters the datagrams cannot
+  substitute a description. A host takes no pairing from away; only
+  clients it already pinned get in.
+- **The session** crosses the NATs with ICE, its candidates including the
+  addresses STUN reports, inside the same DTLS-SRTP as on the LAN.
+- **Off by default** on hosts ("Reachable away from home"); a client only
+  looks for a paired host away when it does not answer on the LAN, unless
+  told never to.
 
 ## Bulk media/data encryption
 
