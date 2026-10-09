@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-09
+
+### Added
+- Each window can use the protocol that suits it. Windows carry a content hint (text, game, video, general), clients choose a backend from the user's own per-app rules and then a default table (text over RDP, games over GameStream, video by passthrough, everything else native), and hosts fall back to the native backend for anything they cannot serve yet. Only the native backend exists so far; the others are named and documented in docs/BACKENDS.md.
+- Window video in H.265 and AV1 as well as H.264, chosen per window from what the client can decode.
+- A client and host on the same device now connect even with no network up, over loopback.
+- A host whose PIN was withdrawn after three wrong guesses shows a new one a minute later instead of needing a restart.
+
+### Changed
+- The protocol version is now 3; older peers are refused.
+- Closing a session now tells the other side at once instead of leaving it to notice half a minute later.
+- Moved to the current webrtc-rs release line (0.21).
+
 ## [0.2.0] - 2026-10-08
 
 ### Added
