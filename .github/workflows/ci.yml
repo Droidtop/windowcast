@@ -89,7 +89,7 @@ jobs:
     steps:
       - name: Install system dependencies
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rust nasm cmake sway wayland libxkbcommon xkeyboard-config pulseaudio libpulse
+          pacman -Syu --noconfirm --needed base-devel git rust nasm cmake sway wayland libxkbcommon xkeyboard-config pulseaudio libpulse moonlight-qt
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -123,3 +123,10 @@ jobs:
           HOME=/tmp/pulsehome pulseaudio --daemonize --exit-idle-time=-1             --log-target=file:/tmp/pulse.log || { cat /tmp/pulse.log; exit 1; }
           export PULSE_COOKIE=/tmp/pulsehome/.config/pulse/cookie
           WINDOWCAST_TEST_SWAY=1 WINDOWCAST_TEST_PULSE=1 cargo test -p windowcast-agent-linux -- --nocapture
+          # Stock Moonlight (Arch's moonlight-qt) pairs with our GameStream
+          # host and lists its apps. Its own HOME, and no mDNS, so it sees
+          # only the test host.
+          mkdir -p "/tmp/moonhome/.config/Moonlight Game Streaming Project"
+          printf '%s\n' '[General]' 'enableMdns=false' > "/tmp/moonhome/.config/Moonlight Game Streaming Project/Moonlight.conf"
+          HOME=/tmp/moonhome QT_QPA_PLATFORM=wayland WINDOWCAST_TEST_MOONLIGHT=1 \
+            cargo test -p windowcast-gamestream --test moonlight -- --nocapture

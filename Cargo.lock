@@ -770,6 +770,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid",
+ "pem-rfc7468",
  "zeroize",
 ]
 
@@ -814,6 +815,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
+ "const-oid",
  "crypto-common",
  "subtle",
 ]
@@ -1849,6 +1851,9 @@ name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+dependencies = [
+ "spin",
+]
 
 [[package]]
 name = "libc"
@@ -2182,6 +2187,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint-dig"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e661dda6640fad38e827a6d4a310ff4763082116fe217f279885c97f511bb0b7"
+dependencies = [
+ "lazy_static",
+ "libm",
+ "num-integer",
+ "num-iter",
+ "num-traits",
+ "rand 0.8.8",
+ "smallvec",
+ "zeroize",
+]
+
+[[package]]
 name = "num-conv"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2204,6 +2225,16 @@ version = "0.1.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ce2d95d4b3734dc35aa2f45e1aa22cd416814592a4f9d9205e11affd5b8e10b"
 dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "num-iter"
+version = "0.1.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c92800bd69a1eac91786bcfe9da64a897eb72911b8dc3095decbd07429e8048b"
+dependencies = [
+ "num-integer",
  "num-traits",
 ]
 
@@ -2644,6 +2675,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem-rfc7468"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88b39c9bfcfc231068454382784bb460aae594343fb030d46e9f50a645418412"
+dependencies = [
+ "base64ct",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2674,6 +2714,17 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "pkcs1"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8ffb9f10fa047879315e6625af03c164b16962a5368d724ed16323b68ace47f"
+dependencies = [
+ "der",
+ "pkcs8",
+ "spki",
+]
 
 [[package]]
 name = "pkcs8"
@@ -2753,6 +2804,15 @@ name = "powerfmt"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
+
+[[package]]
+name = "ppv-lite86"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
+dependencies = [
+ "zerocopy",
+]
 
 [[package]]
 name = "proc-macro-crate"
@@ -2858,7 +2918,7 @@ dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "lru-slab",
- "rand",
+ "rand 0.10.2",
  "rand_pcg",
  "ring",
  "rustc-hash 2.1.3",
@@ -2936,6 +2996,16 @@ dependencies = [
 
 [[package]]
 name = "rand"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
+dependencies = [
+ "rand_chacha",
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
@@ -2943,6 +3013,16 @@ dependencies = [
  "chacha20 0.10.1",
  "getrandom 0.4.3",
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "rand_chacha"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -2987,6 +3067,7 @@ version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
 dependencies = [
+ "pem 3.0.6",
  "ring",
  "rustls-pki-types",
  "time",
@@ -3132,6 +3213,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsa"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d"
+dependencies = [
+ "const-oid",
+ "digest",
+ "num-bigint-dig",
+ "num-integer",
+ "num-traits",
+ "pkcs1",
+ "pkcs8",
+ "rand_core 0.6.4",
+ "sha2",
+ "signature",
+ "spki",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "rtc"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3141,7 +3243,7 @@ dependencies = [
  "hex",
  "log",
  "pem 3.0.6",
- "rand",
+ "rand 0.10.2",
  "rcgen 0.14.10",
  "rtc-crypto",
  "rtc-datachannel",
@@ -3178,7 +3280,7 @@ dependencies = [
  "ctr",
  "hmac",
  "md-5",
- "rand",
+ "rand 0.10.2",
  "ring",
  "sha1",
  "subtle",
@@ -3245,7 +3347,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b89c8484098eb9f7848152780df3450d704f371e4e930fda443a50b4434da3a3"
 dependencies = [
  "log",
- "rand",
+ "rand 0.10.2",
  "rtc-rtcp",
  "rtc-rtp",
  "rtc-shared",
@@ -3273,7 +3375,7 @@ checksum = "79245110e26b3624b1bfd89de8fecc4f94ddb8047dc143f3278ea32e893d05a1"
 dependencies = [
  "byteorder",
  "bytes",
- "rand",
+ "rand 0.10.2",
  "rtc-rtp",
  "rtc-shared",
  "thiserror 2.0.20",
@@ -3297,7 +3399,7 @@ checksum = "ac6a382bc412e79e1a047dc916c435098d9b8d86d6fb76b845948e628df53cfd"
 dependencies = [
  "bytes",
  "memchr",
- "rand",
+ "rand 0.10.2",
  "rtc-shared",
  "serde",
 ]
@@ -3311,7 +3413,7 @@ dependencies = [
  "bytes",
  "crc32c",
  "log",
- "rand",
+ "rand 0.10.2",
  "rtc-shared",
  "rustc-hash 2.1.3",
  "slab",
@@ -3324,7 +3426,7 @@ version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a59de63dab713911debb05fb5931da889692e50333462e965b783f41f5f90337"
 dependencies = [
- "rand",
+ "rand 0.10.2",
  "rtc-shared",
  "url",
 ]
@@ -3338,7 +3440,7 @@ dependencies = [
  "bitflags 1.3.2",
  "bytes",
  "nix 0.31.3",
- "rand",
+ "rand 0.10.2",
  "serde",
  "substring",
  "thiserror 2.0.20",
@@ -3370,7 +3472,7 @@ dependencies = [
  "bytes",
  "crc",
  "lazy_static",
- "rand",
+ "rand 0.10.2",
  "rtc-crypto",
  "rtc-shared",
  "sansio",
@@ -3650,6 +3752,7 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
+ "digest",
  "rand_core 0.6.4",
 ]
 
@@ -3789,6 +3892,12 @@ dependencies = [
  "rand_core 0.6.4",
  "sha2",
 ]
+
+[[package]]
+name = "spin"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 
 [[package]]
 name = "spki"
@@ -4814,6 +4923,24 @@ dependencies = [
  "thiserror 1.0.69",
  "time",
  "windowcast-identity",
+]
+
+[[package]]
+name = "windowcast-gamestream"
+version = "0.15.0"
+dependencies = [
+ "aes",
+ "rand_core 0.6.4",
+ "rcgen 0.13.2",
+ "rsa",
+ "rustls",
+ "sha1",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls",
+ "ureq",
+ "x509-parser 0.16.0",
 ]
 
 [[package]]
