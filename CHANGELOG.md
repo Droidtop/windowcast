@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-10-09
 
 ### Added
 - Linux hosts stream real windows: the Linux agent captures a window under any Wayland compositor with ext-image-copy-capture (wlroots 0.19 and sway 1.11 and later), encodes it with OpenH264, and serves the desktop backend under sway. Window ids stay the same across connections.
