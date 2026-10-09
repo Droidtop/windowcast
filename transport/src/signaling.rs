@@ -29,7 +29,6 @@
 
 use rand_core::{OsRng, RngCore};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use windowcast_identity::{Identity, PeerId, TrustStore};
 use windowcast_pairing::SessionKey;
 use windowcast_protocol::{ConnectMode, SdpKind, SignalMessage, PROTOCOL_VERSION};
@@ -167,7 +166,7 @@ where
         ClientCredential::Pinned(_) => None,
     };
 
-    let offer = complete_local_description(session, SdpKind::Offer).await?;
+    let offer = session.gathered_local_description(SdpKind::Offer).await?;
     send_description(
         stream,
         identity,
@@ -181,8 +180,7 @@ where
 
     let answer = receive_description(stream, key.as_ref(), SdpKind::Answer, &client, &host).await?;
     session
-        .peer_connection
-        .set_remote_description(RTCSessionDescription::answer(answer)?)
+        .set_remote_description(SdpKind::Answer, answer)
         .await?;
     session.wait_control_open().await?;
     Ok((host.peer, key.is_some()))
@@ -239,10 +237,9 @@ where
             Err(e) => return Err(e),
         };
     session
-        .peer_connection
-        .set_remote_description(RTCSessionDescription::offer(offer)?)
+        .set_remote_description(SdpKind::Offer, offer)
         .await?;
-    let answer = complete_local_description(session, SdpKind::Answer).await?;
+    let answer = session.gathered_local_description(SdpKind::Answer).await?;
     send_description(
         stream,
         identity,
@@ -256,26 +253,6 @@ where
 
     session.wait_control_open().await?;
     Ok((client.peer, key.is_some()))
-}
-
-/// Creates the offer or answer and waits for ICE gathering, so the SDP
-/// that gets signed carries every candidate.
-async fn complete_local_description(
-    session: &Session,
-    kind: SdpKind,
-) -> Result<String, TransportError> {
-    let pc = &session.peer_connection;
-    let description = match kind {
-        SdpKind::Offer => pc.create_offer(None).await?,
-        SdpKind::Answer => pc.create_answer(None).await?,
-    };
-    let mut gathered = pc.gathering_complete_promise().await;
-    pc.set_local_description(description).await?;
-    let _ = gathered.recv().await;
-    pc.local_description()
-        .await
-        .map(|description| description.sdp)
-        .ok_or(TransportError::Closed)
 }
 
 fn transcript(kind: SdpKind, client: &Hello, host: &Hello, sdp: &str) -> Vec<u8> {

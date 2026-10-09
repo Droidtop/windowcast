@@ -9,7 +9,7 @@ use bytes::Bytes;
 use tokio::io::DuplexStream;
 use tokio::net::{TcpListener, TcpStream};
 use windowcast_identity::{Identity, TrustStore};
-use windowcast_protocol::{ControlMessage, SdpKind, SignalMessage, WindowId};
+use windowcast_protocol::{ControlMessage, SdpKind, SignalMessage, VideoCodec, WindowId};
 use windowcast_transport::signaling::{read_message, write_message};
 use windowcast_transport::{
     accept, connect, ClientCredential, Established, HostCredential, Session, TransportError,
@@ -199,9 +199,13 @@ async fn a_signaling_relay_that_swaps_the_fingerprint_is_caught() {
 
     // Replace the client's DTLS fingerprint with another certificate's, as
     // an attacker who wants to terminate DTLS themselves would.
-    let attacker = Session::new().await.unwrap();
-    let attacker_fingerprint =
-        String::from_utf8(attacker.local_dtls_fingerprint().unwrap()).unwrap();
+    let attacker_fingerprint = format!(
+        "sha-256 {}",
+        (0..32)
+            .map(|i| format!("{:02X}", i * 7))
+            .collect::<Vec<_>>()
+            .join(":")
+    );
     tokio::spawn(relay(
         relay_client_side,
         relay_host_side,
@@ -256,12 +260,89 @@ async fn a_signaling_relay_that_swaps_the_fingerprint_is_caught() {
     assert!(matches!(client, Err(TransportError::Rejected(_))));
 }
 
-/// Splits an Annex-B buffer into its NAL units (start codes removed).
-fn nal_units(annex_b: &[u8]) -> Vec<Vec<u8>> {
+/// Test bitstream units. Not decodable pictures: these tests check the
+/// transport carries each codec's units intact. Bodies are free of zero
+/// bytes, so an Annex-B body can never contain a start code.
+fn body(len: usize, seed: u8) -> impl Iterator<Item = u8> {
+    (0..len).map(move |i| ((i as u32 + seed as u32) % 251 + 1) as u8)
+}
+
+/// An H.264 (1-byte header) or H.265 (2-byte header) NAL unit.
+fn nal(header: &[u8], len: usize, seed: u8) -> Vec<u8> {
+    header.iter().copied().chain(body(len, seed)).collect()
+}
+
+/// An AV1 OBU with its size field: (type, payload) on the wire.
+fn obu(obu_type: u8, len: usize, seed: u8) -> Vec<u8> {
+    let mut unit = vec![(obu_type << 3) | 0x02];
+    let mut size = len;
+    loop {
+        let byte = (size & 0x7f) as u8;
+        size >>= 7;
+        if size == 0 {
+            unit.push(byte);
+            break;
+        }
+        unit.push(byte | 0x80);
+    }
+    unit.extend(body(len, seed));
+    unit
+}
+
+fn encode_units(codec: VideoCodec, units: &[Vec<u8>]) -> Bytes {
+    let mut out = Vec::new();
+    for unit in units {
+        if codec != VideoCodec::Av1 {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+        }
+        out.extend_from_slice(unit);
+    }
+    Bytes::from(out)
+}
+
+/// Splits a received frame back into units: NAL units without start codes,
+/// or OBUs re-encoded as sent (temporal delimiters dropped, as the AV1 RTP
+/// format omits them).
+fn decode_units(codec: VideoCodec, data: &[u8]) -> Vec<Vec<u8>> {
+    if codec == VideoCodec::Av1 {
+        let mut units = Vec::new();
+        let mut rest = data;
+        while let Some(&header) = rest.first() {
+            let obu_type = (header >> 3) & 0x0f;
+            let mut offset = 1 + usize::from(header & 0x04 != 0);
+            let mut size = 0usize;
+            for i in 0..8 {
+                let byte = rest[offset];
+                offset += 1;
+                size |= usize::from(byte & 0x7f) << (7 * i);
+                if byte & 0x80 == 0 {
+                    break;
+                }
+            }
+            let payload = &rest[offset..offset + size];
+            if obu_type != 2 {
+                let mut unit = vec![(obu_type << 3) | 0x02];
+                let mut s = size;
+                loop {
+                    let byte = (s & 0x7f) as u8;
+                    s >>= 7;
+                    if s == 0 {
+                        unit.push(byte);
+                        break;
+                    }
+                    unit.push(byte | 0x80);
+                }
+                unit.extend_from_slice(payload);
+                units.push(unit);
+            }
+            rest = &rest[offset + size..];
+        }
+        return units;
+    }
     let mut starts = Vec::new();
     let mut i = 0;
-    while i + 3 <= annex_b.len() {
-        if annex_b[i] == 0 && annex_b[i + 1] == 0 && annex_b[i + 2] == 1 {
+    while i + 3 <= data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
             starts.push(i + 3);
             i += 3;
         } else {
@@ -272,35 +353,45 @@ fn nal_units(annex_b: &[u8]) -> Vec<Vec<u8>> {
         .iter()
         .enumerate()
         .map(|(n, &start)| {
-            let mut end = starts.get(n + 1).map_or(annex_b.len(), |&next| next - 3);
-            while end > start && annex_b[end - 1] == 0 {
+            let mut end = starts.get(n + 1).map_or(data.len(), |&next| next - 3);
+            while end > start && data[end - 1] == 0 {
                 end -= 1;
             }
-            annex_b[start..end].to_vec()
+            data[start..end].to_vec()
         })
         .collect()
 }
 
-/// A NAL unit of `len` bytes with header byte `header` and a body free of
-/// zero bytes (so it can never contain a start code). Not a decodable
-/// picture: this test checks the transport carries bytes intact.
-fn nal(header: u8, len: usize, seed: u8) -> Vec<u8> {
-    let mut unit = vec![header];
-    unit.extend((0..len - 1).map(|i| ((i as u32 + seed as u32) % 251 + 1) as u8));
-    unit
-}
-
-fn annex_b(units: &[Vec<u8>]) -> Bytes {
-    let mut out = Vec::new();
-    for unit in units {
-        out.extend_from_slice(&[0, 0, 0, 1]);
-        out.extend_from_slice(unit);
+/// A keyframe (parameter sets plus a key picture) and a delta frame big
+/// enough to be fragmented across several RTP packets.
+fn test_frames(codec: VideoCodec, seed: u8) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    match codec {
+        VideoCodec::H264 => (
+            vec![
+                nal(&[0x67], 12, seed),
+                nal(&[0x68], 4, seed),
+                nal(&[0x65], 900, seed),
+            ],
+            vec![nal(&[0x41], 5000, seed)],
+        ),
+        VideoCodec::H265 => (
+            vec![
+                nal(&[0x40, 0x01], 20, seed),
+                nal(&[0x42, 0x01], 30, seed),
+                nal(&[0x44, 0x01], 6, seed),
+                nal(&[0x26, 0x01], 900, seed),
+            ],
+            vec![nal(&[0x02, 0x01], 5000, seed)],
+        ),
+        VideoCodec::Av1 => (
+            vec![obu(1, 12, seed), obu(6, 900, seed)],
+            vec![obu(6, 5000, seed)],
+        ),
     }
-    Bytes::from(out)
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn window_tracks_attach_carry_frames_and_detach() {
+async fn window_tracks_in_each_codec_attach_carry_frames_and_detach() {
     let peers = Peers::new();
     let (host, client) = peers
         .run(Some("482913"), ClientCredential::Pin("482913"))
@@ -308,69 +399,83 @@ async fn window_tracks_attach_carry_frames_and_detach() {
     let host = host.expect("host side").session;
     let client = client.expect("client side").session;
 
-    // Two windows at once on the one session.
+    // Three windows at once on the one session, one per codec.
+    let windows = [
+        (WindowId(7), VideoCodec::H264, 1u8),
+        (WindowId(9), VideoCodec::H265, 2u8),
+        (WindowId(11), VideoCodec::Av1, 3u8),
+    ];
     let mut sent = Vec::new();
-    for (window, seed) in [(WindowId(7), 1u8), (WindowId(9), 2u8)] {
-        let track = host.attach_window(window).await.unwrap();
+    for (window, codec, seed) in windows {
+        let track = host.attach_window(window, codec).await.unwrap();
         assert_eq!(track.track_id(), format!("window-{}", window.0));
-        // A keyframe access unit (SPS, PPS, IDR slice), then a P-slice big
-        // enough to be fragmented across several RTP packets.
-        let keyframe = vec![
-            nal(0x67, 12, seed),
-            nal(0x68, 4, seed),
-            nal(0x65, 900, seed),
-        ];
-        let delta = vec![nal(0x41, 5000, seed)];
+        let (keyframe, delta) = test_frames(codec, seed);
         for frame in [&keyframe, &delta] {
             track
-                .write_frame(annex_b(frame), Duration::from_millis(16))
+                .write_frame(encode_units(codec, frame), Duration::from_millis(16))
                 .await
                 .unwrap();
         }
-        sent.push((window, keyframe, delta));
+        sent.push((window, codec, keyframe, delta));
     }
 
     let mut received = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..windows.len() {
         let mut remote = tokio::time::timeout(TEST_TIMEOUT, client.next_remote_window())
             .await
             .expect("no window track arrived")
             .unwrap();
-        let first = remote.next_frame().await.unwrap();
-        let second = remote.next_frame().await.unwrap();
+        let first = tokio::time::timeout(TEST_TIMEOUT, remote.next_frame())
+            .await
+            .expect("first frame stalled")
+            .unwrap();
+        let second = tokio::time::timeout(TEST_TIMEOUT, remote.next_frame())
+            .await
+            .expect("second frame stalled")
+            .unwrap();
+        assert!(first.keyframe && !second.keyframe);
+        let codec = remote.codec();
         received.push((
             remote.window(),
-            nal_units(&first.data),
-            nal_units(&second.data),
+            codec,
+            decode_units(codec, &first.data),
+            decode_units(codec, &second.data),
             remote,
         ));
     }
     received.sort_by_key(|(window, ..)| window.0);
-    for ((window, keyframe, delta), (got_window, got_keyframe, got_delta, _)) in
+    for ((window, codec, keyframe, delta), (got_window, got_codec, got_keyframe, got_delta, _)) in
         sent.iter().zip(&received)
     {
         assert_eq!(window, got_window);
-        assert_eq!(keyframe, got_keyframe);
-        assert_eq!(delta, got_delta);
+        assert_eq!(codec, got_codec);
+        assert_eq!(keyframe, got_keyframe, "{codec:?} keyframe");
+        assert_eq!(delta, got_delta, "{codec:?} delta frame");
     }
 
-    // Detaching one window ends its track and leaves the other running.
+    // Detaching one window ends its track and leaves the others running.
     assert!(host.detach_window(WindowId(7)).await.unwrap());
     assert!(!host.detach_window(WindowId(7)).await.unwrap());
-    let (_, _, _, mut window_7) = received.remove(0);
+    let (.., mut window_7) = received.remove(0);
     let ended = tokio::time::timeout(TEST_TIMEOUT, window_7.next_frame()).await;
     assert!(matches!(ended, Ok(Err(_))), "window 7 track should end");
 
-    let track_9 = host.attach_window(WindowId(9)).await.unwrap();
-    let more = vec![nal(0x41, 300, 3)];
-    track_9
-        .write_frame(annex_b(&more), Duration::from_millis(16))
+    let track_9 = host
+        .attach_window(WindowId(9), VideoCodec::H265)
         .await
         .unwrap();
-    let (_, _, _, mut window_9) = received.remove(0);
+    let more = vec![nal(&[0x02, 0x01], 300, 4)];
+    track_9
+        .write_frame(
+            encode_units(VideoCodec::H265, &more),
+            Duration::from_millis(16),
+        )
+        .await
+        .unwrap();
+    let (.., mut window_9) = received.remove(0);
     let frame = tokio::time::timeout(TEST_TIMEOUT, window_9.next_frame())
         .await
         .expect("window 9 stalled")
         .unwrap();
-    assert_eq!(nal_units(&frame.data), more);
+    assert_eq!(decode_units(VideoCodec::H265, &frame.data), more);
 }

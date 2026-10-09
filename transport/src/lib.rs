@@ -1,7 +1,8 @@
 //! WebRTC session transport: one `PeerConnection` per client<->host
 //! session, multiplexing every open window as a separate video track
 //! within it, plus one data channel carrying `windowcast_protocol`
-//! control/input messages.
+//! control/input messages. This is the native backend and the control
+//! plane every other backend is negotiated over (docs/BACKENDS.md).
 //!
 //! How a session comes up: [`signaling::connect`] (client) and
 //! [`signaling::accept`] (host) exchange one offer and one answer over any
@@ -15,7 +16,13 @@
 //! renegotiates over that control channel, which is already inside the
 //! authenticated DTLS session; the host is the only side that renegotiates,
 //! so offers never collide.
+//!
+//! Sockets: every session binds UDP on all interfaces and on 127.0.0.1, so
+//! it also gets a loopback candidate. Two peers on one device (droidtop and
+//! its own desktop container) connect over loopback even with no network
+//! up; across machines the loopback pair simply never succeeds.
 
+mod keyframes;
 mod media;
 pub mod signaling;
 
@@ -23,20 +30,20 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use bytes::BytesMut;
+use rtc::ice::mdns::MulticastDnsMode;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
-use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::MediaEngine;
-use webrtc::api::APIBuilder;
-use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
-use webrtc::data_channel::RTCDataChannel;
-use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
-use webrtc::ice_transport::ice_server::RTCIceServer;
-use webrtc::interceptor::registry::Registry;
-use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use webrtc::peer_connection::RTCPeerConnection;
-use windowcast_protocol::{ControlMessage, SdpKind, WindowId};
+use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
+use webrtc::media_stream::track_remote::TrackRemote;
+use webrtc::peer_connection::{
+    MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
+    RTCConfigurationBuilder, RTCIceGatheringState, RTCIceServer, RTCPeerConnectionState,
+    RTCSessionDescription,
+};
+use windowcast_protocol::{ControlMessage, SdpKind, StreamTarget, VideoCodec, WindowId};
 
 pub use media::{RemoteWindow, WindowFrame, WindowTrack};
 pub use signaling::{accept, connect, ClientCredential, Established, HostCredential};
@@ -46,10 +53,14 @@ pub use signaling::{accept, connect, ClientCredential, Established, HostCredenti
 const CONTROL_CHANNEL_LABEL: &str = "windowcast-control";
 const CONTROL_CHANNEL_ID: u16 = 0;
 
-/// How long either side waits for the control channel to open after the
-/// answer is applied, and for the client's answer to a renegotiation. ICE
-/// on a LAN completes in well under a second; this only bounds a peer that
-/// went away.
+/// UDP sockets each session binds: every interface (expanded per address
+/// by webrtc) plus loopback, for same-device sessions.
+const UDP_BIND_ADDRS: [&str; 2] = ["0.0.0.0:0", "127.0.0.1:0"];
+
+/// How long either side waits for ICE gathering, for the control channel
+/// to open after the answer is applied, and for the client's answer to a
+/// renegotiation. On a LAN all of these take well under a second; this
+/// only bounds a peer that went away.
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Credentials for a TURN relay a directory operator can offer as a
@@ -57,9 +68,7 @@ const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(15);
 /// firewalls). Deliberately a plain relay, not a terminating proxy: TURN
 /// forwards opaque encrypted WebRTC/DTLS-SRTP traffic without being able
 /// to decrypt it, so a directory offering this never sees window content
-/// — see docs/SECURITY.md's authorization/proxy-visibility notes in the
-/// project plan for why that distinction matters and was a deliberate
-/// choice, not an oversight.
+/// (docs/SECURITY.md, "Directory-mediated sessions").
 #[derive(Debug, Clone)]
 pub struct RelayConfig {
     /// e.g. `["turn:relay.example.com:3478"]` — STUN URLs may also be
@@ -75,7 +84,6 @@ impl RelayConfig {
             urls: self.urls.clone(),
             username: self.username.clone(),
             credential: self.credential.clone(),
-            credential_type: RTCIceCredentialType::Password,
         }
     }
 }
@@ -83,9 +91,7 @@ impl RelayConfig {
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
     #[error("webrtc error: {0}")]
-    WebRtc(#[from] webrtc::Error),
-    #[error("no local DTLS certificate available yet — call after the peer connection is created")]
-    NoLocalCertificate,
+    WebRtc(#[from] webrtc::error::Error),
     #[error("protocol encode error: {0}")]
     Protocol(#[from] windowcast_protocol::ProtocolError),
     #[error("signaling i/o error: {0}")]
@@ -106,23 +112,56 @@ pub enum TransportError {
     PairingNotOpen,
     #[error("pairing key exchange failed: {0}")]
     Pairing(#[from] windowcast_pairing::PairingError),
+    #[error("the negotiated session has no {0:?} codec")]
+    CodecNotNegotiated(VideoCodec),
     #[error("timed out")]
     Timeout,
     #[error("the session is closed")]
     Closed,
 }
 
+/// Peer-connection events the session cares about, turned into channels.
+struct Events {
+    gathered: watch::Sender<bool>,
+    closed: watch::Sender<bool>,
+    remote_tracks: mpsc::UnboundedSender<Arc<dyn TrackRemote>>,
+}
+
+#[async_trait::async_trait]
+impl PeerConnectionEventHandler for Events {
+    async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
+        if state == RTCIceGatheringState::Complete {
+            let _ = self.gathered.send(true);
+        }
+    }
+
+    async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        if matches!(
+            state,
+            RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed
+        ) {
+            let _ = self.closed.send(true);
+        }
+    }
+
+    async fn on_track(&self, track: Arc<dyn TrackRemote>) {
+        let _ = self.remote_tracks.send(track);
+    }
+}
+
 /// Wraps one client<->host WebRTC session. Windows are added/removed as
 /// tracks on this same connection after it's established, so opening a
 /// new window never repeats the DTLS/ECDHE handshake.
 pub struct Session {
-    pub peer_connection: Arc<RTCPeerConnection>,
-    pub control_channel: Arc<RTCDataChannel>,
+    peer_connection: Arc<dyn PeerConnection>,
+    control_channel: Arc<dyn DataChannel>,
+    gathered: watch::Receiver<bool>,
     control_open: watch::Receiver<bool>,
     closed: watch::Receiver<bool>,
     inbound: Mutex<mpsc::UnboundedReceiver<ControlMessage>>,
-    remote_windows: Mutex<mpsc::UnboundedReceiver<RemoteWindow>>,
+    remote_tracks: Mutex<mpsc::UnboundedReceiver<Arc<dyn TrackRemote>>>,
     pending_answer: PendingAnswer,
+    ended_windows: EndedWindows,
     /// Serializes this side's own renegotiations: one offer in flight.
     negotiation: Mutex<()>,
     /// Host side: the window tracks this session is sending.
@@ -131,14 +170,20 @@ pub struct Session {
 
 type PendingAnswer = Arc<std::sync::Mutex<Option<oneshot::Sender<String>>>>;
 
+/// Client side: one flag per received window, set when the host says the
+/// window stopped. webrtc 0.21 never reports a remote track ending (its
+/// track close events are declared but not emitted), so the end of a
+/// window's track is signalled by the host's `StreamStopped` instead.
+type EndedWindows = Arc<std::sync::Mutex<HashMap<WindowId, watch::Sender<bool>>>>;
+
 impl Session {
-    /// Builds a fresh `RTCPeerConnection` plus the always-present control
-    /// data channel, using no STUN/TURN servers — LAN-only sessions
-    /// (droidtop's primary use case today) don't need ICE traversal beyond
-    /// host candidates. For a session that might cross a NAT/firewall,
-    /// use [`Session::with_relay`] instead.
+    /// Builds a fresh peer connection plus the always-present control data
+    /// channel, using no STUN/TURN servers — LAN-only and same-device
+    /// sessions (droidtop's primary use case today) need nothing beyond
+    /// host candidates. For a session that might cross a NAT/firewall, use
+    /// [`Session::with_relay`] instead.
     pub async fn new() -> Result<Self, TransportError> {
-        Self::build(vec![RTCIceServer::default()]).await
+        Self::build(vec![]).await
     }
 
     /// Same as [`Session::new`], but with a TURN relay available as an ICE
@@ -148,32 +193,51 @@ impl Session {
     /// only when it doesn't. See [`RelayConfig`] for why this stays a
     /// blind relay rather than a terminating proxy.
     pub async fn with_relay(relay: &RelayConfig) -> Result<Self, TransportError> {
-        Self::build(vec![RTCIceServer::default(), relay.to_ice_server()]).await
+        Self::build(vec![relay.to_ice_server()]).await
     }
 
     async fn build(ice_servers: Vec<RTCIceServer>) -> Result<Self, TransportError> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
+        let registry = keyframes::interceptor_registry(&mut media_engine)?;
 
-        let mut registry = Registry::new();
-        registry = register_default_interceptors(registry, &mut media_engine)?;
+        let (gathered_tx, gathered) = watch::channel(false);
+        let (closed_tx, closed) = watch::channel(false);
+        let (tracks_tx, remote_tracks) = mpsc::unbounded_channel();
+        let events = Arc::new(Events {
+            gathered: gathered_tx,
+            closed: closed_tx,
+            remote_tracks: tracks_tx,
+        });
 
-        let api = APIBuilder::new()
-            .with_media_engine(media_engine)
-            .with_interceptor_registry(registry)
-            .build();
-
-        let config = RTCConfiguration {
-            ice_servers,
-            ..Default::default()
-        };
-        let peer_connection = Arc::new(api.new_peer_connection(config).await?);
+        let peer_connection: Arc<dyn PeerConnection> = Arc::new(
+            PeerConnectionBuilder::new()
+                .with_configuration(
+                    RTCConfigurationBuilder::new()
+                        .with_ice_servers(ice_servers)
+                        .build(),
+                )
+                .with_media_engine(media_engine)
+                .with_setting_engine(
+                    // No mDNS: windowcast peers send IP candidates, and the
+                    // mDNS socket cannot be opened on a device whose only
+                    // interface is loopback (webrtc then fails the whole
+                    // connection), which is exactly the same-device case.
+                    SettingEngineBuilder::new()
+                        .with_multicast_dns_mode(MulticastDnsMode::Disabled)
+                        .build(),
+                )
+                .with_interceptor_registry(registry)
+                .with_handler(Arc::clone(&events) as Arc<dyn PeerConnectionEventHandler>)
+                .with_udp_addrs(UDP_BIND_ADDRS.to_vec())
+                .build()
+                .await?,
+        );
 
         let control_channel = peer_connection
             .create_data_channel(
                 CONTROL_CHANNEL_LABEL,
                 Some(RTCDataChannelInit {
-                    ordered: Some(true),
                     negotiated: Some(CONTROL_CHANNEL_ID),
                     ..Default::default()
                 }),
@@ -181,92 +245,36 @@ impl Session {
             .await?;
 
         let (open_tx, control_open) = watch::channel(false);
-        control_channel.on_open(Box::new(move || {
-            let _ = open_tx.send(true);
-            Box::pin(async {})
-        }));
-
-        // Either the control channel closing (the peer closed the session)
-        // or the connection failing for good ends the session for the
-        // embedder: pending and later receives return `Closed`.
-        let (closed_tx, closed) = watch::channel(false);
-        let closed_tx = Arc::new(closed_tx);
-        let on_channel_close = Arc::clone(&closed_tx);
-        control_channel.on_close(Box::new(move || {
-            let _ = on_channel_close.send(true);
-            Box::pin(async {})
-        }));
-        peer_connection.on_peer_connection_state_change(Box::new(move |state| {
-            if matches!(
-                state,
-                RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed
-            ) {
-                let _ = closed_tx.send(true);
-            }
-            Box::pin(async {})
-        }));
-
-        let (raw_tx, raw_rx) = mpsc::unbounded_channel::<bytes::Bytes>();
-        control_channel.on_message(Box::new(move |message| {
-            let _ = raw_tx.send(message.data);
-            Box::pin(async {})
-        }));
-
         let (inbound_tx, inbound) = mpsc::unbounded_channel();
         let pending_answer: PendingAnswer = Arc::new(std::sync::Mutex::new(None));
-        tokio::spawn(dispatch_control(
-            raw_rx,
-            inbound_tx,
+        let ended_windows: EndedWindows = Arc::default();
+        tokio::spawn(run_control_channel(
+            Arc::clone(&control_channel),
             Arc::downgrade(&peer_connection),
-            Arc::downgrade(&control_channel),
+            open_tx,
+            events,
+            inbound_tx,
             Arc::clone(&pending_answer),
+            Arc::clone(&ended_windows),
         ));
-
-        let (windows_tx, remote_windows) = mpsc::unbounded_channel();
-        let weak_pc = Arc::downgrade(&peer_connection);
-        peer_connection.on_track(Box::new(move |track, _receiver, _transceiver| {
-            if let Some(window) = media::window_for_track_id(&track.id()) {
-                let _ = windows_tx.send(RemoteWindow::new(window, track, weak_pc.clone()));
-            }
-            Box::pin(async {})
-        }));
 
         Ok(Session {
             peer_connection,
             control_channel,
+            gathered,
             control_open,
             closed,
             inbound: Mutex::new(inbound),
-            remote_windows: Mutex::new(remote_windows),
+            remote_tracks: Mutex::new(remote_tracks),
             pending_answer,
+            ended_windows,
             negotiation: Mutex::new(()),
             windows: Mutex::new(HashMap::new()),
         })
     }
 
-    /// The local DTLS certificate's fingerprint as "<algorithm> <hex>".
-    /// Signaling authenticates the whole session description, which carries
-    /// this fingerprint, so connecting does not need it; it stays for
-    /// display (e.g. letting a user compare it out of band).
-    pub fn local_dtls_fingerprint(&self) -> Result<Vec<u8>, TransportError> {
-        let params = self
-            .peer_connection
-            .sctp()
-            .transport()
-            .get_local_parameters()?;
-        let fingerprint = params
-            .fingerprints
-            .first()
-            .ok_or(TransportError::NoLocalCertificate)?;
-        Ok(format!("{} {}", fingerprint.algorithm, fingerprint.value).into_bytes())
-    }
-
     pub async fn send_control(&self, message: &ControlMessage) -> Result<(), TransportError> {
-        let bytes = windowcast_protocol::encode(message)?;
-        self.control_channel
-            .send(&bytes::Bytes::from(bytes))
-            .await?;
-        Ok(())
+        send_on(&*self.control_channel, message).await
     }
 
     /// The next control message from the peer. Renegotiation traffic is
@@ -276,10 +284,70 @@ impl Session {
         self.until_closed(inbound.recv()).await
     }
 
-    /// Client side: the next window track the host attached.
+    /// Client side: the next window track the host attached. Tracks whose
+    /// id is not a window's are skipped.
     pub async fn next_remote_window(&self) -> Result<RemoteWindow, TransportError> {
-        let mut remote_windows = self.remote_windows.lock().await;
-        self.until_closed(remote_windows.recv()).await
+        let mut remote_tracks = self.remote_tracks.lock().await;
+        loop {
+            let track = self.until_closed(remote_tracks.recv()).await?;
+            let (ended_tx, ended) = watch::channel(false);
+            if let Some(window) = RemoteWindow::new(track, ended).await {
+                self.ended_windows
+                    .lock()
+                    .expect("ended windows")
+                    .insert(window.window(), ended_tx);
+                return Ok(window);
+            }
+        }
+    }
+
+    /// Host side: starts sending `window` as its own video track in
+    /// `codec` and renegotiates. Attaching a window that is already
+    /// attached returns its existing track.
+    pub async fn attach_window(
+        &self,
+        window: WindowId,
+        codec: VideoCodec,
+    ) -> Result<WindowTrack, TransportError> {
+        let mut windows = self.windows.lock().await;
+        if let Some(existing) = windows.get(&window) {
+            return Ok(existing.clone());
+        }
+        let pending = WindowTrack::add_to(&*self.peer_connection, window, codec).await?;
+        self.renegotiate().await?;
+        let track = pending.negotiated().await?;
+        windows.insert(window, track.clone());
+        Ok(track)
+    }
+
+    /// Host side: stops sending `window` and renegotiates. Returns whether
+    /// the window was attached.
+    pub async fn detach_window(&self, window: WindowId) -> Result<bool, TransportError> {
+        let mut windows = self.windows.lock().await;
+        let Some(track) = windows.remove(&window) else {
+            return Ok(false);
+        };
+        self.peer_connection.remove_track(track.sender()).await?;
+        self.renegotiate().await?;
+        self.send_control(&ControlMessage::StreamStopped(StreamTarget::Window(window)))
+            .await?;
+        Ok(true)
+    }
+
+    /// Ends the session. The peer is told with a `Goodbye` on the control
+    /// channel, flushed before the connection closes; otherwise it would
+    /// only notice when ICE consent times out, half a minute later.
+    pub async fn close(&self) -> Result<(), TransportError> {
+        if self.send_control(&ControlMessage::Goodbye).await.is_ok() {
+            let flushed = async {
+                while self.control_channel.outstanding_bytes().await.unwrap_or(0) > 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            };
+            let _ = tokio::time::timeout(Duration::from_secs(1), flushed).await;
+        }
+        self.peer_connection.close().await?;
+        Ok(())
     }
 
     /// Waits for `next`, or fails with `Closed` once the session has ended.
@@ -296,43 +364,65 @@ impl Session {
         }
     }
 
-    /// Host side: starts sending `window` as its own video track on this
-    /// session and renegotiates. Attaching a window that is already
-    /// attached returns its existing track.
-    pub async fn attach_window(&self, window: WindowId) -> Result<WindowTrack, TransportError> {
-        let mut windows = self.windows.lock().await;
-        if let Some(existing) = windows.get(&window) {
-            return Ok(existing.clone());
-        }
-        let track = WindowTrack::add_to(&self.peer_connection, window).await?;
-        self.renegotiate().await?;
-        windows.insert(window, track.clone());
-        Ok(track)
-    }
-
-    /// Host side: stops sending `window` and renegotiates. Returns whether
-    /// the window was attached.
-    pub async fn detach_window(&self, window: WindowId) -> Result<bool, TransportError> {
-        let mut windows = self.windows.lock().await;
-        let Some(track) = windows.remove(&window) else {
-            return Ok(false);
-        };
-        self.peer_connection.remove_track(track.sender()).await?;
-        self.renegotiate().await?;
-        Ok(true)
-    }
-
-    pub async fn close(&self) -> Result<(), TransportError> {
-        self.peer_connection.close().await?;
+    async fn wait_until(flag: &watch::Receiver<bool>) -> Result<(), TransportError> {
+        let mut flag = flag.clone();
+        tokio::time::timeout(NEGOTIATION_TIMEOUT, flag.wait_for(|set| *set))
+            .await
+            .map_err(|_| TransportError::Timeout)?
+            .map_err(|_| TransportError::Closed)?;
         Ok(())
     }
 
     async fn wait_control_open(&self) -> Result<(), TransportError> {
-        let mut open = self.control_open.clone();
-        tokio::time::timeout(NEGOTIATION_TIMEOUT, open.wait_for(|open| *open))
+        Self::wait_until(&self.control_open).await
+    }
+
+    /// Creates the offer or answer and waits for ICE gathering, so the SDP
+    /// that gets signed carries every candidate.
+    ///
+    /// The initial offer (the client's) carries a receive-only video
+    /// section. webrtc fixes a session's video codecs at the first
+    /// negotiation that has video, from that section's codec list; without
+    /// this, the first window track would pin the session to its own codec
+    /// and a later window in another codec could not be added. The host's
+    /// first window track reuses this section.
+    async fn gathered_local_description(&self, kind: SdpKind) -> Result<String, TransportError> {
+        let pc = &self.peer_connection;
+        let description = match kind {
+            SdpKind::Offer => {
+                pc.add_transceiver_from_kind(
+                    RtpCodecKind::Video,
+                    Some(RTCRtpTransceiverInit {
+                        direction: RTCRtpTransceiverDirection::Recvonly,
+                        streams: vec![],
+                        send_encodings: vec![],
+                    }),
+                )
+                .await?;
+                pc.create_offer(None).await?
+            }
+            SdpKind::Answer => pc.create_answer(None).await?,
+        };
+        pc.set_local_description(description).await?;
+        Self::wait_until(&self.gathered).await?;
+        pc.local_description()
             .await
-            .map_err(|_| TransportError::Timeout)?
-            .map_err(|_| TransportError::Closed)?;
+            .map(|description| description.sdp)
+            .ok_or(TransportError::Closed)
+    }
+
+    async fn set_remote_description(
+        &self,
+        kind: SdpKind,
+        sdp: String,
+    ) -> Result<(), TransportError> {
+        let description = match kind {
+            SdpKind::Offer => RTCSessionDescription::offer(sdp)?,
+            SdpKind::Answer => RTCSessionDescription::answer(sdp)?,
+        };
+        self.peer_connection
+            .set_remote_description(description)
+            .await?;
         Ok(())
     }
 
@@ -357,25 +447,44 @@ impl Session {
             .await
             .map_err(|_| TransportError::Timeout)?
             .map_err(|_| TransportError::Closed)?;
-        self.peer_connection
-            .set_remote_description(RTCSessionDescription::answer(answer)?)
-            .await?;
-        Ok(())
+        self.set_remote_description(SdpKind::Answer, answer).await
     }
 }
 
-/// Reads raw control-channel messages: answers renegotiation offers,
-/// hands renegotiation answers to the waiting [`Session::renegotiate`],
-/// and forwards everything else to [`Session::recv_control`]. Holds only
-/// weak references, so it ends with the session instead of keeping it alive.
-async fn dispatch_control(
-    mut raw: mpsc::UnboundedReceiver<bytes::Bytes>,
+async fn send_on(
+    channel: &dyn DataChannel,
+    message: &ControlMessage,
+) -> Result<(), TransportError> {
+    let bytes = windowcast_protocol::encode(message)?;
+    channel.send(BytesMut::from(&bytes[..])).await?;
+    Ok(())
+}
+
+/// Drives the control channel: reports it open, answers renegotiation
+/// offers, hands renegotiation answers to the waiting
+/// [`Session::renegotiate`], forwards everything else to
+/// [`Session::recv_control`], and ends the session when the channel
+/// closes. Holds the peer connection only weakly, so it ends with the
+/// session instead of keeping it alive.
+async fn run_control_channel(
+    channel: Arc<dyn DataChannel>,
+    peer_connection: Weak<dyn PeerConnection>,
+    open: watch::Sender<bool>,
+    events: Arc<Events>,
     inbound: mpsc::UnboundedSender<ControlMessage>,
-    peer_connection: Weak<RTCPeerConnection>,
-    control_channel: Weak<RTCDataChannel>,
     pending_answer: PendingAnswer,
+    ended_windows: EndedWindows,
 ) {
-    while let Some(data) = raw.recv().await {
+    while let Some(event) = channel.poll().await {
+        let data = match event {
+            DataChannelEvent::OnOpen => {
+                let _ = open.send(true);
+                continue;
+            }
+            DataChannelEvent::OnClose => break,
+            DataChannelEvent::OnMessage(message) => message.data,
+            _ => continue,
+        };
         let message = match windowcast_protocol::decode(&data) {
             Ok(message) => message,
             Err(e) => {
@@ -388,11 +497,10 @@ async fn dispatch_control(
                 kind: SdpKind::Offer,
                 sdp,
             } => {
-                let (Some(pc), Some(dc)) = (peer_connection.upgrade(), control_channel.upgrade())
-                else {
+                let Some(pc) = peer_connection.upgrade() else {
                     break;
                 };
-                if let Err(e) = answer_renegotiation(&pc, &dc, sdp).await {
+                if let Err(e) = answer_renegotiation(&*pc, &*channel, sdp).await {
                     tracing::warn!("renegotiation answer failed: {e}");
                 }
             }
@@ -408,28 +516,36 @@ async fn dispatch_control(
                     None => tracing::warn!("dropping an answer nobody asked for"),
                 }
             }
+            ControlMessage::Goodbye => break,
             other => {
-                if inbound.send(other).is_err() {
-                    break;
+                if let ControlMessage::StreamStopped(StreamTarget::Window(window)) = &other {
+                    if let Some(ended) = ended_windows.lock().expect("ended windows").remove(window)
+                    {
+                        let _ = ended.send(true);
+                    }
                 }
+                let _ = inbound.send(other);
             }
         }
     }
+    let _ = events.closed.send(true);
 }
 
 async fn answer_renegotiation(
-    pc: &RTCPeerConnection,
-    dc: &RTCDataChannel,
+    pc: &dyn PeerConnection,
+    channel: &dyn DataChannel,
     offer: String,
 ) -> Result<(), TransportError> {
     pc.set_remote_description(RTCSessionDescription::offer(offer)?)
         .await?;
     let answer = pc.create_answer(None).await?;
     pc.set_local_description(answer.clone()).await?;
-    let bytes = windowcast_protocol::encode(&ControlMessage::SessionDescription {
-        kind: SdpKind::Answer,
-        sdp: answer.sdp,
-    })?;
-    dc.send(&bytes::Bytes::from(bytes)).await?;
-    Ok(())
+    send_on(
+        channel,
+        &ControlMessage::SessionDescription {
+            kind: SdpKind::Answer,
+            sdp: answer.sdp,
+        },
+    )
+    .await
 }
