@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- GameStream, our own implementation (Droidtop/tracker#110), first piece: pairing at both ends, a client for Sunshine and Apollo hosts (server info, pairing, app list, launch, quit), and a host face that stock Moonlight pairs with and lists apps from (`windowcast-gamestream`). Streaming over GameStream comes next.
+
 ### Removed
+- `windowcast-apollo`, the Sunshine `serverinfo` and app-list reader: `windowcast-gamestream`'s client does both, with pairing.
 - The account-login crate (`windowcast-directory`: password accounts and directory-issued session certificates). Nothing used it; windowcast's credential is the paired device.
 
 ## [0.15.0] - 2026-10-09
