@@ -141,6 +141,71 @@ fn check_sound(session: &ClientSession, window: WindowId) {
     });
 }
 
+/// Sends a 440 Hz tone as the client's microphone and records it back from
+/// the host's virtual microphone with parec.
+fn check_microphone(session: &ClientSession) {
+    use std::io::Read;
+    session.start_microphone().unwrap();
+    let mut encoder =
+        opus::Encoder::new(48_000, opus::Channels::Stereo, opus::Application::Voip).unwrap();
+    let mut phase = 0f32;
+    let mut packet = vec![0u8; 4000];
+    let mut talk = |packets: usize| {
+        for _ in 0..packets {
+            let mut pcm = Vec::with_capacity(1920);
+            for _ in 0..960 {
+                let v = (phase.sin() * 8192.0) as i16;
+                pcm.extend([v, v]);
+                phase = (phase + 440.0 * std::f32::consts::TAU / 48_000.0) % std::f32::consts::TAU;
+            }
+            let len = encoder.encode(&pcm, &mut packet).unwrap();
+            session.send_microphone(&packet[..len]).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    // The host makes its virtual microphone when the first packets come.
+    talk(50);
+    let mut recorder = KillOnDrop(
+        Command::new("parec")
+            .args([
+                "-d",
+                windowcast_agent_linux::microphone::SOURCE,
+                "--raw",
+                "--rate=48000",
+                "--channels=2",
+                "--format=s16le",
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdout = recorder.0.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut bytes = vec![0u8; 48_000 * 4];
+        stdout.read_exact(&mut bytes).map(|()| bytes)
+    });
+    talk(75);
+    let bytes = reader.join().unwrap().expect("parec recorded nothing");
+    drop(recorder);
+    let left: Vec<f32> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|frame| f32::from(i16::from_le_bytes([frame[0], frame[1]])) / 32768.0)
+        .collect();
+    let sound = &left[12_000..];
+    let rms = (sound.iter().map(|s| s * s).sum::<f32>() / sound.len() as f32).sqrt();
+    let crossings = sound
+        .windows(2)
+        .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
+        .count();
+    let pitch = crossings as f32 * 48_000.0 / sound.len() as f32;
+    println!("microphone: level {rms:.3}, pitch {pitch:.0} Hz");
+    assert!(rms > 0.05, "silence (level {rms})");
+    assert!((pitch - 440.0).abs() < 15.0, "pitch {pitch}");
+    session.stop_microphone().unwrap();
+}
+
 #[test]
 fn a_window_streams_and_takes_input_under_sway() {
     if std::env::var_os("WINDOWCAST_TEST_SWAY").is_none() {
@@ -248,6 +313,7 @@ fn a_window_streams_and_takes_input_under_sway() {
     check_stream(&session, id, BackendKind::Desktop);
     if pulse {
         check_sound(&session, id);
+        check_microphone(&session);
     }
 
     // Input needs a streamed window: stream it again, then click a

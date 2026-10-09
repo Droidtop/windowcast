@@ -26,6 +26,9 @@ pub struct Options {
     pub fps: u32,
     /// Bits per second at 1920x1080; scaled by area for other sizes.
     pub bitrate_1080p: u32,
+    /// The output device a client's microphone plays into (part of its
+    /// name); `None` picks a known virtual audio cable.
+    pub microphone: Option<String>,
 }
 
 impl Default for Options {
@@ -35,6 +38,7 @@ impl Default for Options {
             codec: None,
             fps: 30,
             bitrate_1080p: 8_000_000,
+            microphone: None,
         }
     }
 }
@@ -157,6 +161,16 @@ impl WindowSource for WindowsSource {
     ) -> Result<Box<dyn FrameSource>, String> {
         check_window(window)?;
         Ok(Box::new(self.open_stream(window, codec, true)))
+    }
+
+    fn microphone(
+        &self,
+    ) -> Option<Result<Box<dyn windowcast_host::audio::MicrophoneSink>, String>> {
+        let named = self.options().microphone;
+        Some(
+            crate::microphone::WindowsMicrophone::open(named.as_deref())
+                .map(|mic| Box::new(mic) as _),
+        )
     }
 
     fn open_audio(

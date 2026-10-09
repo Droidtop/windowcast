@@ -19,6 +19,8 @@ mod gpu_convert;
 #[cfg(windows)]
 pub mod input;
 #[cfg(windows)]
+pub mod microphone;
+#[cfg(windows)]
 mod source;
 #[cfg(windows)]
 pub mod windows_list;

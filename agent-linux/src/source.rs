@@ -92,6 +92,12 @@ impl WindowSource for LinuxSource {
         Some(crate::audio::WindowAudio::open(window).map(|audio| Box::new(audio) as _))
     }
 
+    fn microphone(
+        &self,
+    ) -> Option<Result<Box<dyn windowcast_host::audio::MicrophoneSink>, String>> {
+        Some(crate::microphone::LinuxMicrophone::open().map(|mic| Box::new(mic) as _))
+    }
+
     fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
         let mut injector = self.injector.lock().expect("injector");
         let injector = injector.get_or_insert_with(|| {

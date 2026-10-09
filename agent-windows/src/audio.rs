@@ -63,13 +63,21 @@ unsafe impl Send for ProcessAudio {}
 impl ProcessAudio {
     /// Starts capturing what `window`'s process tree plays.
     pub fn open(window: WindowId) -> Result<Self, String> {
+        let mut pid = 0u32;
+        unsafe {
+            GetWindowThreadProcessId(windows_list::hwnd(window), Some(&mut pid));
+        }
+        if pid == 0 {
+            return Err("no such window".into());
+        }
+        Self::open_process(pid)
+    }
+
+    /// Starts capturing what process `pid` and the processes it started
+    /// play.
+    pub fn open_process(pid: u32) -> Result<Self, String> {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(windows_list::hwnd(window), Some(&mut pid));
-            if pid == 0 {
-                return Err("no such window".into());
-            }
             let params = AUDIOCLIENT_ACTIVATION_PARAMS {
                 ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
                 Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {

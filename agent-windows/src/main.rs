@@ -2,7 +2,9 @@
 //!
 //! Usage: `windowcast-agent-windows [--listen ADDR:PORT] [--no-pairing]
 //! [--encoder auto|mf-hardware|nvenc|quicksync|amf|mf-software|openh264] [--fps N]
-//! [--bitrate BPS_AT_1080P] [--list-encoders]`
+//! [--bitrate BPS_AT_1080P] [--microphone-device NAME] [--list-encoders]`
+//! (`--microphone-device`: the virtual audio cable a client's microphone
+//! plays into, part of its output's name; a known cable by default)
 //! (`--listen` defaults to 0.0.0.0:47100).
 
 #[cfg(windows)]
@@ -35,6 +37,7 @@ async fn main() {
                     .parse()
                     .expect("--bitrate needs a number")
             }
+            "--microphone-device" => options.microphone = Some(value("--microphone-device")),
             "--list-encoders" => {
                 for line in encoder::list() {
                     println!("{line}");

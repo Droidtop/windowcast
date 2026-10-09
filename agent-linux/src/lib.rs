@@ -12,6 +12,7 @@
 pub mod audio;
 pub mod capture;
 pub mod input;
+pub mod microphone;
 mod source;
 pub mod sway;
 pub mod toplevels;
