@@ -1,10 +1,13 @@
 //! The agent's `WindowSource`: the desktop's windows, and per streamed
-//! window a capture plus encoder on the stream's own thread.
+//! window a capture plus encoder on the stream's own thread. The options
+//! can change while streams run: each stream reopens its encoder with the
+//! new ones at its next picture.
 
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use windowcast_host::{EncodedFrame, FrameSource, WindowSource};
-use windowcast_protocol::{InputEvent, VideoCodec, WindowId, WindowInfo};
+use windowcast_protocol::{BackendKind, InputEvent, VideoCodec, WindowId, WindowInfo};
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 
 use crate::capture::{self, Capture};
@@ -14,10 +17,12 @@ use crate::encoder::{self, Encoder, EncoderChoice, Settings};
 use crate::input::Injector;
 use crate::windows_list;
 
-/// Agent options, from the command line.
-#[derive(Debug, Clone)]
+/// Agent options, from the command line or a host application.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Options {
     pub encoder: EncoderChoice,
+    /// Offer only this codec; `None` offers every codec the encoder has.
+    pub codec: Option<VideoCodec>,
     pub fps: u32,
     /// Bits per second at 1920x1080; scaled by area for other sizes.
     pub bitrate_1080p: u32,
@@ -27,15 +32,22 @@ impl Default for Options {
     fn default() -> Self {
         Options {
             encoder: EncoderChoice::Auto,
+            codec: None,
             fps: 30,
             bitrate_1080p: 8_000_000,
         }
     }
 }
 
-pub struct WindowsSource {
+/// The options in force, and a counter that changes with them.
+struct Current {
     options: Options,
     codecs: Vec<VideoCodec>,
+    generation: u64,
+}
+
+pub struct WindowsSource {
+    current: Arc<RwLock<Current>>,
     injector: Injector,
 }
 
@@ -46,16 +58,65 @@ impl WindowsSource {
         if !capture::supported() {
             return Err("Windows.Graphics.Capture is not supported on this system".into());
         }
-        let codecs = encoder::available_codecs(options.encoder);
-        if codecs.is_empty() {
-            return Err(format!("no encoder available for {:?}", options.encoder));
-        }
+        let codecs = codecs_for(&options)?;
         Ok(WindowsSource {
-            options,
-            codecs,
+            current: Arc::new(RwLock::new(Current {
+                options,
+                codecs,
+                generation: 0,
+            })),
             injector: Injector::default(),
         })
     }
+
+    pub fn options(&self) -> Options {
+        self.current.read().expect("options").options.clone()
+    }
+
+    /// Changes the options. Running streams take the new encoder, frame
+    /// rate and bitrate at their next picture; a codec change applies to
+    /// streams started afterwards (a track keeps its codec).
+    pub fn set_options(&self, options: Options) -> Result<(), String> {
+        let codecs = codecs_for(&options)?;
+        let mut current = self.current.write().expect("options");
+        if current.options != options {
+            current.options = options;
+            current.codecs = codecs;
+            current.generation += 1;
+        }
+        Ok(())
+    }
+
+    fn open_stream(&self, window: WindowId, codec: VideoCodec, desktop: bool) -> WindowStream {
+        WindowStream {
+            window,
+            codec,
+            desktop,
+            current: Arc::clone(&self.current),
+            generation: u64::MAX,
+            state: None,
+            next_at: Instant::now(),
+            last_sent: Instant::now(),
+            frames: 0,
+            pending: Default::default(),
+            announce: None,
+            encoder_name: String::new(),
+        }
+    }
+}
+
+fn codecs_for(options: &Options) -> Result<Vec<VideoCodec>, String> {
+    let codecs: Vec<VideoCodec> = encoder::available_codecs(options.encoder)
+        .into_iter()
+        .filter(|codec| options.codec.is_none_or(|only| only == *codec))
+        .collect();
+    if codecs.is_empty() {
+        return Err(match options.codec {
+            Some(codec) => format!("{} cannot encode {codec:?}", options.encoder.name()),
+            None => format!("no encoder available for {}", options.encoder.name()),
+        });
+    }
+    Ok(codecs)
 }
 
 impl WindowSource for WindowsSource {
@@ -64,7 +125,11 @@ impl WindowSource for WindowsSource {
     }
 
     fn encoders(&self) -> Vec<VideoCodec> {
-        self.codecs.clone()
+        self.current.read().expect("options").codecs.clone()
+    }
+
+    fn backends(&self) -> Vec<BackendKind> {
+        vec![BackendKind::Native, BackendKind::Desktop]
     }
 
     fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
@@ -80,21 +145,25 @@ impl WindowSource for WindowsSource {
     }
 
     fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
-        let hwnd = windows_list::hwnd(window);
-        if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-            return Err("no such window".into());
-        }
-        Ok(Box::new(WindowStream {
-            window,
-            codec,
-            options: self.options.clone(),
-            state: None,
-            next_at: Instant::now(),
-            last_sent: Instant::now(),
-            frames: 0,
-            pending: Default::default(),
-            announce: None,
-        }))
+        check_window(window)?;
+        Ok(Box::new(self.open_stream(window, codec, false)))
+    }
+
+    fn open_desktop(
+        &self,
+        window: WindowId,
+        codec: VideoCodec,
+    ) -> Result<Box<dyn FrameSource>, String> {
+        check_window(window)?;
+        Ok(Box::new(self.open_stream(window, codec, true)))
+    }
+}
+
+fn check_window(window: WindowId) -> Result<(), String> {
+    if unsafe { IsWindow(Some(windows_list::hwnd(window))) }.as_bool() {
+        Ok(())
+    } else {
+        Err("no such window".into())
     }
 }
 
@@ -109,7 +178,11 @@ struct State {
 struct WindowStream {
     window: WindowId,
     codec: VideoCodec,
-    options: Options,
+    /// Cut out of a whole-screen capture (the desktop backend).
+    desktop: bool,
+    current: Arc<RwLock<Current>>,
+    /// The options generation the encoder was opened with.
+    generation: u64,
     state: Option<State>,
     next_at: Instant,
     last_sent: Instant,
@@ -117,6 +190,7 @@ struct WindowStream {
     pending: std::collections::VecDeque<Vec<u8>>,
     /// The picture size to announce with the next frame sent.
     announce: Option<(u32, u32)>,
+    encoder_name: String,
 }
 
 impl WindowStream {
@@ -130,6 +204,11 @@ impl WindowStream {
             size: self.announce.take(),
         })
     }
+
+    fn options(&self) -> (Options, u64) {
+        let current = self.current.read().expect("options");
+        (current.options.clone(), current.generation)
+    }
 }
 
 // Every Windows object in `state` is created on the stream's own thread
@@ -141,7 +220,7 @@ unsafe impl Send for WindowStream {}
 const REFRESH: Duration = Duration::from_secs(1);
 
 fn frame_time(options: &Options) -> Duration {
-    Duration::from_nanos(1_000_000_000 / u64::from(options.fps))
+    Duration::from_nanos(1_000_000_000 / u64::from(options.fps.max(1)))
 }
 
 /// Encoder settings for a picture size; the bitrate scales with area.
@@ -159,6 +238,10 @@ fn settings(options: &Options, codec: VideoCodec, width: usize, height: usize) -
 }
 
 impl FrameSource for WindowStream {
+    fn describe(&self) -> String {
+        self.encoder_name.clone()
+    }
+
     fn next_frame(&mut self, mut keyframe: bool) -> Option<EncodedFrame> {
         // An encoder that caught up gave more than one frame last time.
         if !keyframe {
@@ -169,7 +252,12 @@ impl FrameSource for WindowStream {
         capture::init_thread();
         let hwnd = windows_list::hwnd(self.window);
         if self.state.is_none() {
-            let capture = match Capture::new(hwnd) {
+            let capture = if self.desktop {
+                Capture::desktop(hwnd)
+            } else {
+                Capture::new(hwnd)
+            };
+            let capture = match capture {
                 Ok(capture) => capture,
                 Err(e) => {
                     eprintln!("capture of window {} failed: {e}", self.window.0);
@@ -187,17 +275,19 @@ impl FrameSource for WindowStream {
             if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
                 return None;
             }
-            let frame_time = frame_time(&self.options);
-            let wait = self.next_at.saturating_duration_since(Instant::now());
+            let (options, generation) = self.options();
+            let frame_time = frame_time(&options);
+            // Never faster than the frame rate: wait out the frame time, then
+            // up to one more frame time for a new picture.
+            std::thread::sleep(self.next_at.saturating_duration_since(Instant::now()));
             let state = self.state.as_mut().expect("state");
-            let changed = match state.capture.poll(wait) {
+            let changed = match state.capture.poll(frame_time) {
                 Ok(changed) => changed,
                 Err(e) => {
                     eprintln!("capture of window {} stopped: {e}", self.window.0);
                     return None;
                 }
             };
-            self.next_at = Instant::now().max(self.next_at) + frame_time;
 
             let Some(picture) = state.capture.picture() else {
                 continue;
@@ -206,9 +296,14 @@ impl FrameSource for WindowStream {
                 continue;
             }
             let size = convert::even(picture.width, picture.height);
-            if size != state.size {
-                let settings = settings(&self.options, self.codec, size.0, size.1);
-                state.encoder = match encoder::open(self.options.encoder, &settings) {
+            if size != state.size || generation != self.generation {
+                let settings = settings(&options, self.codec, size.0, size.1);
+                // A live change to an encoder that cannot make this
+                // stream's codec keeps the stream going on the best one
+                // that can.
+                let opened = encoder::open(options.encoder, &settings)
+                    .or_else(|_| encoder::open(EncoderChoice::Auto, &settings));
+                state.encoder = match opened {
                     Ok(encoder) => {
                         println!(
                             "window {}: {}x{} {:?} with {}",
@@ -225,10 +320,14 @@ impl FrameSource for WindowStream {
                         return None;
                     }
                 };
+                self.encoder_name = state.encoder.describe();
+                self.generation = generation;
                 state.size = size;
                 self.announce = Some((size.0 as u32, size.1 as u32));
+                self.pending.clear();
                 keyframe = true;
             }
+            self.next_at = Instant::now() + frame_time;
             let time = frame_time * self.frames as u32;
             match state.encoder.encode(&picture, keyframe, time) {
                 Ok(units) => {

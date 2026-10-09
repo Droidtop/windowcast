@@ -1,7 +1,8 @@
 //! Per-window capture with Windows.Graphics.Capture: the window's own
 //! DWM surface, whatever covers it, read back as BGRA. A free-threaded
 //! frame pool is polled from the stream's thread; nothing needs a message
-//! loop.
+//! loop. The desktop backend captures the whole screen a window is on and
+//! cuts the window's bounds out of each picture instead.
 
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,7 @@ use windows::Graphics::Capture::{
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
-use windows::Win32::Foundation::{HMODULE, HWND};
+use windows::Win32::Foundation::{HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP,
 };
@@ -21,7 +22,11 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
     D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
@@ -56,6 +61,8 @@ pub struct Capture {
     pixels: Vec<u8>,
     width: usize,
     height: usize,
+    /// For a whole-screen capture: the window to cut out, and its screen.
+    cut: Option<(HWND, HMONITOR)>,
 }
 
 fn create_device(
@@ -80,8 +87,29 @@ fn create_device(
 }
 
 impl Capture {
+    /// Captures one window's own surface.
     pub fn new(window: HWND) -> windows::core::Result<Self> {
         init_thread();
+        let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
+        Self::start(unsafe { interop.CreateForWindow(window)? }, None)
+    }
+
+    /// Captures the whole screen `window` is on; [`Self::picture`] is the
+    /// window's bounds cut out of it, with whatever covers the window.
+    pub fn desktop(window: HWND) -> windows::core::Result<Self> {
+        init_thread();
+        let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+        let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
+        Self::start(
+            unsafe { interop.CreateForMonitor(monitor)? },
+            Some((window, monitor)),
+        )
+    }
+
+    fn start(
+        item: GraphicsCaptureItem,
+        cut: Option<(HWND, HMONITOR)>,
+    ) -> windows::core::Result<Self> {
         // A GPU when there is one; WARP (software) otherwise, e.g. a VM.
         let (device, context) = create_device(D3D_DRIVER_TYPE_HARDWARE)
             .or_else(|_| create_device(D3D_DRIVER_TYPE_WARP))?;
@@ -89,8 +117,6 @@ impl Capture {
         let winrt_device: IDirect3DDevice =
             unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi)? }.cast()?;
 
-        let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
-        let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(window)? };
         let pool_size = item.Size()?;
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &winrt_device,
@@ -114,6 +140,7 @@ impl Capture {
             pixels: Vec::new(),
             width: 0,
             height: 0,
+            cut,
         })
     }
 
@@ -150,10 +177,17 @@ impl Capture {
 
     /// The latest picture, if any arrived yet.
     pub fn picture(&self) -> Option<Bgra<'_>> {
-        (self.width >= 2 && self.height >= 2).then(|| Bgra {
-            data: &self.pixels,
-            width: self.width,
-            height: self.height,
+        if self.width < 2 || self.height < 2 {
+            return None;
+        }
+        let (left, top, width, height) = match self.cut {
+            None => (0, 0, self.width, self.height),
+            Some((window, monitor)) => cut_rect(window, monitor, self.width, self.height)?,
+        };
+        Some(Bgra {
+            data: &self.pixels[(top * self.width + left) * 4..],
+            width,
+            height,
             stride: self.width * 4,
         })
     }
@@ -211,6 +245,42 @@ impl Capture {
         self.height = height;
         Ok(())
     }
+}
+
+/// The window's visible bounds on its screen's picture (`width` by
+/// `height`), as left, top, width and height; `None` when none of it is on
+/// that screen. Bounds and screen are both in physical pixels for a
+/// process that is aware of per-screen scaling, as the agents are.
+fn cut_rect(
+    window: HWND,
+    monitor: HMONITOR,
+    width: usize,
+    height: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    let mut bounds = RECT::default();
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        DwmGetWindowAttribute(
+            window,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut bounds as *mut RECT as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        )
+        .ok()?;
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+    }
+    let origin = info.rcMonitor;
+    let clamp = |value: i32, limit: usize| (value.max(0) as usize).min(limit);
+    let left = clamp(bounds.left - origin.left, width);
+    let top = clamp(bounds.top - origin.top, height);
+    let right = clamp(bounds.right - origin.left, width);
+    let bottom = clamp(bounds.bottom - origin.top, height);
+    (right >= left + 2 && bottom >= top + 2).then(|| (left, top, right - left, bottom - top))
 }
 
 impl Drop for Capture {

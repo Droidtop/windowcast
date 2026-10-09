@@ -24,18 +24,58 @@ use crate::convert::{self, Bgra};
 pub enum EncoderChoice {
     /// The best available: hardware, then Microsoft's, then OpenH264.
     Auto,
+    /// The first hardware encoder Media Foundation offers.
     MfHardware,
+    /// One GPU vendor's hardware encoder MFT: NVIDIA's NVENC, Intel's
+    /// Quick Sync, AMD's AMF. For machines with more than one GPU.
+    Nvenc,
+    QuickSync,
+    Amf,
     MfSoftware,
     OpenH264,
 }
 
 impl EncoderChoice {
+    pub const ALL: [EncoderChoice; 7] = [
+        Self::Auto,
+        Self::MfHardware,
+        Self::Nvenc,
+        Self::QuickSync,
+        Self::Amf,
+        Self::MfSoftware,
+        Self::OpenH264,
+    ];
+
     pub fn parse(name: &str) -> Option<Self> {
-        match name {
-            "auto" => Some(Self::Auto),
-            "mf-hardware" => Some(Self::MfHardware),
-            "mf-software" => Some(Self::MfSoftware),
-            "openh264" => Some(Self::OpenH264),
+        Self::ALL.into_iter().find(|choice| choice.name() == name)
+    }
+
+    /// The option's name, as `parse` takes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::MfHardware => "mf-hardware",
+            Self::Nvenc => "nvenc",
+            Self::QuickSync => "quicksync",
+            Self::Amf => "amf",
+            Self::MfSoftware => "mf-software",
+            Self::OpenH264 => "openh264",
+        }
+    }
+
+    fn hardware(self) -> bool {
+        matches!(
+            self,
+            Self::MfHardware | Self::Nvenc | Self::QuickSync | Self::Amf
+        )
+    }
+
+    /// The PCI vendor id the MFT reports (MFT_ENUM_HARDWARE_VENDOR_ID).
+    fn vendor(self) -> Option<&'static str> {
+        match self {
+            Self::Nvenc => Some("VEN_10DE"),
+            Self::QuickSync => Some("VEN_8086"),
+            Self::Amf => Some("VEN_1002"),
             _ => None,
         }
     }
@@ -47,7 +87,7 @@ impl EncoderChoice {
             one => vec![one],
         };
         all.into_iter()
-            .filter(|choice| codec == VideoCodec::H264 || *choice == Self::MfHardware)
+            .filter(|choice| codec == VideoCodec::H264 || choice.hardware())
             .collect()
     }
 }
@@ -78,10 +118,11 @@ pub fn open(choice: EncoderChoice, settings: &Settings) -> Result<Box<dyn Encode
     let mut errors = Vec::new();
     for candidate in choice.candidates(settings.codec) {
         let opened: Result<Box<dyn Encoder>, String> = match candidate {
-            EncoderChoice::MfHardware => MfEncoder::new(true, settings).map(|e| Box::new(e) as _),
-            EncoderChoice::MfSoftware => MfEncoder::new(false, settings).map(|e| Box::new(e) as _),
             EncoderChoice::OpenH264 => OpenH264Encoder::new(settings).map(|e| Box::new(e) as _),
             EncoderChoice::Auto => unreachable!("expanded by candidates"),
+            media_foundation => {
+                MfEncoder::new(media_foundation, settings).map(|e| Box::new(e) as _)
+            }
         };
         match opened {
             Ok(encoder) => return Ok(encoder),
@@ -98,14 +139,19 @@ pub fn open(choice: EncoderChoice, settings: &Settings) -> Result<Box<dyn Encode
 /// Codecs `choice` can produce on this machine, most preferred first.
 pub fn available_codecs(choice: EncoderChoice) -> Vec<VideoCodec> {
     let mut codecs = Vec::new();
-    let hardware_allowed = matches!(choice, EncoderChoice::Auto | EncoderChoice::MfHardware);
-    if hardware_allowed && !enumerate(true, VideoCodec::H265).is_empty() {
-        codecs.push(VideoCodec::H265);
+    let hardware = match choice {
+        EncoderChoice::Auto => Some(EncoderChoice::MfHardware),
+        choice if choice.hardware() => Some(choice),
+        _ => None,
+    };
+    for codec in [VideoCodec::Av1, VideoCodec::H265] {
+        if hardware.is_some_and(|hardware| !matching(hardware, codec).is_empty()) {
+            codecs.push(codec);
+        }
     }
     let h264 = match choice {
         EncoderChoice::Auto | EncoderChoice::OpenH264 => true,
-        EncoderChoice::MfHardware => !enumerate(true, VideoCodec::H264).is_empty(),
-        EncoderChoice::MfSoftware => !enumerate(false, VideoCodec::H264).is_empty(),
+        other => !matching(other, VideoCodec::H264).is_empty(),
     };
     if h264 {
         codecs.push(VideoCodec::H264);
@@ -113,17 +159,45 @@ pub fn available_codecs(choice: EncoderChoice) -> Vec<VideoCodec> {
     codecs
 }
 
+/// The Media Foundation encoders `choice` stands for, best first.
+fn matching(choice: EncoderChoice, codec: VideoCodec) -> Vec<IMFActivate> {
+    enumerate(choice.hardware(), codec)
+        .into_iter()
+        .filter(|activate| {
+            choice
+                .vendor()
+                .is_none_or(|vendor| vendor_id(activate).is_some_and(|id| id.contains(vendor)))
+        })
+        .collect()
+}
+
+fn vendor_id(activate: &IMFActivate) -> Option<String> {
+    let mut buffer = [0u16; 128];
+    let mut len = 0u32;
+    unsafe {
+        activate
+            .GetString(
+                &MFT_ENUM_HARDWARE_VENDOR_ID_Attribute,
+                &mut buffer,
+                Some(&mut len),
+            )
+            .ok()?;
+    }
+    Some(String::from_utf16_lossy(&buffer[..len as usize]))
+}
+
 /// One line per Media Foundation encoder on this machine, for `--list-encoders`.
 pub fn list() -> Vec<String> {
     let mut lines = Vec::new();
     for hardware in [true, false] {
-        for codec in [VideoCodec::H264, VideoCodec::H265] {
+        for codec in [VideoCodec::H264, VideoCodec::H265, VideoCodec::Av1] {
             for activate in enumerate(hardware, codec) {
                 lines.push(format!(
-                    "{} {:?}: {}",
+                    "{} {:?}: {} ({})",
                     if hardware { "hardware" } else { "software" },
                     codec,
-                    friendly_name(&activate)
+                    friendly_name(&activate),
+                    vendor_id(&activate).unwrap_or_default()
                 ));
             }
         }
@@ -256,8 +330,8 @@ struct MfEncoder {
 unsafe impl Send for MfEncoder {}
 
 impl MfEncoder {
-    fn new(hardware: bool, s: &Settings) -> Result<Self, String> {
-        let activate = enumerate(hardware, s.codec)
+    fn new(choice: EncoderChoice, s: &Settings) -> Result<Self, String> {
+        let activate = matching(choice, s.codec)
             .into_iter()
             .next()
             .ok_or("no such encoder on this machine")?;
@@ -371,7 +445,11 @@ impl MfEncoder {
                 nv12: Vec::new(),
                 name: format!(
                     "Media Foundation {} ({name}){}",
-                    if hardware { "hardware" } else { "software" },
+                    if choice.hardware() {
+                        "hardware"
+                    } else {
+                        "software"
+                    },
                     if rejected.is_empty() {
                         String::new()
                     } else {

@@ -1,7 +1,7 @@
 //! windowcast Windows host agent.
 //!
 //! Usage: `windowcast-agent-windows [--listen ADDR:PORT] [--no-pairing]
-//! [--encoder auto|mf-hardware|mf-software|openh264] [--fps N]
+//! [--encoder auto|mf-hardware|nvenc|quicksync|amf|mf-software|openh264] [--fps N]
 //! [--bitrate BPS_AT_1080P] [--list-encoders]`
 //! (`--listen` defaults to 0.0.0.0:47100).
 
@@ -26,10 +26,9 @@ async fn main() {
         match arg.as_str() {
             "--listen" => listen = value("--listen"),
             "--no-pairing" => pairing = false,
-            "--encoder" => {
-                options.encoder = EncoderChoice::parse(&value("--encoder"))
-                    .expect("--encoder is auto, mf-hardware, mf-software or openh264")
-            }
+            "--encoder" => options.encoder = EncoderChoice::parse(&value("--encoder")).expect(
+                "--encoder is auto, mf-hardware, nvenc, quicksync, amf, mf-software or openh264",
+            ),
             "--fps" => options.fps = value("--fps").parse().expect("--fps needs a number"),
             "--bitrate" => {
                 options.bitrate_1080p = value("--bitrate")
