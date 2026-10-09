@@ -17,7 +17,8 @@ read, never linked.
 
 A client sees windows (`WindowInfo`: id, title, app id, size, focus, and a
 content hint) and asks to stream one (`StreamStartRequest` with
-`StreamOptions`: the backend it would like and the codecs it can decode).
+`StreamOptions`: the backend it would like, the codecs it can decode, and
+its own ceilings for the stream's bitrate, frame rate and height).
 The host answers with the backend it actually used (`StreamStartResponse`).
 The user never needs to know which backend that was. Input (#108) goes
 back on one channel whatever the backend, and pairing happens once per

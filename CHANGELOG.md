@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Adaptive quality (Droidtop/tracker#114): the host holds each stream's encoder to what the network carries, cutting the bitrate on packet loss (the client's RTCP receiver reports) or a growing round trip (the host now pings the client too, and clients answer), and growing it back on a clean network until the settings rule again; when the rate is thin for the picture it lowers the frame rate to 30, then the picture to three quarters and half size, then 20 and 15 fps, and climbs back in reverse. Encoders change bitrate mid-stream where they can (NVENC, OpenH264; others are reopened), and the picture is scaled on the GPU (Windows) or by a box filter (Linux, read-back pictures).
+- Per-stream ceilings from the client (`StreamOptions::limits`, `ControlMessage::StreamLimits`, `set_stream_limits` and `windowcast_session_set_stream_limits`): bitrate, frame rate and height, which the host never goes above. The reference app keeps them per app and shows each stream's quality, loss and round trip on both sides; the host reports them as `StreamQuality` (`stream_quality` events).
+- `windowcast-testhost --microphone-level`: takes a client's microphone and prints its level once a second, keeping nothing.
+
+### Changed
+- Protocol version 5: stream options carry the client's limits. Hosts and clients from before do not connect to these.
+
 ## [0.13.0] - 2026-10-09
 
 ### Added

@@ -67,6 +67,14 @@ into a virtual audio cable (VB-CABLE, VoiceMeeter, Virtual Audio Cable, or
 one named with `--microphone-device`) and applications record from the
 cable's other end. The Windows client and the Android viewer send their
 microphone (Android 10 and later, which encode Opus).
+Quality adapts to the network: from the client's receiver reports (packet
+loss) and the host's own pings (round trip), the host holds each stream's
+encoder to what gets through, steps the frame rate and then the picture
+size down when the rate left is thin, and climbs back when the network
+clears; the host's settings and the client's per-window limits (bitrate,
+frame rate, height; per app in the reference app) are ceilings it never
+goes above. Both ends show what a stream is sent at, its loss and the round
+trip.
 What's **not** done yet: macOS, rumble back to the client's pads,
 sending gamepads from the Windows client, the clipboard and GPU encoding
 on Linux, the microphone from the Linux client, and every backend
