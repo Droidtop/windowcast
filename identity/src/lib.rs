@@ -111,6 +111,16 @@ pub fn verify(peer: &PeerId, message: &[u8], signature: &Signature) -> bool {
     }
 }
 
+/// [`verify`] for a signature as it arrives off the wire (64 raw bytes), so
+/// callers carrying signatures in their own messages need no direct
+/// dependency on the signature library. Anything not exactly 64 bytes fails.
+pub fn verify_bytes(peer: &PeerId, message: &[u8], signature: &[u8]) -> bool {
+    match Signature::from_slice(signature) {
+        Ok(signature) => verify(peer, message, &signature),
+        Err(_) => false,
+    }
+}
+
 /// A host's (or client's) list of pinned peers it trusts, persisted as one
 /// hex pubkey per line. Deliberately dumb storage — authorization *scope*
 /// per peer (which windows they may see) is a separate concern layered on
@@ -160,6 +170,10 @@ mod tests {
         let sig = identity.sign(b"hello");
         assert!(verify(&identity.peer_id(), b"hello", &sig));
         assert!(!verify(&identity.peer_id(), b"tampered", &sig));
+
+        let raw = sig.to_bytes();
+        assert!(verify_bytes(&identity.peer_id(), b"hello", &raw));
+        assert!(!verify_bytes(&identity.peer_id(), b"hello", &raw[..63]));
     }
 
     #[test]
