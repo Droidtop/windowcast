@@ -60,9 +60,10 @@ jobs:
             android/windowcast/build/outputs/aar/*.aar
             android/viewer/build/outputs/apk/debug/*.apk
 
-  windows-testhost:
-    # The test-pattern host for Windows, so an Android client on the same
-    # PC (the BlueStacks rig) can be tried end to end before #104's agent.
+  windows:
+    # The Windows host agent and the test host. The agent's test captures a
+    # real window with Windows.Graphics.Capture, encodes it with every
+    # encoder the runner has, streams it over loopback and decodes it.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -71,16 +72,28 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
+      - name: Clippy
+        run: cargo clippy -p windowcast-agent-windows --all-targets -- -D warnings
+
+      - name: Test the agent (capture, encode, stream, decode)
+        env:
+          WINDOWCAST_TEST_ON_SCREEN: "1"
+        run: cargo test -p windowcast-agent-windows --no-fail-fast -- --nocapture
+
       - name: Build
-        run: cargo build --release -p windowcast-cli-tools --bins
+        run: cargo build --release -p windowcast-cli-tools -p windowcast-agent-windows --bins
 
       - name: Upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: windowcast-windows-tools
+          name: windowcast-windows
           path: |
+            target/release/windowcast-agent-windows.exe
             target/release/windowcast-testhost.exe
             target/release/windowcast-client.exe
+            target/debug/deps/encoders-*.exe
