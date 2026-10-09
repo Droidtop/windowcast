@@ -408,7 +408,9 @@ async fn window_tracks_in_each_codec_attach_carry_frames_and_detach() {
     let mut sent = Vec::new();
     for (window, codec, seed) in windows {
         let track = host.attach_window(window, codec).await.unwrap();
-        assert_eq!(track.track_id(), format!("window-{}", window.0));
+        assert!(track
+            .track_id()
+            .starts_with(&format!("window-{}-", window.0)));
         let (keyframe, delta) = test_frames(codec, seed);
         for frame in [&keyframe, &delta] {
             track
@@ -459,6 +461,30 @@ async fn window_tracks_in_each_codec_attach_carry_frames_and_detach() {
     let (.., mut window_7) = received.remove(0);
     let ended = tokio::time::timeout(TEST_TIMEOUT, window_7.next_frame()).await;
     assert!(matches!(ended, Ok(Err(_))), "window 7 track should end");
+
+    // The same window streamed again arrives as a new track.
+    let track_7 = host
+        .attach_window(WindowId(7), VideoCodec::H264)
+        .await
+        .unwrap();
+    let (keyframe, _) = test_frames(VideoCodec::H264, 5);
+    track_7
+        .write_frame(
+            encode_units(VideoCodec::H264, &keyframe),
+            Duration::from_millis(16),
+        )
+        .await
+        .unwrap();
+    let mut again = tokio::time::timeout(TEST_TIMEOUT, client.next_remote_window())
+        .await
+        .expect("the re-attached window's track never arrived")
+        .unwrap();
+    assert_eq!(again.window(), WindowId(7));
+    let frame = tokio::time::timeout(TEST_TIMEOUT, again.next_frame())
+        .await
+        .expect("the re-attached window stalled")
+        .unwrap();
+    assert_eq!(decode_units(VideoCodec::H264, &frame.data), keyframe);
 
     let track_9 = host
         .attach_window(WindowId(9), VideoCodec::H265)

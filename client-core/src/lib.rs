@@ -439,8 +439,11 @@ async fn pump_events(
             }
             ControlMessage::StreamStopped(StreamTarget::Window(window)) => {
                 // A stream stopped before its track delivered anything still
-                // holds its sender; dropping it ends the queue.
-                if let Some(slot) = shared.existing_slot(window) {
+                // holds its sender; dropping it ends the queue. The slot
+                // leaves the map, so a new stream of the same window gets a
+                // fresh queue instead of this ended one.
+                let slot = shared.slots.lock().expect("slots").remove(&window);
+                if let Some(slot) = slot {
                     slot.sender.lock().expect("sender").take();
                 }
                 Event::StreamStopped { window: window.0 }

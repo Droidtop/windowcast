@@ -46,12 +46,16 @@ const VIDEO_CLOCK_RATE: u32 = 90_000;
 const STREAM_ID: &str = "windowcast";
 const TRACK_ID_PREFIX: &str = "window-";
 
-pub(crate) fn track_id_for(window: WindowId) -> String {
-    format!("{TRACK_ID_PREFIX}{}", window.0)
+/// `window-<id>-<ssrc>`: unique per attach, because webrtc-rs keys remote
+/// tracks by id and never forgets one (it emits no close event), so a
+/// window streamed a second time under the same id would never arrive.
+pub(crate) fn track_id_for(window: WindowId, ssrc: u32) -> String {
+    format!("{TRACK_ID_PREFIX}{}-{ssrc:08x}", window.0)
 }
 
 pub(crate) fn window_for_track_id(id: &str) -> Option<WindowId> {
-    id.strip_prefix(TRACK_ID_PREFIX)?.parse().ok().map(WindowId)
+    let (window, _ssrc) = id.strip_prefix(TRACK_ID_PREFIX)?.split_once('-')?;
+    window.parse().ok().map(WindowId)
 }
 
 /// The RTP codec for each windowcast codec: the same entries webrtc's
@@ -158,7 +162,7 @@ impl WindowTrack {
         codec: VideoCodec,
     ) -> Result<PendingTrack, TransportError> {
         let ssrc = rand_core::RngCore::next_u32(&mut rand_core::OsRng);
-        let track_id = track_id_for(window);
+        let track_id = track_id_for(window, ssrc);
         let track = Arc::new(TrackLocalStaticSample::new(
             Instant::now(),
             MediaStreamTrack::new(
@@ -199,7 +203,7 @@ impl WindowTrack {
     /// The track id the client sees, and what `StreamStartResponse::track_id`
     /// carries.
     pub fn track_id(&self) -> String {
-        track_id_for(self.window)
+        track_id_for(self.window, self.ssrc)
     }
 
     pub(crate) fn sender(&self) -> &Arc<dyn RtpSender> {
@@ -463,10 +467,11 @@ mod tests {
 
     #[test]
     fn track_ids_round_trip_and_ignore_foreign_tracks() {
-        let id = track_id_for(WindowId(42));
+        let id = track_id_for(WindowId(42), 0x1234_abcd);
         assert_eq!(window_for_track_id(&id), Some(WindowId(42)));
         assert_eq!(window_for_track_id("audio-1"), None);
-        assert_eq!(window_for_track_id("window-x"), None);
+        assert_eq!(window_for_track_id("window-x-1"), None);
+        assert_eq!(window_for_track_id("window-42"), None);
     }
 
     #[test]
