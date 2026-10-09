@@ -202,22 +202,27 @@ struct Timings {
     frames: u32,
     readback: Duration,
     encode: Duration,
+    /// Keyframes asked of the encoder (first frame, size changes and the
+    /// client's requests); the rest it makes on its own interval.
+    forced: u32,
 }
 
 impl Timings {
-    fn add(&mut self, window: WindowId, readback: Duration, encode: Duration) {
+    fn add(&mut self, window: WindowId, readback: Duration, encode: Duration, forced: bool) {
         self.frames += 1;
+        self.forced += u32::from(forced);
         self.readback += readback;
         self.encode += encode;
         let elapsed = self.since.elapsed();
         if elapsed >= Duration::from_secs(5) {
             let per = |total: Duration| total.as_secs_f64() * 1000.0 / f64::from(self.frames);
             println!(
-                "window {}: {:.1} fps; capture and read back {:.2} ms, convert and encode {:.2} ms a frame",
+                "window {}: {:.1} fps; capture and read back {:.2} ms, convert and encode {:.2} ms a frame; {} keyframes asked for",
                 window.0,
                 f64::from(self.frames) / elapsed.as_secs_f64(),
                 per(self.readback),
-                per(self.encode)
+                per(self.encode),
+                self.forced
             );
             *self = Timings::new();
         }
@@ -229,6 +234,7 @@ impl Timings {
             frames: 0,
             readback: Duration::ZERO,
             encode: Duration::ZERO,
+            forced: 0,
         }
     }
 }
@@ -336,13 +342,15 @@ impl FrameSource for WindowStream {
                 continue;
             }
             let size = convert::even(picture.width(), picture.height());
+            let mut texture_output = None;
             if size != state.size || generation != self.generation {
                 let settings = settings(&options, self.codec, size.0, size.1);
                 // A live change to an encoder that cannot make this
                 // stream's codec keeps the stream going on the best one
                 // that can.
-                let opened = encoder::open(options.encoder, &settings)
-                    .or_else(|_| encoder::open(EncoderChoice::Auto, &settings));
+                let device = state.capture.device();
+                let opened = encoder::open_on(options.encoder, &settings, device.as_ref())
+                    .or_else(|_| encoder::open_on(EncoderChoice::Auto, &settings, device.as_ref()));
                 state.encoder = match opened {
                     Ok(encoder) => {
                         println!(
@@ -361,6 +369,8 @@ impl FrameSource for WindowStream {
                     }
                 };
                 self.encoder_name = state.encoder.describe();
+                // From the next picture on (this one is already read).
+                texture_output = Some(state.encoder.takes_textures());
                 self.generation = generation;
                 state.size = size;
                 self.announce = Some((size.0 as u32, size.1 as u32));
@@ -371,8 +381,16 @@ impl FrameSource for WindowStream {
             let time = frame_time * self.frames as u32;
             let started = Instant::now();
             let encoded = state.encoder.encode(&picture, keyframe, time);
+            if let Some(on) = texture_output {
+                state.capture.set_texture_output(on);
+            }
             if let Some(timings) = &mut self.timings {
-                timings.add(self.window, state.capture.readback, started.elapsed());
+                timings.add(
+                    self.window,
+                    state.capture.readback,
+                    started.elapsed(),
+                    keyframe,
+                );
             }
             match encoded {
                 Ok(units) => {

@@ -136,11 +136,12 @@ fn watch_window(
     }
     let seconds = started.elapsed().as_secs_f64();
     println!(
-        "received {received} frames ({keyframes} keyframes, {} KiB) in {seconds:.1} s, {:.1} fps; decoded {} pictures at {:?}",
+        "received {received} frames ({keyframes} keyframes, {} KiB) in {seconds:.1} s, {:.1} fps; decoded {} pictures at {:?}, centre pixel {:?}",
         bytes / 1024,
         received as f64 / seconds,
         check.pictures,
-        check.dimensions.unwrap_or_default()
+        check.dimensions.unwrap_or_default(),
+        check.center
     );
     if codec == VideoCodec::H264 && check.pictures == 0 {
         fail("nothing decoded");

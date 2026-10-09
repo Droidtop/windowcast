@@ -25,6 +25,14 @@ pub struct Nv12<'a> {
 pub enum Picture<'a> {
     Bgra(Bgra<'a>),
     Nv12(Nv12<'a>),
+    /// An NV12 texture on the capture device, for an encoder on the same
+    /// GPU to take without a copy (see `Encoder::takes_textures`).
+    #[cfg(windows)]
+    Texture {
+        texture: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+        width: usize,
+        height: usize,
+    },
 }
 
 impl Picture<'_> {
@@ -32,6 +40,8 @@ impl Picture<'_> {
         match self {
             Picture::Bgra(p) => p.width,
             Picture::Nv12(p) => p.width,
+            #[cfg(windows)]
+            Picture::Texture { width, .. } => *width,
         }
     }
 
@@ -39,26 +49,34 @@ impl Picture<'_> {
         match self {
             Picture::Bgra(p) => p.height,
             Picture::Nv12(p) => p.height,
+            #[cfg(windows)]
+            Picture::Texture { height, .. } => *height,
         }
     }
 
     /// NV12 at even dimensions, converting BGRA on the way.
-    pub fn to_nv12(&self, out: &mut Vec<u8>) {
+    pub fn to_nv12(&self, out: &mut Vec<u8>) -> Result<(), String> {
         match self {
             Picture::Bgra(p) => to_nv12(p, out),
             Picture::Nv12(p) => {
                 out.clear();
                 out.extend_from_slice(p.data);
             }
+            #[cfg(windows)]
+            Picture::Texture { .. } => return Err("a texture is not in memory".into()),
         }
+        Ok(())
     }
 
     /// I420 at even dimensions.
-    pub fn to_i420(&self, out: &mut Vec<u8>) {
+    pub fn to_i420(&self, out: &mut Vec<u8>) -> Result<(), String> {
         match self {
             Picture::Bgra(p) => to_i420(p, out),
             Picture::Nv12(p) => nv12_to_i420(p, out),
+            #[cfg(windows)]
+            Picture::Texture { .. } => return Err("a texture is not in memory".into()),
         }
+        Ok(())
     }
 }
 

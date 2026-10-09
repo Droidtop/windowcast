@@ -76,6 +76,10 @@ pub struct Capture {
     /// The last picture in NV12 and its size, when the GPU converted it.
     nv12: Vec<u8>,
     nv12_size: Option<(usize, usize)>,
+    /// Hand the encoder NV12 textures instead of reading pictures back
+    /// (it is on this device's GPU), and the last such texture.
+    texture_output: bool,
+    texture: Option<(ID3D11Texture2D, usize, usize)>,
 }
 
 fn create_device(
@@ -163,6 +167,8 @@ impl Capture {
             converter,
             nv12: Vec::new(),
             nv12_size: None,
+            texture_output: false,
+            texture: None,
         })
     }
 
@@ -201,6 +207,21 @@ impl Capture {
         }
     }
 
+    /// The capture device, for an encoder on the same GPU to take its
+    /// textures; `None` when pictures are not converted on the GPU.
+    pub fn device(&self) -> Option<ID3D11Device> {
+        self.converter.as_ref().map(|_| self.device.clone())
+    }
+
+    /// From the next picture on, hand over NV12 textures (`true`) or
+    /// pictures read back into memory.
+    pub fn set_texture_output(&mut self, on: bool) {
+        self.texture_output = on && self.converter.is_some();
+        if !self.texture_output {
+            self.texture = None;
+        }
+    }
+
     /// Converts the picture (cut to the window for a whole-screen
     /// capture) to NV12 on the GPU. False when there is no converter (any
     /// more): the caller reads back BGRA instead.
@@ -216,6 +237,21 @@ impl Capture {
             // The window is off its screen: keep the last picture.
             return true;
         };
+        if self.texture_output {
+            match converter.convert_to_texture(texture, rect) {
+                Ok(converted) => {
+                    self.texture = Some(converted);
+                    return true;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "colour conversion into a texture failed ({e}); reading pictures back"
+                    );
+                    self.texture_output = false;
+                    self.texture = None;
+                }
+            }
+        }
         match converter.convert(texture, rect, &mut self.nv12) {
             Ok(size) => {
                 self.nv12_size = Some(size);
@@ -232,6 +268,13 @@ impl Capture {
 
     /// The latest picture, if any arrived yet.
     pub fn picture(&self) -> Option<Picture<'_>> {
+        if let (true, Some((texture, width, height))) = (self.texture_output, &self.texture) {
+            return Some(Picture::Texture {
+                texture: texture.clone(),
+                width: *width,
+                height: *height,
+            });
+        }
         if let Some((width, height)) = self.nv12_size {
             return Some(Picture::Nv12(Nv12 {
                 data: &self.nv12,

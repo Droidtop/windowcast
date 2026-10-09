@@ -2,8 +2,10 @@
 //! the GPU's video processor (the same unit the client uses on the way
 //! out) into an NV12 texture, cut to the window and at the encoder's even
 //! size, and only that NV12 picture is read back: 1.5 bytes a pixel
-//! instead of 4, and no conversion loop on the processor. The output is
-//! BT.601 at studio range, like `convert`'s, which the clients expect.
+//! instead of 4, and no conversion loop on the processor. When the encoder
+//! is on the same GPU it takes the NV12 texture itself and nothing is read
+//! back at all (`convert_to_texture`). The output is BT.601 at studio
+//! range, like `convert`'s, which the clients expect.
 
 use windows::core::Interface;
 use windows::Win32::Foundation::RECT;
@@ -18,7 +20,14 @@ struct Stage {
     processor: ID3D11VideoProcessor,
     nv12: ID3D11Texture2D,
     staging: ID3D11Texture2D,
+    /// Textures handed to an encoder, used in turn so one is never
+    /// overwritten while the encoder may still read it.
+    ring: Vec<ID3D11Texture2D>,
+    next: usize,
 }
+
+/// Textures in the ring: more than an encoder holds in low-latency mode.
+const RING: usize = 4;
 
 pub struct Converter {
     device: ID3D11Device,
@@ -35,6 +44,12 @@ impl Converter {
         device: &ID3D11Device,
         context: &ID3D11DeviceContext,
     ) -> windows::core::Result<Self> {
+        // An encoder given this device uses it from its own threads.
+        if let Ok(multithread) = device.cast::<ID3D11Multithread>() {
+            unsafe {
+                let _ = multithread.SetMultithreadProtected(true);
+            }
+        }
         Ok(Converter {
             device: device.clone(),
             context: context.clone(),
@@ -97,6 +112,26 @@ impl Converter {
                 let mut staging = None;
                 self.device
                     .CreateTexture2D(&desc, None, Some(&mut staging))?;
+                // Ring textures may also be bound for the video encoder
+                // where the driver allows it, which spares it a copy.
+                desc.Usage = D3D11_USAGE_DEFAULT;
+                desc.CPUAccessFlags = 0;
+                let mut ring = Vec::with_capacity(RING);
+                for _ in 0..RING {
+                    let mut texture = None;
+                    desc.BindFlags =
+                        (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_VIDEO_ENCODER.0) as u32;
+                    if self
+                        .device
+                        .CreateTexture2D(&desc, None, Some(&mut texture))
+                        .is_err()
+                    {
+                        desc.BindFlags = D3D11_BIND_RENDER_TARGET.0 as u32;
+                        self.device
+                            .CreateTexture2D(&desc, None, Some(&mut texture))?;
+                    }
+                    ring.push(texture.expect("ring texture"));
+                }
                 self.stage = Some(Stage {
                     input,
                     output,
@@ -104,6 +139,8 @@ impl Converter {
                     processor,
                     nv12: nv12.expect("NV12 texture"),
                     staging: staging.expect("staging texture"),
+                    ring,
+                    next: 0,
                 });
             }
         }
@@ -119,14 +156,62 @@ impl Converter {
         rect: (usize, usize, usize, usize),
         out: &mut Vec<u8>,
     ) -> windows::core::Result<(usize, usize)> {
+        let (w, h) = (rect.2 & !1, rect.3 & !1);
+        let target = self.blit(texture, rect, false)?;
+        let context = self.context.clone();
+        let stage = self.stage.as_ref().expect("stage");
+        unsafe {
+            context.CopyResource(&stage.staging, &target);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            context.Map(&stage.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+            let pitch = mapped.RowPitch as usize;
+            let base = mapped.pData as *const u8;
+            out.resize(w * h * 3 / 2, 0);
+            // NV12 in a mapped texture: h rows of Y, then h/2 rows of UV,
+            // each `pitch` bytes apart.
+            for row in 0..h + h / 2 {
+                let from = std::slice::from_raw_parts(base.add(row * pitch), w);
+                out[row * w..row * w + w].copy_from_slice(from);
+            }
+            context.Unmap(&stage.staging, 0);
+        }
+        Ok((w, h))
+    }
+
+    /// Converts like [`Self::convert`] into the next texture of the ring
+    /// and returns it, for an encoder on this device to take as it is.
+    pub fn convert_to_texture(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        rect: (usize, usize, usize, usize),
+    ) -> windows::core::Result<(ID3D11Texture2D, usize, usize)> {
+        let target = self.blit(texture, rect, true)?;
+        Ok((target, rect.2 & !1, rect.3 & !1))
+    }
+
+    /// Runs the video processor from `rect` of `texture` into the stage's
+    /// NV12 texture, or the ring's next one.
+    fn blit(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        rect: (usize, usize, usize, usize),
+        ring: bool,
+    ) -> windows::core::Result<ID3D11Texture2D> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { texture.GetDesc(&mut desc) };
         let (left, top, width, height) = rect;
         let (w, h) = (width & !1, height & !1);
         let video_device = self.video_device.clone();
         let video_context = self.video_context.clone();
-        let context = self.context.clone();
-        let stage = self.stage((desc.Width, desc.Height), (w as u32, h as u32))?;
+        self.stage((desc.Width, desc.Height), (w as u32, h as u32))?;
+        let stage = self.stage.as_mut().expect("stage");
+        let destination = if ring {
+            let texture = stage.ring[stage.next].clone();
+            stage.next = (stage.next + 1) % stage.ring.len();
+            texture
+        } else {
+            stage.nv12.clone()
+        };
         unsafe {
             let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
                 FourCC: 0,
@@ -153,7 +238,7 @@ impl Converter {
             };
             let mut output = None;
             video_device.CreateVideoProcessorOutputView(
-                &stage.nv12,
+                &destination,
                 &stage.enumerator,
                 &output_desc,
                 Some(&mut output),
@@ -193,21 +278,7 @@ impl Converter {
             let [stream] = streams;
             drop(std::mem::ManuallyDrop::into_inner(stream.pInputSurface));
             blitted?;
-
-            context.CopyResource(&stage.staging, &stage.nv12);
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            context.Map(&stage.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
-            let pitch = mapped.RowPitch as usize;
-            let base = mapped.pData as *const u8;
-            out.resize(w * h * 3 / 2, 0);
-            // NV12 in a mapped texture: h rows of Y, then h/2 rows of UV,
-            // each `pitch` bytes apart.
-            for row in 0..h + h / 2 {
-                let from = std::slice::from_raw_parts(base.add(row * pitch), w);
-                out[row * w..row * w + w].copy_from_slice(from);
-            }
-            context.Unmap(&stage.staging, 0);
         }
-        Ok((w, h))
+        Ok(destination)
     }
 }

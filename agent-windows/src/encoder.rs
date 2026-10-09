@@ -17,6 +17,9 @@ use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Variant::VARIANT;
 
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
+use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+
 use crate::convert::{self, Picture};
 
 /// Which encoder to use; an agent option (`--encoder`).
@@ -111,17 +114,33 @@ pub trait Encoder {
         time: Duration,
     ) -> Result<Vec<Vec<u8>>, String>;
     fn describe(&self) -> String;
+
+    /// Whether it takes NV12 textures on the capture device as they are
+    /// (`Picture::Texture`), with no copy through memory.
+    fn takes_textures(&self) -> bool {
+        false
+    }
 }
 
 /// Opens the first encoder from `choice` that works for `settings`.
 pub fn open(choice: EncoderChoice, settings: &Settings) -> Result<Box<dyn Encoder>, String> {
+    open_on(choice, settings, None)
+}
+
+/// Like [`open`], and a hardware encoder on the same GPU as `device` (the
+/// capture device) takes its textures directly (`Encoder::takes_textures`).
+pub fn open_on(
+    choice: EncoderChoice,
+    settings: &Settings,
+    device: Option<&ID3D11Device>,
+) -> Result<Box<dyn Encoder>, String> {
     let mut errors = Vec::new();
     for candidate in choice.candidates(settings.codec) {
         let opened: Result<Box<dyn Encoder>, String> = match candidate {
             EncoderChoice::OpenH264 => OpenH264Encoder::new(settings).map(|e| Box::new(e) as _),
             EncoderChoice::Auto => unreachable!("expanded by candidates"),
             media_foundation => {
-                MfEncoder::new(media_foundation, settings).map(|e| Box::new(e) as _)
+                MfEncoder::new(media_foundation, settings, device).map(|e| Box::new(e) as _)
             }
         };
         match opened {
@@ -286,6 +305,13 @@ fn packed(high: u32, low: u32) -> u64 {
     (u64::from(high) << 32) | u64::from(low)
 }
 
+/// Frames between periodic keyframes: two seconds. A client that loses a
+/// picture asks for a keyframe at once, so the period only bounds how long
+/// a client that joins or misses the request waits.
+fn gop(fps: u32) -> u32 {
+    fps * 2
+}
+
 /// Encoder properties for interactive streaming. Returns the ones the
 /// encoder refused (not every MFT supports every property).
 fn configure(api: &ICodecAPI, fps: u32) -> Vec<&'static str> {
@@ -297,7 +323,7 @@ fn configure(api: &ICodecAPI, fps: u32) -> Vec<&'static str> {
         ),
         (
             &CODECAPI_AVEncMPVGOPSize,
-            VARIANT::from(fps * 2),
+            VARIANT::from(gop(fps)),
             "GOP size",
         ),
     ];
@@ -323,6 +349,8 @@ struct MfEncoder {
     need_input: u32,
     nv12: Vec<u8>,
     name: String,
+    /// Set when the encoder has the capture device and takes its textures.
+    manager: Option<IMFDXGIDeviceManager>,
 }
 
 // Created and used on the stream's one thread, in the multithreaded
@@ -330,12 +358,33 @@ struct MfEncoder {
 unsafe impl Send for MfEncoder {}
 
 impl MfEncoder {
-    fn new(choice: EncoderChoice, s: &Settings) -> Result<Self, String> {
-        let activate = matching(choice, s.codec)
+    fn new(
+        choice: EncoderChoice,
+        s: &Settings,
+        device: Option<&ID3D11Device>,
+    ) -> Result<Self, String> {
+        // With a capture device, the encoder on that same GPU first.
+        let luid = device.and_then(adapter_luid);
+        let mut candidates = matching(choice, s.codec);
+        candidates.sort_by_key(|activate| {
+            luid.is_none()
+                || activate
+                    .cast::<IMFAttributes>()
+                    .ok()
+                    .as_ref()
+                    .and_then(mft_luid)
+                    != luid
+        });
+        let activate = candidates
             .into_iter()
             .next()
             .ok_or("no such encoder on this machine")?;
         let name = friendly_name(&activate);
+        let activate_luid = activate
+            .cast::<IMFAttributes>()
+            .ok()
+            .as_ref()
+            .and_then(mft_luid);
         unsafe {
             let transform: IMFTransform = activate.ActivateObject().map_err(err("activate"))?;
             let mut events = None;
@@ -352,6 +401,29 @@ impl MfEncoder {
                 }
                 let _ = attributes.SetUINT32(&MF_LOW_LATENCY, 1);
             }
+            // The capture device, for an encoder on its GPU that takes
+            // Direct3D 11 textures: frames then never leave the GPU.
+            let encoder_luid = activate_luid.or_else(|| {
+                transform
+                    .GetAttributes()
+                    .ok()
+                    .as_ref()
+                    .and_then(|a| mft_luid(&a.cast::<IMFAttributes>().ok()?))
+            });
+            // Same GPU: the adapters' LUIDs match, or, for an encoder that
+            // does not say (NVIDIA's), the GPU vendors do; a vendor's
+            // Direct3D-aware encoder then works on the device it is given.
+            let same_gpu = match (encoder_luid, luid) {
+                (Some(encoder), Some(capture)) => encoder == capture,
+                (None, Some(_)) => device.and_then(adapter_vendor).is_some_and(|vendor| {
+                    vendor_id(&activate).is_some_and(|id| id.contains(&vendor))
+                }),
+                _ => false,
+            };
+            let manager = match device {
+                Some(device) if same_gpu => give_device(&transform, device),
+                _ => None,
+            };
 
             // E_NOTIMPL means the streams are simply numbered from 0.
             let (mut inputs, mut outputs) = ([0u32], [0u32]);
@@ -361,6 +433,11 @@ impl MfEncoder {
             let (input_id, output_id) = (inputs[0], outputs[0]);
 
             let (w, h) = (s.width as u32, s.height as u32);
+            // Before the types as well as after: NVIDIA's encoders read
+            // their rate-control and GOP settings when the types are set.
+            if let Ok(api) = transform.cast::<ICodecAPI>() {
+                configure(&api, s.fps);
+            }
             let output = MFCreateMediaType().map_err(err("output type"))?;
             output
                 .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
@@ -383,6 +460,9 @@ impl MfEncoder {
             output
                 .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
                 .map_err(err("interlace"))?;
+            // The keyframe interval (GOP) on the type as well as through
+            // ICodecAPI: NVIDIA's encoders only take it here.
+            let _ = output.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, gop(s.fps));
             if s.codec == VideoCodec::H264 {
                 // Constrained Baseline, as the session's H.264 codec says.
                 output
@@ -444,11 +524,16 @@ impl MfEncoder {
                 need_input: 0,
                 nv12: Vec::new(),
                 name: format!(
-                    "Media Foundation {} ({name}){}",
+                    "Media Foundation {} ({name}){}{}",
                     if choice.hardware() {
                         "hardware"
                     } else {
                         "software"
+                    },
+                    if manager.is_some() {
+                        ", frames stay on the GPU"
+                    } else {
+                        ""
                     },
                     if rejected.is_empty() {
                         String::new()
@@ -456,11 +541,44 @@ impl MfEncoder {
                         format!(", ignores {}", rejected.join(", "))
                     }
                 ),
+                manager,
             })
         }
     }
 
-    fn sample(&self, time: Duration) -> windows::core::Result<IMFSample> {
+    fn sample(&mut self, picture: &Picture<'_>, time: Duration) -> Result<IMFSample, String> {
+        let buffer = match picture {
+            Picture::Texture { texture, .. } => unsafe {
+                let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, 0, false)
+                    .map_err(err("texture buffer"))?;
+                let length = buffer
+                    .cast::<IMF2DBuffer>()
+                    .and_then(|b| b.GetContiguousLength())
+                    .map_err(err("texture length"))?;
+                buffer
+                    .SetCurrentLength(length)
+                    .map_err(err("texture length"))?;
+                buffer
+            },
+            _ => {
+                picture.to_nv12(&mut self.nv12)?;
+                self.memory_buffer().map_err(err("buffer"))?
+            }
+        };
+        unsafe {
+            let sample = MFCreateSample().map_err(err("sample"))?;
+            sample.AddBuffer(&buffer).map_err(err("add buffer"))?;
+            sample
+                .SetSampleTime((time.as_nanos() / 100) as i64)
+                .map_err(err("time"))?;
+            sample
+                .SetSampleDuration(self.frame_time)
+                .map_err(err("duration"))?;
+            Ok(sample)
+        }
+    }
+
+    fn memory_buffer(&self) -> windows::core::Result<IMFMediaBuffer> {
         unsafe {
             let buffer = MFCreateMemoryBuffer(self.nv12.len() as u32)?;
             let mut data = std::ptr::null_mut();
@@ -468,11 +586,7 @@ impl MfEncoder {
             std::ptr::copy_nonoverlapping(self.nv12.as_ptr(), data, self.nv12.len());
             buffer.Unlock()?;
             buffer.SetCurrentLength(self.nv12.len() as u32)?;
-            let sample = MFCreateSample()?;
-            sample.AddBuffer(&buffer)?;
-            sample.SetSampleTime((time.as_nanos() / 100) as i64)?;
-            sample.SetSampleDuration(self.frame_time)?;
-            Ok(sample)
+            Ok(buffer)
         }
     }
 
@@ -584,7 +698,6 @@ impl Encoder for MfEncoder {
         keyframe: bool,
         time: Duration,
     ) -> Result<Vec<Vec<u8>>, String> {
-        picture.to_nv12(&mut self.nv12);
         if keyframe {
             if let Some(api) = &self.codec_api {
                 let _ = unsafe {
@@ -592,7 +705,7 @@ impl Encoder for MfEncoder {
                 };
             }
         }
-        let sample = self.sample(time).map_err(|e| e.to_string())?;
+        let sample = self.sample(picture, time)?;
         match self.events.clone() {
             Some(events) => self.encode_async(&events, &sample),
             None => self.encode_sync(&sample),
@@ -602,6 +715,71 @@ impl Encoder for MfEncoder {
 
     fn describe(&self) -> String {
         self.name.clone()
+    }
+
+    fn takes_textures(&self) -> bool {
+        self.manager.is_some()
+    }
+}
+
+/// The LUID of the adapter `device` is on.
+fn adapter_luid(device: &ID3D11Device) -> Option<u64> {
+    unsafe {
+        let dxgi: IDXGIDevice = device.cast().ok()?;
+        let desc = dxgi.GetAdapter().ok()?.GetDesc().ok()?;
+        Some(((desc.AdapterLuid.HighPart as u32 as u64) << 32) | desc.AdapterLuid.LowPart as u64)
+    }
+}
+
+/// The PCI vendor of the adapter `device` is on, as MFTs name it
+/// ("VEN_10DE").
+fn adapter_vendor(device: &ID3D11Device) -> Option<String> {
+    unsafe {
+        let dxgi: IDXGIDevice = device.cast().ok()?;
+        let desc = dxgi.GetAdapter().ok()?.GetDesc().ok()?;
+        Some(format!("VEN_{:04X}", desc.VendorId))
+    }
+}
+
+/// The LUID of the adapter a hardware encoder MFT runs on (a blob or a
+/// number, depending on who registered it).
+fn mft_luid(attributes: &IMFAttributes) -> Option<u64> {
+    unsafe {
+        if let Ok(luid) = attributes.GetUINT64(&MFT_ENUM_ADAPTER_LUID) {
+            return Some(luid);
+        }
+        let mut bytes = [0u8; 8];
+        let mut size = 0u32;
+        attributes
+            .GetBlob(&MFT_ENUM_ADAPTER_LUID, &mut bytes, Some(&mut size))
+            .ok()?;
+        // LUID { LowPart: u32, HighPart: i32 }.
+        let low = u32::from_le_bytes(bytes[..4].try_into().ok()?) as u64;
+        let high = u32::from_le_bytes(bytes[4..].try_into().ok()?) as u64;
+        (size == 8).then_some((high << 32) | low)
+    }
+}
+
+/// Gives a Direct3D 11-aware encoder the capture device; `None` when it
+/// does not take one.
+unsafe fn give_device(
+    transform: &IMFTransform,
+    device: &ID3D11Device,
+) -> Option<IMFDXGIDeviceManager> {
+    unsafe {
+        let attributes = transform.GetAttributes().ok()?;
+        if attributes.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) == 0 {
+            return None;
+        }
+        let mut token = 0u32;
+        let mut manager = None;
+        MFCreateDXGIDeviceManager(&mut token, &mut manager).ok()?;
+        let manager = manager?;
+        manager.ResetDevice(device, token).ok()?;
+        transform
+            .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)
+            .ok()?;
+        Some(manager)
     }
 }
 
@@ -652,7 +830,7 @@ impl Encoder for OpenH264Encoder {
         keyframe: bool,
         _time: Duration,
     ) -> Result<Vec<Vec<u8>>, String> {
-        picture.to_i420(&mut self.i420);
+        picture.to_i420(&mut self.i420)?;
         let (w, h) = convert::even(picture.width(), picture.height());
         let yuv = openh264::formats::YUVBuffer::from_vec(std::mem::take(&mut self.i420), w, h);
         if keyframe {
