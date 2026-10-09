@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use windowcast_protocol::selection::BackendRule;
+use windowcast_protocol::StreamLimits;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -111,6 +112,16 @@ pub struct ClientSettings {
     /// The codec to ask for (`H264`, `H265`, `Av1`); empty: the best this
     /// PC decodes.
     pub codec: String,
+    /// The user's ceilings per app (bitrate, frame rate, height); the host
+    /// adapts below them.
+    pub limits: Vec<AppLimits>,
+}
+
+/// One app's stream ceilings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppLimits {
+    pub app_id: String,
+    pub limits: StreamLimits,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -223,6 +223,7 @@ impl App {
                             "Mbit/s",
                             "Keyframes",
                             "Sound",
+                            "Network",
                             "Time",
                         ] {
                             ui.strong(heading);
@@ -258,6 +259,7 @@ impl App {
                                 Some(packets) => format!("{packets} packets"),
                                 None => "none".into(),
                             });
+                            ui.label(network(&stream.quality));
                             ui.label(format!("{} s", stream.seconds));
                             ui.end_row();
                         }
@@ -490,6 +492,20 @@ impl App {
                             String::new()
                         }
                     ));
+                    if let Some(quality) = &stream.quality {
+                        ui.label(format!("Sent at: {}", network(quality)));
+                    }
+                    ui.horizontal(|ui| {
+                        let mut limits = stream.limits;
+                        let mut changed = false;
+                        ui.label("Limits (0: none):");
+                        changed |= limit(ui, &mut limits.max_bitrate_kbps, "kbit/s", 50_000);
+                        changed |= limit(ui, &mut limits.max_fps, "fps", 240);
+                        changed |= limit(ui, &mut limits.max_height, "lines", 4320);
+                        if changed {
+                            client.set_limits(stream.window, limits);
+                        }
+                    });
                     ui.horizontal(|ui| {
                         ui.label(if stats.audio {
                             format!("Sound: {} Opus packets played", stats.audio_packets)
@@ -667,4 +683,40 @@ fn stream_window_ui(ui: &mut egui::Ui, client: &ClientRole) {
             c.client.codec = codec;
         });
     }
+}
+
+/// A stream's adaptive quality in a few words: what it is held to, at
+/// what size and rate, and the network.
+fn network(quality: &windowcast_protocol::StreamQuality) -> String {
+    let held = match quality.target_kbps {
+        Some(kbps) => format!("held to {:.1} Mbit/s", f64::from(kbps) / 1000.0),
+        None => "as set".into(),
+    };
+    format!(
+        "{held}, {}x{} at {} fps; loss {:.1}%{}",
+        quality.width,
+        quality.height,
+        quality.fps,
+        quality.loss_percent,
+        quality
+            .rtt_ms
+            .map(|ms| format!(", round trip {ms} ms"))
+            .unwrap_or_default()
+    )
+}
+
+/// One ceiling as a number field, 0 meaning none. Returns whether it changed.
+fn limit(ui: &mut egui::Ui, value: &mut Option<u32>, unit: &str, max: u32) -> bool {
+    let mut number = value.unwrap_or(0);
+    let changed = ui
+        .add(
+            egui::DragValue::new(&mut number)
+                .range(0..=max)
+                .suffix(format!(" {unit}")),
+        )
+        .changed();
+    if changed {
+        *value = (number > 0).then_some(number);
+    }
+    changed
 }

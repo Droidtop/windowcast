@@ -11,9 +11,11 @@ use std::time::{Duration, Instant};
 use windowcast_client::{Client, ClientSession, Event};
 use windowcast_client_windows::{Placement, Shared, StreamStats};
 use windowcast_protocol::selection::{self, BackendRule, WindowMatch};
-use windowcast_protocol::{BackendKind, VideoCodec, WindowId, WindowInfo};
+use windowcast_protocol::{
+    BackendKind, StreamLimits, StreamQuality, VideoCodec, WindowId, WindowInfo,
+};
 
-use crate::config::{SavedHost, Store};
+use crate::config::{AppLimits, SavedHost, Store};
 
 /// How many recent session events the client window shows.
 const LOG_LINES: usize = 30;
@@ -24,6 +26,8 @@ struct Stream {
     codec: Option<VideoCodec>,
     refused: Option<String>,
     shared: Arc<Shared>,
+    /// The host's last quality report.
+    quality: Option<StreamQuality>,
     #[cfg(windows)]
     window: Option<windowcast_client_windows::StreamWindow>,
 }
@@ -36,6 +40,7 @@ impl Stream {
             codec: None,
             refused: None,
             shared: Arc::default(),
+            quality: None,
             #[cfg(windows)]
             window: None,
         }
@@ -82,6 +87,10 @@ pub struct ClientStream {
     pub backend: Option<BackendKind>,
     pub codec: Option<VideoCodec>,
     pub stats: StreamStats,
+    /// What the host sends it at and the network it sees.
+    pub quality: Option<StreamQuality>,
+    /// The user's ceilings for this window's app.
+    pub limits: StreamLimits,
 }
 
 /// Everything the client window shows.
@@ -325,6 +334,11 @@ impl ClientRole {
                 }
                 Event::WindowResized { .. } | Event::WindowFocused { .. } => {}
                 Event::Clipboard { text } => state.clipboard = Some(text),
+                Event::StreamQuality { window, quality } => {
+                    if let Some(stream) = state.streams.get_mut(&window) {
+                        stream.quality = Some(quality);
+                    }
+                }
                 Event::Closed => {
                     state.session = None;
                     let mut streams = std::mem::take(&mut state.streams);
@@ -444,9 +458,56 @@ impl ClientRole {
                 old.close_window();
             }
         }
+        let limits = self.limits_for(window);
+        if limits != StreamLimits::default() {
+            session
+                .set_stream_limits(WindowId(window), limits)
+                .map_err(|e| e.to_string())?;
+        }
         session
             .start_window(WindowId(window), &self.codecs())
             .map_err(|e| e.to_string())
+    }
+
+    fn app_id(&self, window: u64) -> Option<String> {
+        let state = self.state.lock().expect("state");
+        state
+            .windows
+            .iter()
+            .find(|info| info.id.0 == window)
+            .map(|info| info.app_id.clone())
+    }
+
+    /// The user's ceilings for `window`'s app.
+    fn limits_for(&self, window: u64) -> StreamLimits {
+        let Some(app_id) = self.app_id(window) else {
+            return StreamLimits::default();
+        };
+        self.store
+            .get()
+            .client
+            .limits
+            .iter()
+            .find(|l| l.app_id == app_id)
+            .map(|l| l.limits)
+            .unwrap_or_default()
+    }
+
+    /// Sets the user's ceilings for `window`'s app: saved, and sent to the
+    /// running stream at once.
+    pub fn set_limits(&self, window: u64, limits: StreamLimits) {
+        if let Some(app_id) = self.app_id(window) {
+            self.store.update(|config| {
+                let saved = &mut config.client.limits;
+                saved.retain(|l| l.app_id != app_id);
+                if limits != StreamLimits::default() {
+                    saved.push(AppLimits { app_id, limits });
+                }
+            });
+        }
+        if let Ok(session) = self.session() {
+            let _ = session.set_stream_limits(WindowId(window), limits);
+        }
     }
 
     pub fn stop_stream(&self, window: u64) -> Result<(), String> {
@@ -564,7 +625,8 @@ impl ClientRole {
     }
 
     pub fn snapshot(&self) -> ClientSnapshot {
-        let rules = self.store.get().client.rules;
+        let client = self.store.get().client;
+        let (rules, saved_limits) = (client.rules, client.limits);
         let state = self.state.lock().expect("state");
         let session = state.session.as_ref();
         let windows = state
@@ -598,6 +660,14 @@ impl ClientRole {
                 backend: stream.backend,
                 codec: stream.codec,
                 stats: stream.shared.stats.lock().expect("stats").clone(),
+                quality: stream.quality,
+                limits: state
+                    .windows
+                    .iter()
+                    .find(|info| info.id.0 == *window)
+                    .and_then(|info| saved_limits.iter().find(|l| l.app_id == info.app_id))
+                    .map(|l| l.limits)
+                    .unwrap_or_default(),
             })
             .collect();
         ClientSnapshot {

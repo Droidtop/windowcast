@@ -164,6 +164,8 @@ pub struct HostStream {
     pub keyframe_requests: u64,
     /// Opus packets sent, when the stream has sound.
     pub audio_packets: Option<u64>,
+    /// What adaptive quality holds it to, and the network it sees.
+    pub quality: windowcast_protocol::StreamQuality,
     pub seconds: u64,
 }
 
@@ -355,6 +357,7 @@ impl HostRole {
                     keyframes: stream.keyframes,
                     keyframe_requests: stream.keyframe_requests,
                     audio_packets: stream.audio_packets,
+                    quality: stream.quality,
                     seconds: stream.since.elapsed().as_secs(),
                 }
             })
