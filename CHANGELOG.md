@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Parity for GameStream sound: every four audio packets are followed by two Reed-Solomon parity packets (Sunshine's and Moonlight's fixed 4+2 matrix over GF(2^8)), so a client rebuilds up to two lost packets of each four; the host encodes the sound at a constant rate so each block's packets are one size. Our client rebuilds lost packets and plays the rest in order, skipping a block only once a later one can play.
+
 ## [0.18.0] - 2026-10-09
 
 ### Added

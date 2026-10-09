@@ -382,7 +382,10 @@ fn send_audio(
         }
         return;
     };
-    let mut encoder = match windowcast_host::audio::OpusPackets::with_duration(duration_ms) {
+    // A constant rate, so each block's packets are one size for the parity.
+    let encoder = windowcast_host::audio::OpusPackets::with_duration(duration_ms)
+        .and_then(|mut encoder| encoder.constant_rate().map(|()| encoder));
+    let mut encoder = match encoder {
         Ok(encoder) => encoder,
         Err(e) => {
             eprintln!("gamestream: no sound: {e}");
@@ -397,7 +400,9 @@ fn send_audio(
         match encoder.push(&samples) {
             Ok(packets) => {
                 for opus in packets {
-                    let _ = socket.send_to(&packetizer.packet(&opus), peer);
+                    for packet in packetizer.packets(&opus) {
+                        let _ = socket.send_to(&packet, peer);
+                    }
                 }
             }
             Err(e) => {

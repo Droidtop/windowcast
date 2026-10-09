@@ -15,12 +15,13 @@
 //! - [`input`]: the input packets a client sends on the control stream.
 //! - [`stream`]: a host's launched stream; [`windows`]: a windowcast host's
 //!   windows as the apps it offers.
-//! - [`audio`]: the sound packets.
+//! - [`audio`], [`fec`]: the sound packets and their parity.
 
 pub mod audio;
 pub mod client;
 pub mod control;
 pub mod crypto;
+pub mod fec;
 pub mod input;
 pub mod pairing;
 pub mod rtsp;

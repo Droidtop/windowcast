@@ -154,6 +154,10 @@ fn stock_moonlight_pairs_and_lists_our_apps() {
         "Moonlight could not decrypt the sound"
     );
     assert!(
+        !streamed.contains("Audio FEC has been disabled"),
+        "Moonlight refused the sound's parity"
+    );
+    assert!(
         !streamed.contains("Terminating connection"),
         "Moonlight gave up on the stream"
     );

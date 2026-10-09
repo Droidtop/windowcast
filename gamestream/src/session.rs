@@ -45,8 +45,8 @@ impl Default for StreamRequest {
 /// A running stream: frames as they complete, and the end.
 pub struct Stream {
     pub frames: Receiver<Frame>,
-    /// The host's sound: stereo Opus packets at 48 kHz, decrypted, in the
-    /// order they came.
+    /// The host's sound: stereo Opus packets at 48 kHz, decrypted, in
+    /// sequence, lost ones rebuilt from the parity where they can be.
     pub audio: Receiver<Vec<u8>>,
     stop: Arc<AtomicBool>,
     pub ended: Arc<AtomicBool>,
@@ -396,7 +396,8 @@ pub async fn start(
     let (audio_tx, audio_rx) = mpsc::sync_channel(256);
     {
         let (stop, ended) = (Arc::clone(&stop), Arc::clone(&ended));
-        let audio_key = crate::audio::AudioKey { key, key_id };
+        let mut depacketizer =
+            crate::audio::AudioDepacketizer::new(Some(crate::audio::AudioKey { key, key_id }));
         audio.set_read_timeout(Some(Duration::from_millis(100)))?;
         std::thread::spawn(move || {
             let mut buf = vec![0u8; 4096];
@@ -407,7 +408,7 @@ pub async fn start(
                 if from.ip() != host {
                     continue;
                 }
-                if let Some((_, opus)) = crate::audio::open_packet(&buf[..n], Some(&audio_key)) {
+                for opus in depacketizer.add(&buf[..n]) {
                     let _ = audio_tx.try_send(opus);
                 }
             }

@@ -52,6 +52,11 @@ impl OpusPackets {
         })
     }
 
+    /// Every packet the same size from here on (no variable bitrate).
+    pub fn constant_rate(&mut self) -> Result<(), String> {
+        self.encoder.set_vbr(false).map_err(|e| e.to_string())
+    }
+
     /// Adds samples and returns every whole packet they complete.
     pub fn push(&mut self, samples: &[i16]) -> Result<Vec<Vec<u8>>, String> {
         self.pending.extend_from_slice(samples);
