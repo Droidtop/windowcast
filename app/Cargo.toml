@@ -1,0 +1,28 @@
+[package]
+name = "windowcast-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The reference application: the minimal, complete demonstration of the
+# library in both roles, host and client, chosen by its configuration,
+# with a native window for each role and one per streamed window.
+[[bin]]
+name = "windowcast-app"
+path = "src/main.rs"
+
+[dependencies]
+windowcast-protocol = { path = "../protocol" }
+windowcast-host = { path = "../host-core" }
+windowcast-client-core = { path = "../client-core" }
+windowcast-identity = { path = "../identity" }
+tokio = { workspace = true, features = ["net"] }
+serde.workspace = true
+serde_json = "1"
+# The native UI: egui through eframe, drawn with OpenGL (glow).
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+windowcast-client-windows = { path = "../client-windows" }
+
+[target.'cfg(windows)'.dependencies]
+windowcast-agent-windows = { path = "../agent-windows" }
+windows = { version = "0.62", features = ["Win32_UI_HiDpi"] }

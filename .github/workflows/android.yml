@@ -61,9 +61,10 @@ jobs:
             android/viewer/build/outputs/apk/debug/*.apk
 
   windows:
-    # The Windows host agent and the test host. The agent's test captures a
-    # real window with Windows.Graphics.Capture, encodes it with every
-    # encoder the runner has, streams it over loopback and decodes it.
+    # The Windows host agent, the reference app and the test host. The
+    # agent's test captures a real window with Windows.Graphics.Capture,
+    # encodes it with every encoder the runner has, streams it over
+    # loopback and decodes it.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -78,7 +79,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Clippy
-        run: cargo clippy -p windowcast-agent-windows --all-targets -- -D warnings
+        run: cargo clippy -p windowcast-agent-windows -p windowcast-client-windows -p windowcast-app --all-targets -- -D warnings
 
       - name: Test the agent (capture, encode, stream, decode)
         env:
@@ -86,7 +87,7 @@ jobs:
         run: cargo test -p windowcast-agent-windows --no-fail-fast -- --nocapture
 
       - name: Build
-        run: cargo build --release -p windowcast-cli-tools -p windowcast-agent-windows --bins
+        run: cargo build --release -p windowcast-cli-tools -p windowcast-agent-windows -p windowcast-app --bins
 
       - name: Upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -94,6 +95,7 @@ jobs:
           name: windowcast-windows
           path: |
             target/release/windowcast-agent-windows.exe
+            target/release/windowcast-app.exe
             target/release/windowcast-testhost.exe
             target/release/windowcast-client.exe
             target/debug/deps/encoders-*.exe

@@ -1,0 +1,104 @@
+//! The host agent for the platform the app is built for. Windows has one
+//! (agent-windows); elsewhere the host role says it is not available yet
+//! and the client role works alone.
+
+#[cfg(windows)]
+mod imp {
+    use windowcast_agent_windows::encoder::{self, EncoderChoice};
+    use windowcast_agent_windows::{Options, WindowsSource};
+    use windowcast_protocol::VideoCodec;
+
+    use crate::config::HostSettings;
+
+    pub type Agent = WindowsSource;
+    pub const NAME: &str = "Windows";
+
+    fn options(settings: &HostSettings) -> Result<Options, String> {
+        let encoder = EncoderChoice::parse(&settings.encoder)
+            .ok_or_else(|| format!("no encoder called {}", settings.encoder))?;
+        let codec = match settings.codec.as_str() {
+            "" => None,
+            "H264" => Some(VideoCodec::H264),
+            "H265" => Some(VideoCodec::H265),
+            "Av1" => Some(VideoCodec::Av1),
+            other => return Err(format!("no codec called {other}")),
+        };
+        Ok(Options {
+            encoder,
+            codec,
+            fps: settings.fps.max(1),
+            bitrate_1080p: (settings.bitrate_mbps * 1_000_000.0) as u32,
+        })
+    }
+
+    pub fn open_agent(settings: &HostSettings) -> Result<Agent, String> {
+        WindowsSource::new(options(settings)?)
+    }
+
+    pub fn configure(agent: &Agent, settings: &HostSettings) -> Result<(), String> {
+        agent.set_options(options(settings)?)
+    }
+
+    pub fn encoders() -> Vec<(&'static str, Vec<VideoCodec>)> {
+        EncoderChoice::ALL
+            .into_iter()
+            .map(|choice| (choice.name(), encoder::available_codecs(choice)))
+            .collect()
+    }
+
+    /// Pointer positions and screen bounds in physical pixels on every
+    /// screen, whatever its scaling, as capture and input expect.
+    pub fn init() {
+        use windows::Win32::UI::HiDpi::{
+            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        };
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod imp {
+    use windowcast_host::{FrameSource, WindowSource};
+    use windowcast_protocol::{VideoCodec, WindowId, WindowInfo};
+
+    use crate::config::HostSettings;
+
+    /// Never made: [`open_agent`] refuses on this platform.
+    pub enum Agent {}
+
+    impl WindowSource for Agent {
+        fn list_windows(&self) -> Vec<WindowInfo> {
+            match *self {}
+        }
+
+        fn encoders(&self) -> Vec<VideoCodec> {
+            match *self {}
+        }
+
+        fn open(&self, _: WindowId, _: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
+            match *self {}
+        }
+    }
+
+    pub const NAME: &str = std::env::consts::OS;
+
+    pub fn open_agent(_: &HostSettings) -> Result<Agent, String> {
+        Err(format!(
+            "the host role is not available on {NAME} yet: this platform's agent cannot capture windows"
+        ))
+    }
+
+    pub fn configure(agent: &Agent, _: &HostSettings) -> Result<(), String> {
+        match *agent {}
+    }
+
+    pub fn encoders() -> Vec<(&'static str, Vec<VideoCodec>)> {
+        Vec::new()
+    }
+
+    pub fn init() {}
+}
+
+pub use imp::{configure, encoders, init, open_agent, Agent, NAME};
