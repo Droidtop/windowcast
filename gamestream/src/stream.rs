@@ -18,9 +18,11 @@ use crate::client::App;
 use crate::control::{self, Control, ControlEvent};
 use crate::input::{self, Input};
 use crate::rtsp::{self, Message};
-use crate::video::Packetizer;
+use crate::video::{Packetizer, VideoCipher};
 
 pub const VIDEO_PORT: u16 = 47998;
+/// Sunshine's video bit in `x-ss-general.encryption*`.
+pub const SS_VIDEO_ENCRYPTION: u32 = 0x02;
 pub const AUDIO_PORT: u16 = 48000;
 
 /// What a client asked for in its ANNOUNCE.
@@ -38,6 +40,8 @@ pub struct StreamConfig {
     pub audio_ms: u32,
     /// Whether the client wants its audio encrypted.
     pub audio_encrypted: bool,
+    /// Whether the client wants its video encrypted.
+    pub video_encrypted: bool,
 }
 
 /// One encoded frame for a GameStream client.
@@ -87,11 +91,19 @@ pub struct Launch {
     pub connect_data: u32,
     /// Set to end the stream.
     pub stop: Arc<AtomicBool>,
+    /// Ask the client to encrypt video as well as control.
+    pub request_video_encryption: bool,
     streaming: AtomicBool,
 }
 
 impl Launch {
-    pub fn new(app: u32, key: [u8; 16], key_id: u32, mode: (u32, u32, u32)) -> Arc<Self> {
+    pub fn new(
+        app: u32,
+        key: [u8; 16],
+        key_id: u32,
+        mode: (u32, u32, u32),
+        request_video_encryption: bool,
+    ) -> Arc<Self> {
         let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
         let random: [u8; 16] = crate::crypto::random();
         let ping_payload = random
@@ -108,6 +120,7 @@ impl Launch {
             ping_payload,
             connect_data: u32::from_le_bytes(crate::crypto::random()),
             stop: Arc::new(AtomicBool::new(false)),
+            request_video_encryption,
             streaming: AtomicBool::new(false),
         })
     }
@@ -115,20 +128,26 @@ impl Launch {
 
 /// The DESCRIBE answer: Sunshine's feature and encryption attributes.
 /// windowcast's host encodes H.264 only, takes touch and pen input, and
-/// supports control and audio encryption (asking for the control one).
+/// supports control, video and audio encryption, asking for the control
+/// one, and for video too when the host is set to.
 ///
 /// Its sound is stereo. A client set to 5.1 or 7.1 is told the stream is
 /// one coupled Opus stream mapped onto every speaker, left and right
 /// alternating, so the stereo packets decode as they are.
-fn describe() -> Vec<u8> {
+fn describe(launch: &Launch) -> Vec<u8> {
     format!(
         "a=x-ss-general.featureFlags:{}\n\
          a=x-ss-general.encryptionSupported:{}\n\
-         a=x-ss-general.encryptionRequested:1\n\
+         a=x-ss-general.encryptionRequested:{}\n\
          a=fmtp:97 surround-params=611010101\n\
          a=fmtp:97 surround-params=81101010101\n",
         input::FEATURE_PEN_TOUCH,
-        1 | audio::SS_AUDIO_ENCRYPTION,
+        1 | SS_VIDEO_ENCRYPTION | audio::SS_AUDIO_ENCRYPTION,
+        if launch.request_video_encryption {
+            1 | SS_VIDEO_ENCRYPTION
+        } else {
+            1
+        },
     )
     .into_bytes()
 }
@@ -153,7 +172,7 @@ pub async fn serve_rtsp(
         "OPTIONS" | "PLAY" => ok(),
         "DESCRIBE" => {
             let mut response = ok();
-            response.payload = describe();
+            response.payload = describe(&launch);
             response
         }
         "SETUP" => {
@@ -219,6 +238,9 @@ pub fn announce(payload: &[u8], launch: &Launch) -> Option<StreamConfig> {
         bitrate_kbps: number("x-nv-vqos[0].bw.maximumBitrateKbps").unwrap_or(10_000),
         packet_size: number("x-nv-video[0].packetSize")? as usize,
         codec: number("x-nv-vqos[0].bitStreamFormat").unwrap_or(0),
+        video_encrypted: number("x-ss-general.encryptionEnabled").unwrap_or(0)
+            & SS_VIDEO_ENCRYPTION
+            != 0,
         audio_ms: match number("x-nv-aqos.packetDuration") {
             Some(10) => 10,
             _ => 5,
@@ -274,8 +296,21 @@ fn run(
         }
     };
     println!(
-        "gamestream: streaming app {} to {peer} ({}x{} at {} fps)",
-        launch.app, config.width, config.height, config.fps
+        "gamestream: streaming app {} to {peer} ({}x{} at {} fps; encrypted: control{}{})",
+        launch.app,
+        config.width,
+        config.height,
+        config.fps,
+        if config.video_encrypted {
+            ", video"
+        } else {
+            ""
+        },
+        if config.audio_encrypted {
+            ", audio"
+        } else {
+            ""
+        },
     );
     let mut source = apps.open(launch.app, config)?;
 
@@ -317,6 +352,9 @@ fn run(
     let control = control.sender;
 
     let mut packetizer = Packetizer::new(config.packet_size);
+    let mut cipher = config
+        .video_encrypted
+        .then(|| VideoCipher::new(&launch.key));
     let epoch = Instant::now();
     let mut sent = 0u64;
     loop {
@@ -343,6 +381,10 @@ fn run(
         };
         let timestamp = (epoch.elapsed().as_micros() * 9 / 100) as u32;
         for packet in packetizer.packets(&frame.data, frame.idr, timestamp) {
+            let packet = match cipher.as_mut() {
+                Some(cipher) => cipher.seal(&packet),
+                None => packet,
+            };
             let _ = video.send_to(&packet, peer);
         }
         sent += 1;

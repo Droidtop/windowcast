@@ -66,6 +66,10 @@ fn stock_moonlight_pairs_and_lists_our_apps() {
         Arc::new(WindowApps(Arc::new(TestPatternWithTone))),
     )
     .unwrap();
+    // Ask for encrypted video, so Moonlight decrypts our video packets too.
+    server
+        .request_video_encryption
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let (http, https) = runtime.block_on(async {
         (
             tokio::net::TcpListener::bind(("127.0.0.1", 47989))
@@ -121,7 +125,7 @@ fn stock_moonlight_pairs_and_lists_our_apps() {
 
     // And streams it: Moonlight sets the stream up over RTSP, pings the
     // video and audio ports, connects the control stream, and decodes what
-    // comes, the window's tone included (encrypted, as Moonlight asks).
+    // comes, video and the window's tone both encrypted.
     let streamed = moonlight(
         &[
             "stream",
@@ -152,6 +156,14 @@ fn stock_moonlight_pairs_and_lists_our_apps() {
     assert!(
         !streamed.contains("Failed to decrypt audio packet"),
         "Moonlight could not decrypt the sound"
+    );
+    assert!(
+        !streamed.contains("Failed to decrypt video packet"),
+        "Moonlight could not decrypt the video"
+    );
+    assert!(
+        streamed.contains("Decoding frame rate"),
+        "Moonlight decoded no pictures"
     );
     assert!(
         !streamed.contains("Audio FEC has been disabled"),

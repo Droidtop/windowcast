@@ -59,6 +59,10 @@ pub struct GameStreamServer {
     https_port: std::sync::atomic::AtomicU16,
     /// The RTSP port launches name: the one being served.
     rtsp_port: std::sync::atomic::AtomicU16,
+    /// Ask clients to encrypt video too (off by default: control and audio
+    /// are encrypted anyway, and video encryption costs a handheld client
+    /// decoding time).
+    pub request_video_encryption: std::sync::atomic::AtomicBool,
 }
 
 impl GameStreamServer {
@@ -98,6 +102,7 @@ impl GameStreamServer {
             pending: Mutex::default(),
             codec_modes: 1,
             https_port: std::sync::atomic::AtomicU16::new(HTTPS_PORT),
+            request_video_encryption: std::sync::atomic::AtomicBool::new(false),
             rtsp_port: std::sync::atomic::AtomicU16::new(crate::rtsp::RTSP_PORT),
         }))
     }
@@ -388,7 +393,14 @@ impl GameStreamServer {
         if let Some(old) = launch.take() {
             old.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         }
-        *launch = Some(Launch::new(app, key, key_id as u32, mode));
+        *launch = Some(Launch::new(
+            app,
+            key,
+            key_id as u32,
+            mode,
+            self.request_video_encryption
+                .load(std::sync::atomic::Ordering::SeqCst),
+        ));
         let host = match local.ip() {
             std::net::IpAddr::V6(ip) => format!("[{ip}]"),
             ip => ip.to_string(),

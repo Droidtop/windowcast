@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Parity for GameStream sound: every four audio packets are followed by two Reed-Solomon parity packets (Sunshine's and Moonlight's fixed 4+2 matrix over GF(2^8)), so a client rebuilds up to two lost packets of each four; the host encodes the sound at a constant rate so each block's packets are one size. Our client rebuilds lost packets and plays the rest in order, skipping a block only once a later one can play.
+- Encrypted GameStream video, both ends: when the client asks (Sunshine's `SS_ENC_VIDEO`), the host seals every video packet with AES-128-GCM under the launch's input key (Sunshine's 32-byte prefix: counter IV, frame index, tag), and our client opens it, asking for it when the host offers it and `StreamRequest::encrypt_video` is set or the host requires it. A host can ask clients for it (`GameStreamServer::request_video_encryption`, off by default). Checked in CI: stock moonlight-qt, asked by our host, negotiates encrypted control, video and audio and decodes 30 fps; our client decodes an encrypted stream.
 
 ## [0.18.0] - 2026-10-09
 

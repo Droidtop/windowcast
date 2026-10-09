@@ -17,8 +17,17 @@
 //! windowcast sends no parity shards (FEC 0%, which Moonlight takes: it then
 //! needs every data packet) and, receiving, uses only the data shards: a
 //! lost packet loses the frame, and the client asks for a keyframe.
+//!
+//! When the client asks for encrypted video (Sunshine's `SS_ENC_VIDEO`),
+//! every whole packet is sealed with AES-128-GCM under the launch's input
+//! key ([`VideoCipher`]): a 32-byte prefix of the 12-byte IV (a 64-bit
+//! counter, little-endian, then zeros and `V`), the frame index and the
+//! tag, then the ciphertext.
 
 use std::collections::BTreeMap;
+
+use aes_gcm::aead::{AeadInPlace, KeyInit};
+use aes_gcm::{Aes128Gcm, Nonce, Tag};
 
 pub const FLAG_CONTAINS_PIC_DATA: u8 = 0x1;
 pub const FLAG_EOF: u8 = 0x2;
@@ -256,6 +265,65 @@ impl Depacketizer {
     }
 }
 
+/// The prefix of an encrypted video packet: IV, frame index, tag.
+pub const ENC_HEADER: usize = 32;
+
+/// Seals and opens encrypted video packets (Sunshine `stream.cpp`
+/// `video_packet_enc_prefix_t`; moonlight-common-c `VideoStream.c`).
+pub struct VideoCipher {
+    cipher: Aes128Gcm,
+    counter: u64,
+}
+
+impl VideoCipher {
+    pub fn new(key: &[u8; 16]) -> Self {
+        VideoCipher {
+            cipher: Aes128Gcm::new(key.into()),
+            counter: 0,
+        }
+    }
+
+    /// One packet from [`Packetizer::packets`], sealed.
+    pub fn seal(&mut self, packet: &[u8]) -> Vec<u8> {
+        let mut iv = [0u8; 12];
+        iv[..8].copy_from_slice(&self.counter.to_le_bytes());
+        iv[11] = b'V';
+        self.counter += 1;
+        let frame = packet
+            .get(RTP_SIZE + 4..RTP_SIZE + 8)
+            .map_or([0; 4], |f| f.try_into().expect("four bytes"));
+        let mut body = packet.to_vec();
+        let tag = self
+            .cipher
+            .encrypt_in_place_detached(Nonce::from_slice(&iv), &[], &mut body)
+            .expect("a video packet fits AES-GCM");
+        let mut out = Vec::with_capacity(ENC_HEADER + body.len());
+        out.extend_from_slice(&iv);
+        out.extend_from_slice(&frame);
+        out.extend_from_slice(&tag);
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// A sealed packet's plain packet; `None` if it was not sealed with
+    /// this key or was changed.
+    pub fn open(&self, data: &[u8]) -> Option<Vec<u8>> {
+        if data.len() <= ENC_HEADER {
+            return None;
+        }
+        let mut body = data[ENC_HEADER..].to_vec();
+        self.cipher
+            .decrypt_in_place_detached(
+                Nonce::from_slice(&data[..12]),
+                &[],
+                &mut body,
+                Tag::from_slice(&data[16..32]),
+            )
+            .ok()?;
+        Some(body)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +374,20 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0], Received::Lost(1));
         assert!(matches!(&got[1], Received::Frame(f) if f.data == frame(100, 2)));
+    }
+
+    #[test]
+    fn sealed_packets_open_only_with_the_key() {
+        let mut packetizer = Packetizer::new(256);
+        let packets = packetizer.packets(&[0, 0, 0, 1, 0x65, 1, 2, 3], true, 90);
+        let mut cipher = VideoCipher::new(&[9; 16]);
+        let sealed = cipher.seal(&packets[0]);
+        assert_eq!(sealed.len(), packets[0].len() + ENC_HEADER);
+        assert_eq!(sealed[11], b'V');
+        assert_eq!(sealed[12..16], 1u32.to_le_bytes(), "the frame index");
+        assert_eq!(cipher.open(&sealed), Some(packets[0].clone()));
+        assert_eq!(VideoCipher::new(&[8; 16]).open(&sealed), None);
+        // Each packet gets the next IV.
+        assert_eq!(cipher.seal(&packets[0])[..8], 1u64.to_le_bytes());
     }
 }

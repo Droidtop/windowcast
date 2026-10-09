@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::control::{self, Control, ControlEvent};
 use crate::rtsp::{self, Message};
-use crate::video::{Depacketizer, Frame, Received};
+use crate::video::{Depacketizer, Frame, Received, VideoCipher};
 use crate::GameStreamError;
 
 /// What our client asks a host for.
@@ -28,6 +28,9 @@ pub struct StreamRequest {
     /// The NV header and payload of each video packet (Moonlight's default
     /// is 1392 on a LAN, 1024 remote).
     pub packet_size: u32,
+    /// Ask for encrypted video when the host offers it (it is used anyway
+    /// when the host requires it).
+    pub encrypt_video: bool,
 }
 
 impl Default for StreamRequest {
@@ -38,6 +41,7 @@ impl Default for StreamRequest {
             fps: 60,
             bitrate_kbps: 10_000,
             packet_size: 1392,
+            encrypt_video: false,
         }
     }
 }
@@ -149,12 +153,12 @@ pub async fn start(
         flag("x-ss-general.encryptionSupported"),
         flag("x-ss-general.encryptionRequested"),
     );
-    if requested & 0x02 != 0 {
-        return Err(GameStreamError::Rtsp(
-            "the host requires encrypted video, which is not built here yet",
-        ));
-    }
-    let encryption = supported & 0x01;
+    let video_encryption = crate::stream::SS_VIDEO_ENCRYPTION;
+    let encrypt_video = supported & video_encryption != 0
+        && (request.encrypt_video || requested & video_encryption != 0);
+    let encryption = (supported & 0x01)
+        | if encrypt_video { video_encryption } else { 0 }
+        | (supported & crate::audio::SS_AUDIO_ENCRYPTION);
 
     let setup =
         |next: &mut dyn FnMut(&str, &str) -> Message, target: &str, session: Option<&str>| {
@@ -369,6 +373,7 @@ pub async fn start(
         video.set_read_timeout(Some(Duration::from_millis(100)))?;
         std::thread::spawn(move || {
             let mut depacketizer = Depacketizer::default();
+            let cipher = encrypt_video.then(|| VideoCipher::new(&key));
             let mut buf = vec![0u8; 64 * 1024];
             while !stop.load(Ordering::SeqCst) && !ended.load(Ordering::SeqCst) {
                 let Ok((n, from)) = video.recv_from(&mut buf) else {
@@ -377,7 +382,14 @@ pub async fn start(
                 if from.ip() != host {
                     continue;
                 }
-                for received in depacketizer.add(&buf[..n]) {
+                let packet = match &cipher {
+                    Some(cipher) => match cipher.open(&buf[..n]) {
+                        Some(packet) => packet,
+                        None => continue,
+                    },
+                    None => buf[..n].to_vec(),
+                };
+                for received in depacketizer.add(&packet) {
                     match received {
                         Received::Frame(frame) => {
                             if frames_tx.try_send(frame).is_err() {

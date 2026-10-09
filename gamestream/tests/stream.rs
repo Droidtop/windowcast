@@ -130,6 +130,7 @@ fn our_client_streams_from_our_host() {
                 fps: 30,
                 bitrate_kbps: 2000,
                 packet_size: 1024,
+                encrypt_video: true,
             },
         )
         .unwrap();
