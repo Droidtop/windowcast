@@ -53,9 +53,11 @@ the pointer and keys. A window's sound streams with it from Windows hosts:
 WASAPI process loopback captures what the window's application plays (and
 nothing else), sent as Opus on an audio track beside the picture, and
 played by the Windows client (WASAPI) and the Android library (MediaCodec,
-AudioTrack). What's **not** done yet: macOS, gamepads on Windows (they
-need a virtual gamepad driver) and Linux, the clipboard, GPU encoding and
-sound on Linux hosts, the microphone back to the host, and every backend
+AudioTrack); Linux hosts send it too, recording the application's own
+streams through the PulseAudio API (PipeWire's pulse server included).
+What's **not** done yet: macOS, gamepads on Windows (they need a virtual
+gamepad driver) and Linux, the clipboard and GPU encoding on Linux, the
+microphone back to the host, and every backend
 except the native and desktop ones (their seam is in place: see
 docs/BACKENDS.md).
 
@@ -132,7 +134,7 @@ pattern, any OS) with `windowcast-client HOST:47100 --pin PIN --watch 1`
 or the Android viewer works too.
 
 `agent-linux` needs Wayland client headers (`libwayland-dev`,
-`libxkbcommon-dev` on Debian/Ubuntu) to build, and runs inside the
+`libxkbcommon-dev`, `libpulse-dev` on Debian/Ubuntu) to build, and runs inside the
 Wayland session it streams (`WAYLAND_DISPLAY`; `SWAYSOCK` for input and
 the desktop backend).
 

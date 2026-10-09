@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Linux hosts send a window's sound too: through the PulseAudio API (PulseAudio, or PipeWire's pulse server) the window's application's own playback streams are recorded, and nothing else (found by its process, and the processes it started, from sway's tree). An application that starts playing later is picked up.
+- `windowcast-testhost --tone`: the test pattern with a 440 Hz tone, for trying a client's sound; `windowcast-client` reports a window's sound (packets, level, pitch).
+- The Android viewer shows how many sound packets it has played, and logs it every second.
+
 ## [0.10.0] - 2026-10-09
 
 ### Added
