@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Linux hosts stream real windows: the Linux agent captures a window under any Wayland compositor with ext-image-copy-capture (wlroots 0.19 and sway 1.11 and later), encodes it with OpenH264, and serves the desktop backend under sway. Window ids stay the same across connections.
+- Input on Linux under sway: pointer clicks land where they were made on the picture, and keys, typed text and Shift reach the window through a virtual pointer and keyboard.
+- The reference app runs as a host on Linux in a Wayland session.
+
+### Changed
+- The software encoder (OpenH264) and the BGRA conversions are part of the library (host-core), shared by the Windows and Linux agents.
+
 ## [0.8.0] - 2026-10-09
 
 ### Changed

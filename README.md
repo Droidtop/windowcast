@@ -46,11 +46,13 @@ window with Windows.Graphics.Capture and encodes it on the GPU (NVIDIA,
 AMD or Intel through Media Foundation, H.264 or H.265) or in software.
 Input goes back: mouse, keyboard, typed text, touch and gamepads from the
 client, and the clipboard both ways; the Windows agent delivers all but
-gamepads. What's **not** done yet: capture and input on Linux (the Linux
-agent lists windows but cannot capture them — see
-`agent-linux/src/capture.rs`) and macOS, gamepads on Windows (they need a
-virtual gamepad driver), audio, and every backend except the native one and, on Windows, the desktop one
-(their seam is in place: see docs/BACKENDS.md).
+gamepads. Real windows stream from Linux too: the Linux agent captures a
+window under any compositor with ext-image-copy-capture (wlroots 0.19,
+sway 1.11 and later), encodes it with OpenH264, and under sway delivers
+the pointer and keys. What's **not** done yet: macOS, gamepads on Windows
+(they need a virtual gamepad driver) and Linux, the clipboard and GPU
+encoding on Linux, audio, and every backend except the native and desktop
+ones (their seam is in place: see docs/BACKENDS.md).
 
 | Crate | Status |
 |---|---|
@@ -63,12 +65,12 @@ virtual gamepad driver), audio, and every backend except the native one and, on 
 | `host-core` | Real, tested: the host side of the library (listening, PIN pairing with lockout and re-issue, trusted clients, window lists, backend and codec choice, feeding window tracks from an agent's encoder, keyframe requests). Agents implement `WindowSource` |
 | `client-core` | Real, tested: the client surface, a Rust API and the C interface `include/windowcast.h` (connect/pair/resume, window list, streams, events as JSON, whole frames per window) |
 | `android/` | The Android library (JNI over the C interface, MediaCodec decoding onto a Surface) and a viewer app; built by CI for arm64-v8a and x86_64; not yet run on a device |
-| `agent-linux` | Thin over `host-core`: window lists from a real compositor (`zwlr_foreign_toplevel_manager_v1`); capture is an explicit refusal (needs `ext-image-copy-capture-v1`, not vendored yet) |
+| `agent-linux` | Real, tested: windows from `ext_foreign_toplevel_list_v1` (falling back to `zwlr_foreign_toplevel_manager_v1` for listing), per-window capture with `ext-image-copy-capture-v1` (toplevel source) into shared memory, the desktop backend (the window's output, cut by sway's geometry), OpenH264. Input under sway: a virtual pointer at absolute layout positions mapped onto the window (sway IPC), a virtual keyboard with an xkbcommon US keymap and its modifier state, text typed through it. CI runs it under a headless sway: captures a test window both ways, decodes the colour, and checks the click position and keys arrive |
 | `agent-windows` | Real, tested: the desktop's windows, per-window capture (Windows.Graphics.Capture), BGRA to NV12/I420, encoders behind one interface chosen with `--encoder` (Media Foundation hardware, i.e. the GPU vendor's NVENC/AMF/Quick Sync MFT, or one vendor's on a machine with several, with H.265 and AV1 where offered; Microsoft's software H.264 MFT; OpenH264). CI captures a real window, encodes it with each encoder, streams it over loopback and decodes it. Input with SendInput (pointer mapped from the picture to the window, keys as scan codes, text as Unicode, touch as the pointer), clipboard text both ways; CI clicks and types into a real window through a client |
 | `agent-macos` | Not started |
-| GameStream, RDP, VNC, passthrough backends; desktop on Linux | Not started; the seam is in `protocol` (`StreamBackend`, `selection`). Each is our own implementation of its protocol; GameStream pairing follows the real protocol's salted-PIN AES challenge/response, read from reference sources, not guessed at |
+| GameStream, RDP, VNC, passthrough backends | Not started; the seam is in `protocol` (`StreamBackend`, `selection`). Each is our own implementation of its protocol; GameStream pairing follows the real protocol's salted-PIN AES challenge/response, read from reference sources, not guessed at |
 | `client-windows` | The Windows client end: hardware decoding with Media Foundation on a Direct3D 11 device (H.264; H.265 and AV1 with Microsoft's Video Extensions), presented through the GPU's video processor into a flip-model swap chain in a native window per stream; pointer and keys back to the host |
-| `app` | The reference application `windowcast-app`: host, client or both by configuration, a native window per role (egui) and one per streamed window (`client-windows`); `--connect`/`--stream` for a stream straight from the command line. Host role on Windows only so far |
+| `app` | The reference application `windowcast-app`: host, client or both by configuration, a native window per role (egui) and one per streamed window (`client-windows`); `--connect`/`--stream` for a stream straight from the command line. Host role on Windows and Linux (Wayland); stream windows on Windows only so far |
 | `cli-tools` | `windowcast-client` (pairs or resumes, lists windows, `--watch` streams one and decodes it) and `windowcast-testhost` (a host whose one window is an OpenH264 test pattern, Windows included) |
 
 ## Design
@@ -125,7 +127,9 @@ pattern, any OS) with `windowcast-client HOST:47100 --pin PIN --watch 1`
 or the Android viewer works too.
 
 `agent-linux` needs Wayland client headers (`libwayland-dev`,
-`libxkbcommon-dev` on Debian/Ubuntu) to build.
+`libxkbcommon-dev` on Debian/Ubuntu) to build, and runs inside the
+Wayland session it streams (`WAYLAND_DISPLAY`; `SWAYSOCK` for input and
+the desktop backend).
 
 ## License
 

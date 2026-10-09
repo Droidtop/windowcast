@@ -34,7 +34,7 @@ over it and keyed from it.
 |---|---|---|---|
 | `Native` | everything by default | a video track on the session; the host captures and encodes the window | built: tracks, codecs, keyframe requests; capture and encode per host OS are the agents' work (#104, #105) |
 | `Passthrough` | video players | a video track on the session, carrying the media as it was already encoded (no second encode) | seam only |
-| `Desktop` | hosts that cannot capture one window; whole-desktop streams | a video track on the session, cut from a whole-output capture | built on Windows: the window cut from a capture of its screen, with whatever covers it; whole-desktop targets are #112 |
+| `Desktop` | hosts that cannot capture one window; whole-desktop streams | a video track on the session, cut from a whole-output capture | built on Windows and on Linux under sway: the window cut from a capture of its screen, with whatever covers it; whole-desktop targets are #112 |
 | `GameStream` | games | its own low-latency video, audio and controller channels | seam only (#110) |
 | `Rdp` | text-heavy windows: editors, terminals, documents | its own connection; sharp text at low bandwidth | seam only (#111) |
 | `Vnc` | anything else that only speaks VNC | its own connection | seam only (#111) |
