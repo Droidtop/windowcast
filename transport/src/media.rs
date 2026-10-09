@@ -236,6 +236,7 @@ impl WindowTrack {
 #[derive(Debug, Clone)]
 pub struct WindowFrame {
     pub data: Bytes,
+    pub codec: VideoCodec,
     /// The RTP timestamp (90 kHz clock) the host sent this frame with.
     pub rtp_timestamp: u32,
     pub keyframe: bool,
@@ -391,6 +392,7 @@ impl RemoteWindow {
             }
             return Ok(WindowFrame {
                 data,
+                codec: self.codec,
                 rtp_timestamp: packet.header.timestamp,
                 keyframe,
             });
