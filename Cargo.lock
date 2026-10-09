@@ -4653,7 +4653,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windowcast-agent-linux"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "evdev",
  "libpulse-binding",
@@ -4676,7 +4676,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-agent-windows"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "opus",
  "tokio",
@@ -4692,7 +4692,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-apollo"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "quick-xml 0.36.2",
  "reqwest",
@@ -4704,7 +4704,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-app"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "eframe",
  "serde",
@@ -4722,7 +4722,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-cli-tools"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "openh264",
  "opus",
@@ -4735,7 +4735,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-client-core"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "bytes",
  "serde",
@@ -4749,7 +4749,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-client-windows"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "audiopus_sys",
  "opus",
@@ -4760,7 +4760,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-directory"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "argon2",
  "ed25519-dalek",
@@ -4776,7 +4776,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-host"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -4792,7 +4792,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-identity"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "ed25519-dalek",
  "rand_core 0.6.4",
@@ -4801,7 +4801,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-pairing"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "hkdf",
  "hmac",
@@ -4814,7 +4814,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-protocol"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "bincode",
  "serde",
@@ -4823,7 +4823,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-transport"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "async-trait",
  "bytes",

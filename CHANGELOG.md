@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.13.0] - 2026-10-09
 
 ### Added
 - Gamepads reach the host: each of a client's pads (up to four) becomes a virtual Xbox 360 pad, through ViGEmBus on Windows hosts and uinput on Linux hosts (laid out as the kernel's xpad driver reports one, with the same USB ids, so SDL, Steam and games map it as one). A session's pads are made at its first gamepad event and unplugged when the client removes them or the session ends. In the reference app they follow "Clients may drive streamed windows and use gamepads"; switched off, the pads are unplugged rather than left holding buttons. Hosts supply them through `WindowSource::gamepads` (a `GamepadSink` per session).
