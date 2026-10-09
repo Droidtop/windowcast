@@ -28,6 +28,14 @@ internal object Native {
     @JvmStatic external fun sendInput(session: Long, json: String): Long
     @JvmStatic external fun setClipboard(session: Long, text: String): Long
     @JvmStatic external fun nextEvent(session: Long, timeoutMs: Int): String?
+    /** The next Opus packet of a window's sound into [buffer]; info[0] gets its RTP timestamp. */
+    @JvmStatic external fun nextAudio(
+        session: Long,
+        window: Long,
+        timeoutMs: Int,
+        buffer: ByteBuffer,
+        info: IntArray,
+    ): Long
     @JvmStatic external fun nextFrame(
         session: Long,
         window: Long,

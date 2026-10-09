@@ -18,6 +18,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
+import dev.windowcast.AudioPlayer
 import dev.windowcast.Codec
 import dev.windowcast.Event
 import dev.windowcast.WindowDecoder
@@ -59,6 +60,7 @@ class MainActivity : Activity() {
     private var client: WindowcastClient? = null
     private var session: WindowcastSession? = null
     private var decoder: WindowDecoder? = null
+    private var audio: AudioPlayer? = null
     private var windows: List<WindowInfo> = emptyList()
     private var watching: WindowInfo? = null
     @Volatile private var listening = false
@@ -191,6 +193,7 @@ class MainActivity : Activity() {
                     }
                 }
             }.also { it.start() }
+            audio = AudioPlayer(s, event.window).also { it.start() }
         }
         if (surface.holder.surface?.isValid == true) {
             begin()
@@ -252,6 +255,8 @@ class MainActivity : Activity() {
         gamepads.releaseAll()
         decoder?.let { d -> worker.execute { d.stop() } }
         decoder = null
+        audio?.let { a -> worker.execute { a.stop() } }
+        audio = null
         showForm()
     }
 
@@ -276,6 +281,7 @@ class MainActivity : Activity() {
         inputWorker.shutdown()
         listening = false
         decoder?.stop()
+        audio?.stop()
         session?.close()
         client?.close()
         worker.shutdown()

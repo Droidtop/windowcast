@@ -148,3 +148,20 @@ Java_dev_windowcast_Native_nextFrame(JNIEnv *env, jclass cls, jlong session, jlo
     (*env)->SetIntArrayRegion(env, info, 0, 4, values);
     return len;
 }
+
+/* Next Opus packet of a window's sound into a direct buffer; info[0] gets
+ * its RTP timestamp. Returns the length or a WINDOWCAST_* status. */
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_nextAudio(JNIEnv *env, jclass cls, jlong session, jlong window,
+                                     jint timeout_ms, jobject buffer, jintArray info) {
+    uint8_t *out = (*env)->GetDirectBufferAddress(env, buffer);
+    jlong cap = (*env)->GetDirectBufferCapacity(env, buffer);
+    if (!out || cap < 0) return WINDOWCAST_ERROR;
+    uint32_t rtp_timestamp = 0;
+    int64_t len = windowcast_session_next_audio(SESSION(session), (uint64_t)window,
+                                                (uint32_t)timeout_ms, out, (size_t)cap,
+                                                &rtp_timestamp);
+    jint values[1] = {(jint)rtp_timestamp};
+    (*env)->SetIntArrayRegion(env, info, 0, 1, values);
+    return len;
+}
