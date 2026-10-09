@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Stock Moonlight streams from a windowcast host (Droidtop/tracker#110): our own GameStream host answers `/launch`, sets the stream up over RTSP (Sunshine's attributes, ping payloads and connect data), sends the window as H.264 GameStream video packets to the address the client pings from, and keeps the AES-GCM-encrypted ENet control stream (keyframe requests, the end of the stream). The host's windows are the apps Moonlight lists. Tested in CI: Arch's moonlight-qt 6.2.0 pairs, lists and streams the test pattern window, decoding 30 fps with no frames lost.
+- Our own GameStream client streams too: it sets the stream up over RTSP, pings, reassembles the video packets into frames and keeps the control stream (`windowcast-gamestream stream HOST APP_ID`). In CI it decodes 30 of 30 frames from a windowcast host.
+- Input over GameStream, both ends: the host reads Moonlight's input packets (keys as Windows virtual keys, absolute and relative mouse, buttons, both scroll axes, text, touch and pen, and up to four controllers, unplugged when the client drops them) and hands them to the streamed window and the host's virtual gamepads through the same input delivery a windowcast session uses; our client writes the same packets. The host now offers touch and pen to Moonlight.
+
+### Fixed
+- The Android viewer loads its native library again: the client library has a SONAME, so the JNI library no longer records a build-machine path for it.
+- The Android microphone works on devices without an Opus encoder (BlueStacks has none): client-core encodes the microphone with libopus, once, for every client. Checked on BlueStacks through the PC's microphone: the viewer asks for the permission and the host hears a non-silent level.
 
 ## [0.16.0] - 2026-10-09
 

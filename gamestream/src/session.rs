@@ -47,9 +47,18 @@ pub struct Stream {
     pub frames: Receiver<Frame>,
     stop: Arc<AtomicBool>,
     pub ended: Arc<AtomicBool>,
+    control: control::ControlSender,
 }
 
 impl Stream {
+    /// Sends input to the host, on the channel Moonlight uses for it.
+    pub fn input(&self, event: &crate::input::Input) -> bool {
+        match crate::input::encode(event) {
+            Some((packet, channel)) => self.control.send(control::INPUT, &packet, channel, true),
+            None => false,
+        }
+    }
+
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
     }
@@ -306,6 +315,7 @@ pub async fn start(
     // The control stream: the start messages, periodic pings, keyframe
     // requests; the host's termination ends the stream.
     let wants_keyframe = Arc::new(AtomicBool::new(false));
+    let sender = control.sender.clone();
     {
         let (stop, ended, wants_keyframe) = (
             Arc::clone(&stop),
@@ -380,5 +390,6 @@ pub async fn start(
         frames,
         stop,
         ended,
+        control: sender,
     })
 }

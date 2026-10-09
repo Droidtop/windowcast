@@ -119,12 +119,16 @@ pub struct Outgoing {
 /// shared between threads).
 pub struct Control {
     pub events: Receiver<ControlEvent>,
-    outgoing: Sender<Outgoing>,
+    pub sender: ControlSender,
 }
 
-impl Control {
+/// Sends on a control stream; clones share it.
+#[derive(Clone)]
+pub struct ControlSender(Sender<Outgoing>);
+
+impl ControlSender {
     pub fn send(&self, kind: u16, payload: &[u8], channel: u8, reliable: bool) -> bool {
-        self.outgoing
+        self.0
             .send(Outgoing {
                 kind,
                 payload: payload.to_vec(),
@@ -132,6 +136,12 @@ impl Control {
                 reliable,
             })
             .is_ok()
+    }
+}
+
+impl Control {
+    pub fn send(&self, kind: u16, payload: &[u8], channel: u8, reliable: bool) -> bool {
+        self.sender.send(kind, payload, channel, reliable)
     }
 
     /// Host side: waits on `bind` for the client whose ENet connect data is
@@ -275,7 +285,10 @@ fn run(socket: UdpSocket, key: [u8; 16], client: bool, role: Role) -> Control {
             }
         }
     });
-    Control { events, outgoing }
+    Control {
+        events,
+        sender: ControlSender(outgoing),
+    }
 }
 
 #[cfg(test)]

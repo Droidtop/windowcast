@@ -12,15 +12,16 @@
 //! - [`server`]: a host's HTTP and HTTPS endpoints for Moonlight.
 //! - [`rtsp`], [`video`], [`control`]: the stream setup, the video packets
 //!   and the encrypted ENet control stream, both ends.
+//! - [`input`]: the input packets a client sends on the control stream.
 //! - [`stream`]: a host's launched stream; [`windows`]: a windowcast host's
 //!   windows as the apps it offers.
 //!
-//! Not yet: sound, input from the client, and our client's side of the
-//! stream (it pairs, lists and launches).
+//! Not yet: sound in either direction.
 
 pub mod client;
 pub mod control;
 pub mod crypto;
+pub mod input;
 pub mod pairing;
 pub mod rtsp;
 pub mod server;

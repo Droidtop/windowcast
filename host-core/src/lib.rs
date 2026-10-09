@@ -574,7 +574,7 @@ impl Host {
 
         let session = Arc::new(established.session);
         let mut streams = std::collections::HashMap::<WindowId, Stream>::new();
-        let input = self.input_thread();
+        let input = deliver_input(Arc::clone(&self.source));
         let mut focus: Option<WindowId> = None;
         let clipboard = Arc::new(std::sync::Mutex::new(None::<String>));
         let clipboard_task = tokio::spawn(share_clipboard(
@@ -666,46 +666,6 @@ impl Host {
                 other => tracing::debug!("ignoring {other:?}"),
             }
         }
-    }
-
-    /// A thread that delivers this session's input in order, so a slow
-    /// injection never holds up the control channel.
-    fn input_thread(&self) -> std::sync::mpsc::Sender<(InputEvent, Option<WindowId>)> {
-        let (tx, rx) = std::sync::mpsc::channel::<(InputEvent, Option<WindowId>)>();
-        let source = Arc::clone(&self.source);
-        std::thread::spawn(move || {
-            // The session's pads; dropped, and so unplugged, when the
-            // session ends and its sender goes.
-            let mut pads: Option<Box<dyn gamepad::GamepadSink>> = None;
-            let mut no_pads = false;
-            for (event, focus) in rx {
-                match event {
-                    InputEvent::Gamepad { pad, state } if pad < gamepad::MAX_PADS => {
-                        if pads.is_none() && !no_pads {
-                            match source.gamepads() {
-                                Some(Ok(sink)) => pads = Some(sink),
-                                Some(Err(e)) => {
-                                    eprintln!("gamepads: {e}");
-                                    no_pads = true;
-                                }
-                                None => no_pads = true,
-                            }
-                        }
-                        if let Some(pads) = pads.as_mut() {
-                            pads.set(pad, &state);
-                        }
-                    }
-                    InputEvent::GamepadGone { pad } => {
-                        if let Some(pads) = pads.as_mut() {
-                            pads.remove(pad);
-                        }
-                    }
-                    InputEvent::Gamepad { .. } => {}
-                    event => source.input(&event, focus),
-                }
-            }
-        });
-        tx
     }
 
     async fn pin_client(&self, peer: PeerId) {
@@ -832,6 +792,49 @@ impl Host {
             serial,
         );
     }
+}
+
+/// A thread that delivers one session's input to `source` in order, so a
+/// slow injection never holds up the channel it came on; the session's
+/// gamepads are plugged in on first use and unplugged when the sender is
+/// dropped. Shared by windowcast sessions and GameStream ones.
+pub fn deliver_input(
+    source: Arc<dyn WindowSource>,
+) -> std::sync::mpsc::Sender<(InputEvent, Option<WindowId>)> {
+    let (tx, rx) = std::sync::mpsc::channel::<(InputEvent, Option<WindowId>)>();
+    std::thread::spawn(move || {
+        // The session's pads; dropped, and so unplugged, when the
+        // session ends and its sender goes.
+        let mut pads: Option<Box<dyn gamepad::GamepadSink>> = None;
+        let mut no_pads = false;
+        for (event, focus) in rx {
+            match event {
+                InputEvent::Gamepad { pad, state } if pad < gamepad::MAX_PADS => {
+                    if pads.is_none() && !no_pads {
+                        match source.gamepads() {
+                            Some(Ok(sink)) => pads = Some(sink),
+                            Some(Err(e)) => {
+                                eprintln!("gamepads: {e}");
+                                no_pads = true;
+                            }
+                            None => no_pads = true,
+                        }
+                    }
+                    if let Some(pads) = pads.as_mut() {
+                        pads.set(pad, &state);
+                    }
+                }
+                InputEvent::GamepadGone { pad } => {
+                    if let Some(pads) = pads.as_mut() {
+                        pads.remove(pad);
+                    }
+                }
+                InputEvent::Gamepad { .. } => {}
+                event => source.input(&event, focus),
+            }
+        }
+    });
+    tx
 }
 
 /// The window an input event names, if it names one.

@@ -2,7 +2,8 @@
 //! stream (Sunshine's `rtsp.cpp`: OPTIONS, DESCRIBE, SETUP for audio, video
 //! and control, ANNOUNCE with the client's stream settings, PLAY), then the
 //! video packets to the address the client's pings come from, and the
-//! encrypted control stream for keyframe requests, input and the end.
+//! encrypted control stream for keyframe requests, input (handed to the
+//! app's [`InputSink`]) and the end.
 //!
 //! Sound over GameStream is not sent yet: the audio port takes the
 //! client's pings and stays quiet, which Moonlight accepts.
@@ -16,6 +17,7 @@ use tokio::net::TcpStream;
 
 use crate::client::App;
 use crate::control::{self, Control, ControlEvent};
+use crate::input::{self, Input};
 use crate::rtsp::{self, Message};
 use crate::video::Packetizer;
 
@@ -48,10 +50,19 @@ pub trait VideoSource: Send {
     fn next_frame(&mut self, keyframe: bool) -> Option<VideoFrame>;
 }
 
+/// Where a stream's input goes, in the order it came.
+pub trait InputSink: Send {
+    fn input(&mut self, event: Input);
+}
+
 /// What a host offers over GameStream.
 pub trait Apps: Send + Sync {
     fn apps(&self) -> Vec<App>;
     fn open(&self, app: u32, config: &StreamConfig) -> Result<Box<dyn VideoSource>, String>;
+    /// Where the client's input for `app` goes; `None` drops it.
+    fn input(&self, _app: u32, _config: &StreamConfig) -> Option<Box<dyn InputSink>> {
+        None
+    }
 }
 
 /// A launched app, waiting for or in its stream.
@@ -96,16 +107,15 @@ impl Launch {
 }
 
 /// The DESCRIBE answer: Sunshine's feature and encryption attributes.
-/// windowcast's host encodes H.264 only, asks for (and supports) only the
-/// control stream encryption, and sends stereo.
+/// windowcast's host encodes H.264 only, takes touch and pen input, asks
+/// for (and supports) only the control stream encryption, and sends
+/// stereo.
 fn describe() -> Vec<u8> {
-    concat!(
-        "a=x-ss-general.featureFlags:0\n",
-        "a=x-ss-general.encryptionSupported:1\n",
-        "a=x-ss-general.encryptionRequested:1\n",
+    format!(
+        "a=x-ss-general.featureFlags:{}\na=x-ss-general.encryptionSupported:1\na=x-ss-general.encryptionRequested:1\n",
+        input::FEATURE_PEN_TOUCH
     )
-    .as_bytes()
-    .to_vec()
+    .into_bytes()
 }
 
 /// Serves one RTSP connection of the current launch.
@@ -251,9 +261,46 @@ fn run(
         launch.app, config.width, config.height, config.fps
     );
     let mut source = apps.open(launch.app, config)?;
+
+    // The control stream on its own thread, so input is delivered as it
+    // comes rather than between frames.
+    let wants_keyframe = Arc::new(AtomicBool::new(true));
+    let left = Arc::new(AtomicBool::new(false));
+    let mut sink = apps.input(launch.app, config);
+    let events = control.events;
+    let listener = {
+        let (wants_keyframe, left) = (Arc::clone(&wants_keyframe), Arc::clone(&left));
+        let stop = Arc::clone(&launch.stop);
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) && !left.load(Ordering::SeqCst) {
+                let event = match events.recv_timeout(Duration::from_millis(100)) {
+                    Ok(event) => event,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+                match event {
+                    ControlEvent::Message(control::REQUEST_IDR, _)
+                    | ControlEvent::Message(control::INVALIDATE_REFS, _) => {
+                        wants_keyframe.store(true, Ordering::SeqCst)
+                    }
+                    ControlEvent::Message(control::INPUT, payload) => {
+                        if let Some(sink) = sink.as_mut() {
+                            for event in input::parse(&payload) {
+                                sink.input(event);
+                            }
+                        }
+                    }
+                    ControlEvent::Disconnected => break,
+                    _ => {}
+                }
+            }
+            left.store(true, Ordering::SeqCst);
+        })
+    };
+    let control = control.sender;
+
     let mut packetizer = Packetizer::new(config.packet_size);
     let epoch = Instant::now();
-    let mut keyframe = true;
     let mut sent = 0u64;
     loop {
         if launch.stop.load(Ordering::SeqCst) {
@@ -264,23 +311,18 @@ fn run(
                 true,
             );
             std::thread::sleep(Duration::from_millis(200));
+            let _ = listener.join();
             return Ok(());
         }
-        while let Ok(event) = control.events.try_recv() {
-            match event {
-                ControlEvent::Message(control::REQUEST_IDR, _)
-                | ControlEvent::Message(control::INVALIDATE_REFS, _) => keyframe = true,
-                ControlEvent::Disconnected => {
-                    println!("gamestream: the client left after {sent} frames");
-                    return Ok(());
-                }
-                _ => {}
-            }
+        if left.load(Ordering::SeqCst) {
+            println!("gamestream: the client left after {sent} frames");
+            return Ok(());
         }
+        let keyframe = wants_keyframe.swap(false, Ordering::SeqCst);
         let Some(frame) = source.next_frame(keyframe) else {
+            left.store(true, Ordering::SeqCst);
             return Err("the app's picture ended".into());
         };
-        keyframe = false;
         let timestamp = (epoch.elapsed().as_micros() * 9 / 100) as u32;
         for packet in packetizer.packets(&frame.data, frame.idr, timestamp) {
             let _ = video.send_to(&packet, peer);
