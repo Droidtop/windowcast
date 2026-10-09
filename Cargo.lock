@@ -4439,7 +4439,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windowcast-agent-linux"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "evdev",
  "libpulse-binding",
@@ -4462,7 +4462,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-agent-windows"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "opus",
  "tokio",
@@ -4478,7 +4478,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-app"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "eframe",
  "serde",
@@ -4497,7 +4497,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-cli-tools"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "libc",
  "openh264",
@@ -4513,7 +4513,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-client-core"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "bytes",
  "opus",
@@ -4528,7 +4528,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-client-windows"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "audiopus_sys",
  "opus",
@@ -4539,7 +4539,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-gamestream"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4563,7 +4563,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-host"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -4581,7 +4581,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-identity"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "ed25519-dalek",
  "rand_core 0.6.4",
@@ -4590,7 +4590,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-pairing"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "hkdf",
  "hmac",
@@ -4603,7 +4603,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-protocol"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "bincode",
  "serde",
@@ -4612,7 +4612,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-rendezvous"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "ed25519-dalek",
  "rand_core 0.6.4",
@@ -4627,7 +4627,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-transport"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "async-trait",
  "bytes",

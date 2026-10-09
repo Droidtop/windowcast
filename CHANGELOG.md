@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.17.0] - 2026-10-09
 
 ### Added
 - Stock Moonlight streams from a windowcast host (Droidtop/tracker#110): our own GameStream host answers `/launch`, sets the stream up over RTSP (Sunshine's attributes, ping payloads and connect data), sends the window as H.264 GameStream video packets to the address the client pings from, and keeps the AES-GCM-encrypted ENet control stream (keyframe requests, the end of the stream). The host's windows are the apps Moonlight lists. Tested in CI: Arch's moonlight-qt 6.2.0 pairs, lists and streams the test pattern window, decoding 30 fps with no frames lost.
