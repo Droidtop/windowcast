@@ -147,6 +147,35 @@ pub unsafe extern "C" fn windowcast_connect(
     }
 }
 
+/// Connects to a paired host away from the LAN, by its identity (64 hex
+/// digits), through Syncthing's global discovery and STUN with their
+/// default servers; it must have told this client its discovery ID on an
+/// earlier session. Blocks, up to a minute and a half. Returns null on
+/// failure, with the reason in `error`.
+///
+/// # Safety
+/// As [`windowcast_connect`].
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_connect_away(
+    client: *const Client,
+    host_id: *const c_char,
+    error: *mut c_char,
+    error_cap: usize,
+) -> *mut ClientSession {
+    let (Some(client), Some(host_id)) = (client.as_ref(), str_arg(host_id)) else {
+        write_text("invalid arguments", error, error_cap);
+        return std::ptr::null_mut();
+    };
+    let config = windowcast_transport::remote::RemoteConfig::default();
+    match client.connect_away(host_id, &config) {
+        Ok(session) => Box::into_raw(Box::new(session)),
+        Err(e) => {
+            write_text(&e.to_string(), error, error_cap);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Closes the session (the host is told at once) and frees it.
 ///
 /// # Safety

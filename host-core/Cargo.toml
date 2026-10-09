@@ -9,6 +9,7 @@ windowcast-protocol = { path = "../protocol" }
 windowcast-identity = { path = "../identity" }
 windowcast-pairing = { path = "../pairing" }
 windowcast-transport = { path = "../transport" }
+windowcast-rendezvous = { path = "../rendezvous" }
 tokio = { workspace = true, features = ["net"] }
 tracing.workspace = true
 bytes = "1"

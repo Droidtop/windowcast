@@ -28,6 +28,9 @@ use windowcast_protocol::{
     BackendKind, ControlMessage, InputEvent, StreamLimits, StreamOptions, StreamQuality,
     StreamTarget, VideoCodec, WindowId, WindowInfo,
 };
+use windowcast_transport::remote::{
+    self, Answer, Directory, RemoteConfig, RemotePeers, Syncthing, CONNECT_WITHIN,
+};
 use windowcast_transport::{
     connect, AudioPacket, AudioTrack, ClientCredential, RemoteAudio, RemoteTrack, RemoteWindow,
     Session, TransportError, WindowFrame,
@@ -48,6 +51,19 @@ pub enum ClientError {
     Identity(#[from] windowcast_identity::IdentityError),
     #[error("i/o: {0}")]
     Io(#[from] std::io::Error),
+    /// The host cannot be looked for away from the LAN: not paired, or no
+    /// session on the LAN told this client its discovery ID yet.
+    #[error("{0} cannot be reached away from the LAN yet: connect on the LAN once first")]
+    NotReachableAway(String),
+    /// Discovery has no address for the host, or none answered.
+    #[error("{0} was not found away from the LAN ({1})")]
+    NotFound(String, String),
+}
+
+/// Where a session keeps the host's discovery ID, and this client's own.
+struct Rendezvous {
+    peers: Arc<RemotePeers>,
+    own: Option<String>,
 }
 
 /// One client identity and its trusted hosts; connects to any number of
@@ -57,6 +73,9 @@ pub struct Client {
     identity: Arc<Identity>,
     trust: Mutex<TrustStore>,
     trust_path: PathBuf,
+    /// The hosts' discovery IDs, learned on sessions, for reaching them
+    /// away from the LAN.
+    remote_hosts: Arc<RemotePeers>,
 }
 
 impl Client {
@@ -76,6 +95,7 @@ impl Client {
             identity: Arc::new(identity),
             trust: Mutex::new(trust),
             trust_path,
+            remote_hosts: Arc::new(RemotePeers::load(&data_dir.join("remote-hosts.json"))),
         })
     }
 
@@ -113,12 +133,117 @@ impl Client {
             trust.pin(established.peer);
             trust.save(&self.trust_path)?;
         }
-        Ok(ClientSession::start(
+        Ok(self.started(established))
+    }
+
+    fn started(&self, established: windowcast_transport::Established) -> ClientSession {
+        ClientSession::start(
             Arc::clone(&self.runtime),
             established.session,
-            established.peer.to_hex(),
+            established.peer,
             established.paired,
-        ))
+            Rendezvous {
+                peers: Arc::clone(&self.remote_hosts),
+                own: windowcast_transport::remote::discovery_id(&self.identity).ok(),
+            },
+        )
+    }
+
+    /// Whether `host_id` (hex) can be looked for away from the LAN: it is
+    /// paired and told this client its discovery ID.
+    pub fn reachable_away(&self, host_id: &str) -> bool {
+        windowcast_identity::PeerId::from_hex(host_id).is_ok_and(|peer| {
+            self.trust.lock().expect("trust store").is_pinned(&peer)
+                && self.remote_hosts.get(&peer).is_some()
+        })
+    }
+
+    /// Connects to a paired host away from the LAN through Syncthing's
+    /// global discovery and the STUN servers `config` names: announces
+    /// this client's address, looks the host up, and punches through both
+    /// NATs to it (`windowcast_transport::remote`). Blocks, up to a minute
+    /// and a half while the host's next lookup finds this client.
+    pub fn connect_away(
+        &self,
+        host_id: &str,
+        config: &RemoteConfig,
+    ) -> Result<ClientSession, ClientError> {
+        let directory = Syncthing::new(&self.identity, &config.servers)
+            .map_err(|e| ClientError::NotFound(host_id.to_owned(), e))?;
+        self.connect_away_with(host_id, config, &directory, CONNECT_WITHIN)
+    }
+
+    /// [`Self::connect_away`] with another directory and time limit.
+    pub fn connect_away_with(
+        &self,
+        host_id: &str,
+        config: &RemoteConfig,
+        directory: &dyn Directory,
+        within: Duration,
+    ) -> Result<ClientSession, ClientError> {
+        let peer = windowcast_identity::PeerId::from_hex(host_id)?;
+        let trusted = self.trust.lock().expect("trust store").clone();
+        let host_discovery = self
+            .remote_hosts
+            .get(&peer)
+            .filter(|_| trusted.is_pinned(&peer))
+            .ok_or_else(|| ClientError::NotReachableAway(host_id.to_owned()))?;
+        let identity = Arc::clone(&self.identity);
+        let established = self.runtime.block_on(async {
+            let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+            let rendezvous = windowcast_transport::punched::Rendezvous::new(socket, false);
+            let config_copy = config.clone();
+            let stun = tokio::task::spawn_blocking(move || config_copy.stun_addresses())
+                .await
+                .unwrap_or_default();
+            let mapped = remote::mapped_address(&rendezvous, &stun, Duration::from_secs(3)).await;
+            // So the host's lookups find this client and punch towards it.
+            // Discovery blocks on https; the runtime's other worker keeps
+            // the rendezvous socket read meanwhile.
+            let _ = tokio::task::block_in_place(|| directory.announce(&remote::announced(mapped)));
+            let endpoints = match tokio::task::block_in_place(|| directory.lookup(&host_discovery))
+            {
+                Answer::Found(addresses) => remote::endpoints(&addresses),
+                _ => Vec::new(),
+            };
+            if endpoints.is_empty() {
+                return Err(ClientError::NotFound(
+                    host_id.to_owned(),
+                    "discovery has no address for it".into(),
+                ));
+            }
+            let deadline = std::time::Instant::now() + within;
+            let stream = loop {
+                let mut last = None;
+                for endpoint in &endpoints {
+                    match rendezvous.connect(*endpoint, Duration::from_secs(4)).await {
+                        Ok(stream) => {
+                            last = Some(Ok(stream));
+                            break;
+                        }
+                        Err(e) => last = Some(Err(e)),
+                    }
+                }
+                match last {
+                    Some(Ok(stream)) => break stream,
+                    Some(Err(e)) if std::time::Instant::now() >= deadline => {
+                        return Err(ClientError::NotFound(host_id.to_owned(), e.to_string()));
+                    }
+                    _ => {}
+                }
+            };
+            let session = Session::away(&config.stun_names()).await?;
+            Ok::<_, ClientError>(
+                connect(
+                    stream,
+                    session,
+                    &identity,
+                    ClientCredential::Pinned(&trusted),
+                )
+                .await?,
+            )
+        })?;
+        Ok(self.started(established))
     }
 
     /// Stops trusting the host whose identity is `host_id` (hex, as
@@ -292,8 +417,22 @@ pub struct ClientSession {
 }
 
 impl ClientSession {
-    fn start(runtime: Arc<Runtime>, session: Session, host: String, paired: bool) -> Self {
+    fn start(
+        runtime: Arc<Runtime>,
+        session: Session,
+        host: windowcast_identity::PeerId,
+        paired: bool,
+        rendezvous: Rendezvous,
+    ) -> Self {
         let session = Arc::new(session);
+        if let Some(discovery_id) = rendezvous.own.clone() {
+            let session = Arc::clone(&session);
+            runtime.spawn(async move {
+                let _ = session
+                    .send_control(&ControlMessage::Rendezvous { discovery_id })
+                    .await;
+            });
+        }
         let (event_tx, event_rx) = mpsc::channel();
         let shared = Arc::new(Shared {
             events: Mutex::new(event_rx),
@@ -309,6 +448,7 @@ impl ClientSession {
             Arc::clone(&shared),
             event_tx,
             Arc::clone(&windows),
+            (host, rendezvous.peers),
         ));
         runtime.spawn(pump_windows(Arc::clone(&session), Arc::clone(&shared)));
 
@@ -316,7 +456,7 @@ impl ClientSession {
             runtime,
             session,
             shared,
-            host,
+            host: host.to_hex(),
             paired,
             rules: Mutex::new(Vec::new()),
             windows,
@@ -562,6 +702,7 @@ async fn pump_events(
     shared: Arc<Shared>,
     events: mpsc::Sender<Event>,
     windows: Arc<Mutex<Vec<WindowInfo>>>,
+    (host, remote_hosts): (windowcast_identity::PeerId, Arc<RemotePeers>),
 ) {
     loop {
         let message = match session.recv_control().await {
@@ -626,6 +767,11 @@ async fn pump_events(
                 if let Some(sent) = ping.0.take() {
                     ping.1 = Some(sent.elapsed());
                 }
+                continue;
+            }
+            // Kept for reaching this host away from the LAN later.
+            ControlMessage::Rendezvous { discovery_id } => {
+                let _ = remote_hosts.set(&host, &discovery_id);
                 continue;
             }
             // The host measures the round trip for adaptive quality.

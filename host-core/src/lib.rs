@@ -11,6 +11,7 @@
 pub mod audio;
 pub mod gamepad;
 pub mod quality;
+pub mod remote;
 pub mod video;
 
 use std::collections::HashMap;
@@ -28,6 +29,7 @@ use windowcast_protocol::{
     BackendKind, ControlMessage, InputEvent, StreamBackend, StreamLimits, StreamOptions,
     StreamQuality, StreamTarget, VideoCodec, WindowId, WindowInfo,
 };
+use windowcast_transport::remote::RemotePeers;
 use windowcast_transport::{
     accept, is_keyframe, AudioTrack, HostCredential, Session, TransportError, WindowTrack,
 };
@@ -270,6 +272,10 @@ pub struct HostControl {
     clients: std::sync::Mutex<HashMap<u64, ClientStatus>>,
     streams: std::sync::Mutex<HashMap<u64, StreamStatus>>,
     serial: AtomicU64,
+    /// The clients' discovery IDs, for reaching them away from the LAN.
+    remote_peers: RemotePeers,
+    /// This host's own; `None` if its certificate could not be made.
+    discovery_id: Option<String>,
 }
 
 impl HostControl {
@@ -282,6 +288,7 @@ impl HostControl {
         let trust_path = config.data_dir.join("agent-trusted-clients");
         let trust = TrustStore::load(&trust_path).map_err(std::io::Error::other)?;
         println!("host identity: {}", identity.peer_id());
+        let discovery_id = windowcast_transport::remote::discovery_id(&identity).ok();
         Ok(Arc::new(HostControl {
             identity,
             trust: Mutex::new(trust),
@@ -290,11 +297,25 @@ impl HostControl {
             clients: Default::default(),
             streams: Default::default(),
             serial: AtomicU64::new(1),
+            remote_peers: RemotePeers::load(&config.data_dir.join("remote-peers.json")),
+            discovery_id,
         }))
     }
 
     pub fn peer_id(&self) -> PeerId {
         self.identity.peer_id()
+    }
+
+    /// Syncthing's global discovery as this host announces itself there
+    /// (`servers` as Syncthing writes them), for [`remote::serve_remote`].
+    pub fn directory(
+        &self,
+        servers: &[String],
+    ) -> Result<Arc<dyn windowcast_transport::remote::Directory>, String> {
+        Ok(Arc::new(windowcast_transport::remote::Syncthing::new(
+            &self.identity,
+            servers,
+        )?))
     }
 
     /// The PIN a new client pairs with; `None` while pairing is closed.
@@ -494,9 +515,30 @@ impl Host {
         } else {
             Session::new().await?
         };
+        self.serve_session(stream, address, session, true).await
+    }
+
+    /// Serves one client over a signaling stream (a LAN TCP socket, or a
+    /// punched UDP stream from away), on `session`. Pairing by PIN only
+    /// where `pairing` allows (on the LAN: a host found from away takes
+    /// only clients it already trusts).
+    async fn serve_session<S>(
+        self: &Arc<Self>,
+        stream: S,
+        address: String,
+        session: Session,
+        pairing: bool,
+    ) -> Result<(), TransportError>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
         let control = &self.control;
         let trusted = control.trust.lock().await.clone();
-        let pin = control.pairing.current().await;
+        let pin = if pairing {
+            control.pairing.current().await
+        } else {
+            None
+        };
         let established = accept(
             stream,
             session,
@@ -547,6 +589,11 @@ impl Host {
         )));
         let rtt = Arc::new(RoundTrip::default());
         let _ping_task = AbortOnDrop(tokio::spawn(ping(Arc::clone(&session), Arc::clone(&rtt))));
+        if let Some(discovery_id) = control.discovery_id.clone() {
+            session
+                .send_control(&ControlMessage::Rendezvous { discovery_id })
+                .await?;
+        }
         loop {
             match session.recv_control().await? {
                 ControlMessage::Input(event) => {
@@ -606,6 +653,11 @@ impl Host {
                 }
                 ControlMessage::Ping => session.send_control(&ControlMessage::Pong).await?,
                 ControlMessage::Pong => rtt.answered(),
+                ControlMessage::Rendezvous { discovery_id } => {
+                    if let Err(e) = control.remote_peers.set(&peer, &discovery_id) {
+                        eprintln!("could not keep {peer}'s discovery ID: {e}");
+                    }
+                }
                 ControlMessage::StreamLimits { window, limits } => {
                     if let Some(stream) = streams.get(&window) {
                         *stream.limits.lock().expect("limits") = limits;

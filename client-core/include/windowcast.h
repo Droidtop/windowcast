@@ -51,6 +51,12 @@ void windowcast_client_peer_id(const WindowcastClient *client, char *out, size_t
  * the reason in error. */
 WindowcastSession *windowcast_connect(const WindowcastClient *client, const char *address,
                                       const char *pin, char *error, size_t error_cap);
+/* Connects to a paired host away from the LAN by its identity (64 hex
+ * digits), through Syncthing's global discovery and STUN; the host must
+ * have told this client its discovery ID on an earlier session. Blocks up
+ * to a minute and a half. Null on failure, with the reason in error. */
+WindowcastSession *windowcast_connect_away(const WindowcastClient *client, const char *host_id,
+                                           char *error, size_t error_cap);
 /* Closes the session (the host is told at once) and frees it. */
 void windowcast_session_free(WindowcastSession *session);
 /* The host's identity; returns 1 if this connection paired by PIN. */
