@@ -545,6 +545,7 @@ async fn a_window_audio_track_carries_opus_packets_and_ends_with_the_window() {
         {
             windowcast_transport::RemoteTrack::Audio(a) => remote_audio = Some(a),
             windowcast_transport::RemoteTrack::Window(w) => remote_video = Some(w),
+            windowcast_transport::RemoteTrack::Microphone(_) => panic!("no microphone sent"),
         }
     }
     let mut remote_audio = remote_audio.unwrap();
@@ -576,4 +577,44 @@ async fn a_window_audio_track_carries_opus_packets_and_ends_with_the_window() {
         }
     };
     assert!(matches!(ended, Ok(Err(_))), "the audio track should end");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_client_microphone_reaches_the_host() {
+    let peers = Peers::new();
+    let (host, client) = peers
+        .run(Some("482913"), ClientCredential::Pin("482913"))
+        .await;
+    let host = host.expect("host side").session;
+    let client = client.expect("client side").session;
+
+    let microphone = client.attach_microphone().await.unwrap();
+    // A remote track is announced with its first packet: keep talking.
+    let packet = Bytes::from_static(&[0xf8, 1, 2, 3]);
+    let talking = {
+        let packet = packet.clone();
+        tokio::spawn(async move {
+            loop {
+                let _ = microphone
+                    .write_packet(packet.clone(), Duration::from_millis(20))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+    };
+    let mut remote = match tokio::time::timeout(TEST_TIMEOUT, host.next_remote_track())
+        .await
+        .expect("no microphone track arrived")
+        .unwrap()
+    {
+        windowcast_transport::RemoteTrack::Microphone(m) => m,
+        _ => panic!("expected the microphone"),
+    };
+    let got = tokio::time::timeout(TEST_TIMEOUT, remote.next_packet())
+        .await
+        .expect("no microphone packet")
+        .unwrap();
+    assert_eq!(got.data, packet);
+    talking.abort();
+    assert!(client.detach_microphone().await.unwrap());
 }

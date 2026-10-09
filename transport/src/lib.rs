@@ -181,6 +181,8 @@ pub struct Session {
 pub enum RemoteTrack {
     Window(RemoteWindow),
     Audio(RemoteAudio),
+    /// Host side: the client's microphone.
+    Microphone(RemoteAudio),
 }
 
 type PendingAnswer = Arc<std::sync::Mutex<Option<oneshot::Sender<String>>>>;
@@ -329,17 +331,20 @@ impl Session {
         loop {
             let track = self.until_closed(remote_tracks.recv()).await?;
             let (ended_tx, ended) = watch::channel(false);
-            let remote =
-                if let Some(audio) = RemoteAudio::new(Arc::clone(&track), ended.clone()).await {
-                    RemoteTrack::Audio(audio)
-                } else if let Some(window) = RemoteWindow::new(track, ended).await {
-                    RemoteTrack::Window(window)
-                } else {
-                    continue;
-                };
+            let remote = if let Some(microphone) =
+                RemoteAudio::microphone(Arc::clone(&track), ended.clone()).await
+            {
+                RemoteTrack::Microphone(microphone)
+            } else if let Some(audio) = RemoteAudio::new(Arc::clone(&track), ended.clone()).await {
+                RemoteTrack::Audio(audio)
+            } else if let Some(window) = RemoteWindow::new(track, ended).await {
+                RemoteTrack::Window(window)
+            } else {
+                continue;
+            };
             let window = match &remote {
                 RemoteTrack::Window(w) => w.window(),
-                RemoteTrack::Audio(a) => a.window(),
+                RemoteTrack::Audio(a) | RemoteTrack::Microphone(a) => a.window(),
             };
             self.ended_windows
                 .lock()
@@ -358,11 +363,30 @@ impl Session {
         if let Some(existing) = audio.get(&window) {
             return Ok(existing.clone());
         }
-        let pending = audio::PendingAudio::add_to(&*self.peer_connection, window).await?;
+        let pending = audio::PendingAudio::add_to(&*self.peer_connection, Some(window)).await?;
         self.renegotiate().await?;
         let track = pending.negotiated().await?;
         audio.insert(window, track.clone());
         Ok(track)
+    }
+
+    /// Client side: starts sending the microphone as an Opus track and
+    /// renegotiates. Starting twice returns the existing track.
+    pub async fn attach_microphone(&self) -> Result<AudioTrack, TransportError> {
+        let mut audio = self.audio.lock().await;
+        if let Some(existing) = audio.get(&audio::MICROPHONE) {
+            return Ok(existing.clone());
+        }
+        let pending = audio::PendingAudio::add_to(&*self.peer_connection, None).await?;
+        self.renegotiate().await?;
+        let track = pending.negotiated().await?;
+        audio.insert(audio::MICROPHONE, track.clone());
+        Ok(track)
+    }
+
+    /// Client side: stops sending the microphone and renegotiates.
+    pub async fn detach_microphone(&self) -> Result<bool, TransportError> {
+        self.detach_audio(audio::MICROPHONE).await
     }
 
     /// Host side: stops sending `window`'s audio and renegotiates. The

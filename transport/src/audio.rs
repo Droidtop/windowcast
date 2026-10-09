@@ -1,5 +1,6 @@
 //! Window audio: one Opus track per streamed window that has sound, beside
-//! its video track on the same session. Each RTP packet carries one Opus
+//! its video track on the same session; and the client's microphone, one
+//! Opus track from the client to the host. Each RTP packet carries one Opus
 //! packet (RFC 7587), so there is nothing to reassemble; the receiving end
 //! hands packets on as they come and the client decodes them.
 
@@ -26,6 +27,7 @@ use crate::TransportError;
 
 const STREAM_ID: &str = "windowcast";
 const AUDIO_TRACK_PREFIX: &str = "audio-";
+const MICROPHONE_TRACK_PREFIX: &str = "mic-";
 
 /// Opus at 48 kHz in stereo: the entry webrtc's default codec table
 /// registers, so negotiation matches it.
@@ -44,6 +46,15 @@ fn track_id_for(window: WindowId, ssrc: u32) -> String {
     format!("{AUDIO_TRACK_PREFIX}{}-{ssrc:08x}", window.0)
 }
 
+/// `mic-<ssrc>`: the client's microphone.
+fn microphone_track_id(ssrc: u32) -> String {
+    format!("{MICROPHONE_TRACK_PREFIX}{ssrc:08x}")
+}
+
+pub(crate) fn is_microphone_track(id: &str) -> bool {
+    id.starts_with(MICROPHONE_TRACK_PREFIX)
+}
+
 pub(crate) fn window_for_track_id(id: &str) -> Option<WindowId> {
     let (window, _ssrc) = id.strip_prefix(AUDIO_TRACK_PREFIX)?.split_once('-')?;
     window.parse().ok().map(WindowId)
@@ -58,12 +69,18 @@ pub(crate) struct PendingAudio {
 }
 
 impl PendingAudio {
+    /// A window's sound (host side), or with `window` None the
+    /// microphone (client side).
     pub(crate) async fn add_to(
         peer_connection: &dyn PeerConnection,
-        window: WindowId,
+        window: Option<WindowId>,
     ) -> Result<Self, TransportError> {
         let ssrc = rand_core::RngCore::next_u32(&mut rand_core::OsRng);
-        let track_id = track_id_for(window, ssrc);
+        let track_id = match window {
+            Some(window) => track_id_for(window, ssrc),
+            None => microphone_track_id(ssrc),
+        };
+        let window = window.unwrap_or(MICROPHONE);
         let track = Arc::new(TrackLocalStaticSample::new(
             Instant::now(),
             MediaStreamTrack::new(
@@ -109,7 +126,11 @@ impl PendingAudio {
     }
 }
 
-/// Host side: the sending end of one window's audio.
+/// The window id a microphone track is filed under.
+pub(crate) const MICROPHONE: WindowId = WindowId(u64::MAX);
+
+/// The sending end of one window's audio (host side), or of the
+/// microphone (client side).
 #[derive(Clone)]
 pub struct AudioTrack {
     window: WindowId,
@@ -165,6 +186,19 @@ pub struct RemoteAudio {
 }
 
 impl RemoteAudio {
+    /// The client's microphone, on the host.
+    pub(crate) async fn microphone(
+        track: Arc<dyn TrackRemote>,
+        ended: watch::Receiver<bool>,
+    ) -> Option<Self> {
+        is_microphone_track(&track.track_id().await).then_some(RemoteAudio {
+            window: MICROPHONE,
+            track,
+            ended,
+            last_sequence: None,
+        })
+    }
+
     /// `None` for a track that is not a window's audio.
     pub(crate) async fn new(
         track: Arc<dyn TrackRemote>,

@@ -91,6 +91,14 @@ int64_t windowcast_session_next_frame(const WindowcastSession *session, uint64_t
                                       uint32_t timeout_ms, uint8_t *out, size_t cap,
                                       WindowcastFrameInfo *info);
 
+/* The microphone, to the host's virtual microphone: start, then one Opus
+ * packet (48 kHz, stereo, 20 ms) at a time, then stop. Each returns 0 or
+ * WINDOWCAST_ERROR. */
+int64_t windowcast_session_start_microphone(const WindowcastSession *session);
+int64_t windowcast_session_send_microphone(const WindowcastSession *session, const uint8_t *data,
+                                           size_t len);
+int64_t windowcast_session_stop_microphone(const WindowcastSession *session);
+
 /* Next Opus packet (48 kHz, stereo, 20 ms) of a window's sound. Returns its
  * length, WINDOWCAST_TIMEOUT (quiet, or no audio yet), WINDOWCAST_ENDED when
  * the window's audio is over, or WINDOWCAST_BUFFER_TOO_SMALL (the packet is

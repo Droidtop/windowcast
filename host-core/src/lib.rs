@@ -87,6 +87,12 @@ pub trait WindowSource: Send + Sync + 'static {
         None
     }
 
+    /// The host's virtual microphone, which a client's microphone plays
+    /// into. `None` when this host has none.
+    fn microphone(&self) -> Option<Result<Box<dyn audio::MicrophoneSink>, String>> {
+        None
+    }
+
     /// Delivers one input event. `focus` is the session's input focus: the
     /// last streamed window an event named, where keys, text and gamepads
     /// go. Called on the session's input thread, in order.
@@ -466,6 +472,10 @@ impl Host {
             Arc::clone(&clipboard),
         ));
         let _clipboard_task = AbortOnDrop(clipboard_task);
+        let _microphone_task = AbortOnDrop(tokio::spawn(receive_microphone(
+            Arc::clone(&session),
+            Arc::clone(&self.source),
+        )));
         loop {
             match session.recv_control().await? {
                 ControlMessage::Input(event) => {
@@ -801,6 +811,56 @@ fn feed(
             let _ = runtime.block_on(session.detach_window(window));
         }
     });
+}
+
+/// Plays the client's microphone, when it sends one, into the agent's
+/// virtual microphone: Opus decoded here, played on a thread of its own
+/// (a sink may block).
+async fn receive_microphone(session: Arc<Session>, source: Arc<dyn WindowSource>) {
+    use windowcast_transport::RemoteTrack;
+    while let Ok(track) = session.next_remote_track().await {
+        let RemoteTrack::Microphone(mut remote) = track else {
+            continue;
+        };
+        let source = Arc::clone(&source);
+        let opened = tokio::task::spawn_blocking(move || source.microphone())
+            .await
+            .ok()
+            .flatten();
+        let mut sink = match opened {
+            None => {
+                eprintln!("a client sends its microphone; this host has no virtual microphone");
+                continue;
+            }
+            Some(Err(e)) => {
+                eprintln!("no virtual microphone: {e}");
+                continue;
+            }
+            Some(Ok(sink)) => sink,
+        };
+        let Ok(mut decoder) = opus::Decoder::new(audio::RATE, opus::Channels::Stereo) else {
+            continue;
+        };
+        let (samples_tx, samples_rx) = std::sync::mpsc::channel::<Vec<i16>>();
+        std::thread::spawn(move || {
+            for samples in samples_rx {
+                sink.play(&samples);
+            }
+        });
+        tokio::spawn(async move {
+            let mut pcm = vec![0i16; 5760 * audio::CHANNELS];
+            while let Ok(packet) = remote.next_packet().await {
+                if let Ok(frames) = decoder.decode(&packet.data, &mut pcm, false) {
+                    if samples_tx
+                        .send(pcm[..frames * audio::CHANNELS].to_vec())
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// Moves the window's sound from the agent's capture through Opus onto its

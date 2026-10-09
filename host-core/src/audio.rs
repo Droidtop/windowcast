@@ -16,6 +16,13 @@ pub trait AudioSource: Send {
     fn next_samples(&mut self) -> Option<Vec<i16>>;
 }
 
+/// Where a client's microphone plays on the host: a virtual microphone
+/// that the host's applications record from.
+pub trait MicrophoneSink: Send {
+    /// Plays interleaved stereo 16-bit samples at 48 kHz.
+    fn play(&mut self, samples: &[i16]);
+}
+
 /// PCM in, 20 ms Opus packets out.
 pub struct OpusPackets {
     encoder: opus::Encoder,

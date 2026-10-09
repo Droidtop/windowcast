@@ -4672,6 +4672,7 @@ dependencies = [
 name = "windowcast-client-core"
 version = "0.11.0"
 dependencies = [
+ "bytes",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

@@ -352,6 +352,59 @@ pub unsafe extern "C" fn windowcast_session_next_frame(
     frame.data.len() as i64
 }
 
+/// 0 for success, WINDOWCAST_ERROR for a failure.
+fn status<T, E>(result: Result<T, E>) -> i64 {
+    match result {
+        Ok(_) => 0,
+        Err(_) => WINDOWCAST_ERROR,
+    }
+}
+
+/// Starts sending this client's microphone to the host. Returns 0 or
+/// WINDOWCAST_ERROR.
+///
+/// # Safety
+/// `session` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_start_microphone(session: *const ClientSession) -> i64 {
+    let Some(session) = session.as_ref() else {
+        return WINDOWCAST_ERROR;
+    };
+    status(session.start_microphone())
+}
+
+/// Sends one Opus packet (48 kHz, stereo, 20 ms) of microphone sound.
+/// Returns 0 or WINDOWCAST_ERROR.
+///
+/// # Safety
+/// `session` must be valid; `data` valid for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_send_microphone(
+    session: *const ClientSession,
+    data: *const u8,
+    len: usize,
+) -> i64 {
+    let Some(session) = session.as_ref() else {
+        return WINDOWCAST_ERROR;
+    };
+    if data.is_null() {
+        return WINDOWCAST_ERROR;
+    }
+    status(session.send_microphone(std::slice::from_raw_parts(data, len)))
+}
+
+/// Stops sending the microphone. Returns 0 or WINDOWCAST_ERROR.
+///
+/// # Safety
+/// `session` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_stop_microphone(session: *const ClientSession) -> i64 {
+    let Some(session) = session.as_ref() else {
+        return WINDOWCAST_ERROR;
+    };
+    status(session.stop_microphone())
+}
+
 /// Next Opus packet (48 kHz, stereo, 20 ms) of a window's sound. Returns
 /// its length, WINDOWCAST_TIMEOUT (quiet, or no audio yet),
 /// WINDOWCAST_ENDED when the window's audio is over, or

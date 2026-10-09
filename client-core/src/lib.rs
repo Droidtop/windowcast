@@ -29,8 +29,8 @@ use windowcast_protocol::{
     WindowInfo,
 };
 use windowcast_transport::{
-    connect, AudioPacket, ClientCredential, RemoteAudio, RemoteTrack, RemoteWindow, Session,
-    TransportError, WindowFrame,
+    connect, AudioPacket, AudioTrack, ClientCredential, RemoteAudio, RemoteTrack, RemoteWindow,
+    Session, TransportError, WindowFrame,
 };
 
 /// Frames queued per window before the client is considered behind. When
@@ -279,6 +279,8 @@ pub struct ClientSession {
     rules: Mutex<Vec<BackendRule>>,
     /// The last window list, for choosing backends by content.
     windows: Arc<Mutex<Vec<WindowInfo>>>,
+    /// The microphone track, while the microphone is on.
+    microphone: Mutex<Option<AudioTrack>>,
 }
 
 impl ClientSession {
@@ -309,6 +311,7 @@ impl ClientSession {
             paired,
             rules: Mutex::new(Vec::new()),
             windows,
+            microphone: Mutex::new(None),
         }
     }
 
@@ -463,6 +466,34 @@ impl ClientSession {
         }
     }
 
+    /// Starts sending this client's microphone to the host: Opus packets
+    /// given to [`Self::send_microphone`] reach the host's virtual
+    /// microphone (where the host has one and allows it).
+    pub fn start_microphone(&self) -> Result<(), ClientError> {
+        let track = self.runtime.block_on(self.session.attach_microphone())?;
+        *self.microphone.lock().expect("microphone") = Some(track);
+        Ok(())
+    }
+
+    /// Sends one Opus packet (48 kHz, stereo, 20 ms) of microphone sound.
+    pub fn send_microphone(&self, packet: &[u8]) -> Result<(), ClientError> {
+        let track = self.microphone.lock().expect("microphone").clone();
+        let Some(track) = track else {
+            return Err(ClientError::Transport(TransportError::Closed));
+        };
+        Ok(self.runtime.block_on(track.write_packet(
+            bytes::Bytes::copy_from_slice(packet),
+            Duration::from_millis(20),
+        ))?)
+    }
+
+    /// Stops sending the microphone.
+    pub fn stop_microphone(&self) -> Result<(), ClientError> {
+        self.microphone.lock().expect("microphone").take();
+        self.runtime.block_on(self.session.detach_microphone())?;
+        Ok(())
+    }
+
     /// Measures the round trip to the host over the control channel; the
     /// result is [`Self::round_trip`] once the host answers.
     pub fn ping(&self) -> Result<(), ClientError> {
@@ -588,6 +619,8 @@ async fn pump_windows(session: Arc<Session>, shared: Arc<Shared>) {
                     .insert(remote.window(), Arc::new(Mutex::new(receiver)));
                 tokio::spawn(pump_audio(remote, sender));
             }
+            // Only hosts receive a microphone.
+            RemoteTrack::Microphone(_) => {}
         }
     }
 }
