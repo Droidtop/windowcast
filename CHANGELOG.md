@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-09
+
+### Added
+- Real video streams end to end. A test-pattern host (`windowcast-testhost`, also for Windows) streams H.264 to any client, and the reference client can watch a window and checks every frame decodes.
+- The client side is one surface for every client: a C interface (`client-core/include/windowcast.h`) to connect, pair or reconnect, list windows, start and stop streams, and pull events and whole frames ready for a hardware decoder.
+- An Android library over that interface that decodes windows with the device's hardware decoders (AV1, H.265 or H.264, whichever it has), and a small viewer app to try it. Built for both arm64 and x86_64 Android.
+- The host side is a library too: host agents now only supply their windows and encoders; pairing, sessions and streams are shared.
+
 ## [0.3.0] - 2026-10-09
 
 ### Added
