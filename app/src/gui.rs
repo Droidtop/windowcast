@@ -203,6 +203,27 @@ impl App {
                     "Clients may use their microphone here",
                 );
             });
+            ui.horizontal(|ui| {
+                ui.checkbox(
+                    &mut settings.away,
+                    "Reachable away from home by trusted clients",
+                );
+                ui.label("on UDP");
+                ui.add(egui::DragValue::new(&mut settings.away_port).range(1024..=65535));
+            });
+            if let Some(away) = &snapshot.away {
+                ui.label(
+                    RichText::new(format!(
+                        "Away: {}; {}; {} trusted client(s) found",
+                        away.mapped
+                            .map(|m| format!("the router gives {m}"))
+                            .unwrap_or_else(|| "asking STUN for this network's address".into()),
+                        away.announced.as_deref().unwrap_or("not announced yet"),
+                        away.found.len()
+                    ))
+                    .weak(),
+                );
+            }
             ui.separator();
 
             ui.heading("Live streams");
@@ -657,6 +678,16 @@ fn stream_window_ui(ui: &mut egui::Ui, client: &ClientRole) {
             });
         ui.checkbox(&mut send_input, "Send pointer and keys");
     });
+    let mut lan_only = config.lan_only;
+    if ui
+        .checkbox(
+            &mut lan_only,
+            "Only look for hosts on this network (never away from home)",
+        )
+        .changed()
+    {
+        client.store().update(|c| c.client.lan_only = lan_only);
+    }
     let mut microphone = client.microphone_on();
     if ui
         .checkbox(&mut microphone, "Send my microphone to the host")

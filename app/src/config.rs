@@ -76,6 +76,12 @@ pub struct HostSettings {
     /// Where it plays (Windows: part of a virtual cable's output name);
     /// empty picks one.
     pub microphone_device: String,
+    /// Reachable away from the LAN by the clients this host trusts:
+    /// announces its address to Syncthing's global discovery and punches
+    /// through the NAT (only addresses leave; nothing is relayed).
+    pub away: bool,
+    /// The UDP port it uses for that.
+    pub away_port: u16,
 }
 
 impl Default for HostSettings {
@@ -91,6 +97,8 @@ impl Default for HostSettings {
             clipboard: false,
             microphone: false,
             microphone_device: String::new(),
+            away: false,
+            away_port: windowcast_transport::remote::DEFAULT_PORT,
         }
     }
 }
@@ -115,6 +123,9 @@ pub struct ClientSettings {
     /// The user's ceilings per app (bitrate, frame rate, height); the host
     /// adapts below them.
     pub limits: Vec<AppLimits>,
+    /// Never look for a paired host away from the LAN when it does not
+    /// answer on it.
+    pub lan_only: bool,
 }
 
 /// One app's stream ceilings.

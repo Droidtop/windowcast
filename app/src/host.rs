@@ -186,6 +186,8 @@ pub struct HostSnapshot {
     pub streams: Vec<HostStream>,
     pub clients: Vec<HostClient>,
     pub trusted: Vec<String>,
+    /// Away from the LAN: off, or what the rendezvous knows.
+    pub away: Option<windowcast_host::remote::RemoteStatus>,
 }
 
 /// Counters at the last rate sample of one stream.
@@ -207,6 +209,9 @@ pub struct HostRole {
     pub encoders: Vec<(&'static str, Vec<VideoCodec>)>,
     samples: Mutex<HashMap<(String, u64, Instant), Sample>>,
     snapshot: Mutex<HostSnapshot>,
+    /// The rendezvous task while the host is reachable away, and its port.
+    away: Mutex<Option<(tokio::task::AbortHandle, u16)>>,
+    away_status: Arc<Mutex<windowcast_host::remote::RemoteStatus>>,
 }
 
 impl HostRole {
@@ -252,7 +257,10 @@ impl HostRole {
             encoders,
             samples: Mutex::new(HashMap::new()),
             snapshot: Mutex::new(HostSnapshot::default()),
+            away: Mutex::new(None),
+            away_status: Arc::default(),
         });
+        role.set_away(settings.away, settings.away_port);
         let refresher = Arc::clone(&role);
         std::thread::spawn(move || loop {
             let snapshot = refresher.take_snapshot();
@@ -309,7 +317,53 @@ impl HostRole {
             streams: self.streams(&titles),
             clients,
             trusted: trusted.iter().map(|peer| peer.to_hex()).collect(),
+            away: self
+                .away
+                .lock()
+                .expect("away")
+                .is_some()
+                .then(|| self.away_status.lock().expect("away status").clone()),
         }
+    }
+
+    /// Starts or stops being reachable away from the LAN (on `port`).
+    fn set_away(&self, on: bool, port: u16) {
+        let mut away = self.away.lock().expect("away");
+        if away.as_ref().map(|(_, p)| *p) == on.then_some(port) {
+            return;
+        }
+        if let Some((task, _)) = away.take() {
+            task.abort();
+        }
+        *self.away_status.lock().expect("away status") = Default::default();
+        if !on {
+            return;
+        }
+        let config = windowcast_transport::remote::RemoteConfig::default();
+        let directory = match self.control.directory(&config.servers) {
+            Ok(directory) => directory,
+            Err(e) => {
+                eprintln!("cannot be reachable away: {e}");
+                return;
+            }
+        };
+        let task = self.runtime.spawn(windowcast_host::remote::serve_remote(
+            Arc::clone(&self.control),
+            Arc::clone(&self.source) as Arc<dyn WindowSource>,
+            windowcast_host::remote::RemoteAccess {
+                port,
+                config,
+                directory,
+            },
+            Arc::clone(&self.away_status),
+        ));
+        let watched = task.abort_handle();
+        self.runtime.spawn(async move {
+            if let Ok(Err(e)) = task.await {
+                eprintln!("away from the LAN: {e}");
+            }
+        });
+        *away = Some((watched, port));
     }
 
     /// One row per live stream, with its rates since the last snapshot.
@@ -378,6 +432,7 @@ impl HostRole {
         self.source
             .microphone
             .store(settings.microphone, Ordering::SeqCst);
+        self.set_away(settings.away, settings.away_port);
         self.store.update(|config| config.host = settings);
         Ok(())
     }

@@ -196,7 +196,22 @@ impl ClientRole {
     pub fn connect(self: &Arc<Self>, address: &str, pin: Option<&str>) -> Result<(), String> {
         self.disconnect();
         self.state.lock().expect("state").connecting = true;
-        let result = self.client.connect(address, pin);
+        let mut result = self.client.connect(address, pin);
+        // A paired host that does not answer on the LAN may be away.
+        if result.is_err() && pin.is_none() && !self.store.get().client.lan_only {
+            let saved = self.store.get().client.saved;
+            if let Some(host) = saved.iter().find(|h| h.address == address) {
+                if self.client.reachable_away(&host.host_id) {
+                    self.log(format!(
+                        "{address} does not answer on the LAN; looking for it away (up to a minute and a half)"
+                    ));
+                    result = self.client.connect_away(
+                        &host.host_id,
+                        &windowcast_transport::remote::RemoteConfig::default(),
+                    );
+                }
+            }
+        }
         let mut state = self.state.lock().expect("state");
         state.connecting = false;
         let session = match result {
