@@ -2,7 +2,8 @@
 //! of the library: the client's events reach the host's WindowSource in
 //! order with the right focus, input for a window the session does not
 //! stream is dropped, the clipboard goes both ways without echoing, and
-//! the client hears the picture size before the first frame.
+//! the client hears the picture size before the first frame. Gamepads go
+//! to the session's own virtual pads, which go when the session does.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -10,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use windowcast_cli_tools::testpattern::{TestPatternSource, HEIGHT, WIDTH, WINDOW};
 use windowcast_client::{Client, ClientSession, Event, FramePoll};
+use windowcast_host::gamepad::GamepadSink;
 use windowcast_host::{FrameSource, HostConfig, WindowSource};
 use windowcast_identity::{Identity, TrustStore};
 use windowcast_protocol::{
@@ -26,6 +28,32 @@ struct Recorder {
     inputs: Mutex<Vec<(InputEvent, Option<WindowId>)>>,
     set_clipboard: Mutex<Vec<String>>,
     clipboard: Mutex<(u64, String)>,
+    pads: Mutex<Vec<PadEvent>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum PadEvent {
+    Made,
+    Set(u8, GamepadState),
+    Removed(u8),
+    Dropped,
+}
+
+struct Pads(Arc<Recorder>);
+
+impl GamepadSink for Pads {
+    fn set(&mut self, pad: u8, state: &GamepadState) {
+        self.0.pads.lock().unwrap().push(PadEvent::Set(pad, *state));
+    }
+    fn remove(&mut self, pad: u8) {
+        self.0.pads.lock().unwrap().push(PadEvent::Removed(pad));
+    }
+}
+
+impl Drop for Pads {
+    fn drop(&mut self) {
+        self.0.pads.lock().unwrap().push(PadEvent::Dropped);
+    }
 }
 
 struct Source(Arc<Recorder>);
@@ -42,6 +70,10 @@ impl WindowSource for Source {
     }
     fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
         self.0.inputs.lock().unwrap().push((event.clone(), focus));
+    }
+    fn gamepads(&self) -> Option<Result<Box<dyn GamepadSink>, String>> {
+        self.0.pads.lock().unwrap().push(PadEvent::Made);
+        Some(Ok(Box::new(Pads(Arc::clone(&self.0)))))
     }
     fn clipboard(&self) -> Option<(u64, String)> {
         Some(self.0.clipboard.lock().unwrap().clone())
@@ -166,14 +198,6 @@ fn input_clipboard_and_resize_go_through() {
             y: 0.5,
             phase: TouchPhase::Start,
         },
-        InputEvent::Gamepad {
-            pad: 0,
-            state: GamepadState {
-                buttons: GamepadButtons::A,
-                left_x: 12000,
-                ..Default::default()
-            },
-        },
     ];
     // A window this session does not stream: dropped.
     session
@@ -201,6 +225,36 @@ fn input_clipboard_and_resize_go_through() {
         assert_eq!(*focus, Some(WINDOW));
     }
 
+    // Gamepads: one sink for the session, made at its first pad event; a
+    // pad out of range is dropped.
+    let pad = GamepadState {
+        buttons: GamepadButtons::A,
+        left_x: 12000,
+        ..Default::default()
+    };
+    for event in [
+        InputEvent::Gamepad { pad: 1, state: pad },
+        InputEvent::Gamepad { pad: 9, state: pad },
+        InputEvent::Gamepad {
+            pad: 1,
+            state: GamepadState::default(),
+        },
+        InputEvent::GamepadGone { pad: 1 },
+    ] {
+        session.send_input(event).unwrap();
+    }
+    wait_for("the pads", || recorder.pads.lock().unwrap().len() >= 4);
+    assert_eq!(
+        *recorder.pads.lock().unwrap(),
+        [
+            PadEvent::Made,
+            PadEvent::Set(1, pad),
+            PadEvent::Set(1, GamepadState::default()),
+            PadEvent::Removed(1),
+        ]
+    );
+    assert_eq!(recorder.inputs.lock().unwrap().len(), sent.len());
+
     // Client to host.
     session.set_clipboard("from the client").unwrap();
     wait_for("the client's clipboard", || {
@@ -221,6 +275,10 @@ fn input_clipboard_and_resize_go_through() {
 
     session.stop_window(WINDOW).unwrap();
     drop(session);
+    // The session's pads go with it.
+    wait_for("the pads to go", || {
+        recorder.pads.lock().unwrap().last() == Some(&PadEvent::Dropped)
+    });
     drop(client);
     runtime.shutdown_timeout(Duration::from_secs(1));
     let _ = std::fs::remove_dir_all(host_dir);

@@ -9,6 +9,7 @@
 //! clients, who is connected and what each stream is doing.
 
 pub mod audio;
+pub mod gamepad;
 pub mod video;
 
 use std::collections::HashMap;
@@ -94,9 +95,16 @@ pub trait WindowSource: Send + Sync + 'static {
     }
 
     /// Delivers one input event. `focus` is the session's input focus: the
-    /// last streamed window an event named, where keys, text and gamepads
-    /// go. Called on the session's input thread, in order.
+    /// last streamed window an event named, where keys and text go. Called
+    /// on the session's input thread, in order. Gamepad events go to
+    /// [`WindowSource::gamepads`] instead.
     fn input(&self, _event: &InputEvent, _focus: Option<WindowId>) {}
+
+    /// Virtual gamepads for one session, made on its input thread when its
+    /// first gamepad event arrives. `None` when this host has none.
+    fn gamepads(&self) -> Option<Result<Box<dyn gamepad::GamepadSink>, String>> {
+        None
+    }
 
     /// The clipboard's text and a counter that changes whenever the
     /// clipboard does; `None` when this host does not share its clipboard.
@@ -545,8 +553,35 @@ impl Host {
         let (tx, rx) = std::sync::mpsc::channel::<(InputEvent, Option<WindowId>)>();
         let source = Arc::clone(&self.source);
         std::thread::spawn(move || {
+            // The session's pads; dropped, and so unplugged, when the
+            // session ends and its sender goes.
+            let mut pads: Option<Box<dyn gamepad::GamepadSink>> = None;
+            let mut no_pads = false;
             for (event, focus) in rx {
-                source.input(&event, focus);
+                match event {
+                    InputEvent::Gamepad { pad, state } if pad < gamepad::MAX_PADS => {
+                        if pads.is_none() && !no_pads {
+                            match source.gamepads() {
+                                Some(Ok(sink)) => pads = Some(sink),
+                                Some(Err(e)) => {
+                                    eprintln!("gamepads: {e}");
+                                    no_pads = true;
+                                }
+                                None => no_pads = true,
+                            }
+                        }
+                        if let Some(pads) = pads.as_mut() {
+                            pads.set(pad, &state);
+                        }
+                    }
+                    InputEvent::GamepadGone { pad } => {
+                        if let Some(pads) = pads.as_mut() {
+                            pads.remove(pad);
+                        }
+                    }
+                    InputEvent::Gamepad { .. } => {}
+                    event => source.input(&event, focus),
+                }
             }
         });
         tx
