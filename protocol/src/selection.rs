@@ -127,15 +127,39 @@ const VIDEO_APPS: &[&str] = &[
     "mpc-be64.exe",
 ];
 
-/// Host side: what a window shows, from its app id. Steam sets the app id
-/// `steam_app_<id>` on every game it runs; gamescope hosts games too.
-pub fn classify(app_id: &str, _title: &str) -> ContentHint {
+/// Web browsers: what they show depends on the page, so the title decides.
+const BROWSERS: &[&str] = &[
+    "firefox",
+    "org.mozilla.firefox",
+    "chromium",
+    "google-chrome",
+    "brave-browser",
+    "firefox.exe",
+    "floorp.exe",
+    "chrome.exe",
+    "msedge.exe",
+    "brave.exe",
+    "opera.exe",
+    "vivaldi.exe",
+];
+
+/// Video sites, as browsers put them in the window title.
+const VIDEO_SITES: &[&str] = &["youtube", "netflix", "twitch", "prime video", "vimeo"];
+
+/// Host side: what a window shows, from its app id (and for a browser, the
+/// page title). Steam sets the app id `steam_app_<id>` on every game it
+/// runs; gamescope hosts games too.
+pub fn classify(app_id: &str, title: &str) -> ContentHint {
     let app_id = app_id.to_ascii_lowercase();
+    let title = title.to_lowercase();
     if app_id.starts_with("steam_app_") || app_id == "gamescope" {
         ContentHint::Game
     } else if TEXT_APPS.contains(&app_id.as_str()) {
         ContentHint::Text
-    } else if VIDEO_APPS.contains(&app_id.as_str()) {
+    } else if VIDEO_APPS.contains(&app_id.as_str())
+        || BROWSERS.contains(&app_id.as_str())
+            && VIDEO_SITES.iter().any(|site| title.contains(site))
+    {
         ContentHint::Video
     } else {
         ContentHint::General
@@ -210,6 +234,18 @@ mod tests {
         assert_eq!(
             choose_backend(&window("firefox", "Something - YouTube"), &user),
             BackendKind::Passthrough
+        );
+    }
+
+    #[test]
+    fn a_browser_is_video_only_on_a_video_site() {
+        assert_eq!(
+            classify("chrome.exe", "Some talk - YouTube - Google Chrome"),
+            ContentHint::Video
+        );
+        assert_eq!(
+            classify("firefox", "Rust documentation - Mozilla Firefox"),
+            ContentHint::General
         );
     }
 
