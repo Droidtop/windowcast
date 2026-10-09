@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped on any incompatible change to the message shapes below. A peer
 /// that receives a mismatched version should refuse the session rather
 /// than guess at how to interpret an unknown wire format.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
@@ -41,7 +41,7 @@ pub enum ContentHint {
     Video,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TouchPhase {
     Start,
     Move,
@@ -49,10 +49,15 @@ pub enum TouchPhase {
     Cancel,
 }
 
-/// Input events flow client -> agent over the data channel. Coordinates are
-/// normalized to the captured window's own [0.0, 1.0] space so the agent
-/// doesn't need to know the client's viewport size.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// Input from the client to the host, on the control channel, whatever the
+/// stream's backend (one input back-channel, docs/BACKENDS.md).
+///
+/// Pointer and touch coordinates are normalized to the streamed picture of
+/// `window`, [0.0, 1.0] on each axis, so the host needs no client viewport
+/// size. Events that name a window also make it the session's input focus;
+/// keys, text and gamepads go to the focus (the host brings that window to
+/// the front first).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum InputEvent {
     PointerMove {
         window: WindowId,
@@ -61,9 +66,11 @@ pub enum InputEvent {
     },
     PointerButton {
         window: WindowId,
-        button: u8,
+        button: PointerButton,
         pressed: bool,
     },
+    /// Scroll in wheel notches; positive `dy` scrolls content up (wheel
+    /// away from the user), positive `dx` to the right.
     PointerScroll {
         window: WindowId,
         dx: f32,
@@ -75,6 +82,11 @@ pub enum InputEvent {
         keycode: u32,
         pressed: bool,
     },
+    /// Text typed through an input method (an on-screen keyboard), sent as
+    /// characters rather than keys.
+    Text {
+        text: String,
+    },
     Touch {
         window: WindowId,
         id: u32,
@@ -82,6 +94,62 @@ pub enum InputEvent {
         y: f32,
         phase: TouchPhase,
     },
+    /// The whole state of one gamepad (up to four, `pad` 0 to 3), sent on
+    /// every change.
+    Gamepad {
+        pad: u8,
+        state: GamepadState,
+    },
+    /// That gamepad was disconnected on the client.
+    GamepadGone {
+        pad: u8,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PointerButton {
+    Left,
+    Right,
+    Middle,
+    Back,
+    Forward,
+}
+
+/// An Xbox-layout gamepad: the layout Windows' XInput, Linux's evdev
+/// gamepad mapping and Android's KeyEvent/MotionEvent gamepad codes share.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GamepadState {
+    /// [`GamepadButtons`] bits.
+    pub buttons: u32,
+    /// Sticks, -32768 to 32767, up and right positive.
+    pub left_x: i16,
+    pub left_y: i16,
+    pub right_x: i16,
+    pub right_y: i16,
+    /// Triggers, 0 to 255.
+    pub left_trigger: u8,
+    pub right_trigger: u8,
+}
+
+/// Bits of [`GamepadState::buttons`], the same values as XInput's.
+pub struct GamepadButtons;
+
+impl GamepadButtons {
+    pub const DPAD_UP: u32 = 0x0001;
+    pub const DPAD_DOWN: u32 = 0x0002;
+    pub const DPAD_LEFT: u32 = 0x0004;
+    pub const DPAD_RIGHT: u32 = 0x0008;
+    pub const START: u32 = 0x0010;
+    pub const BACK: u32 = 0x0020;
+    pub const LEFT_THUMB: u32 = 0x0040;
+    pub const RIGHT_THUMB: u32 = 0x0080;
+    pub const LEFT_SHOULDER: u32 = 0x0100;
+    pub const RIGHT_SHOULDER: u32 = 0x0200;
+    pub const GUIDE: u32 = 0x0400;
+    pub const A: u32 = 0x1000;
+    pub const B: u32 = 0x2000;
+    pub const X: u32 = 0x4000;
+    pub const Y: u32 = 0x8000;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -248,6 +316,11 @@ pub enum ControlMessage {
     StreamStopped(StreamTarget),
 
     Input(InputEvent),
+
+    /// The clipboard's text, both ways: the client sends it when its
+    /// clipboard changes (the host sets its own), the host when its
+    /// clipboard changes.
+    Clipboard(String),
 
     Ping,
     Pong,
@@ -495,6 +568,33 @@ mod tests {
             decode_signal(&encode_signal(&old).unwrap()),
             Err(ProtocolError::VersionMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn input_and_clipboard_round_trip() {
+        let messages = [
+            ControlMessage::Input(InputEvent::PointerButton {
+                window: WindowId(3),
+                button: PointerButton::Right,
+                pressed: true,
+            }),
+            ControlMessage::Input(InputEvent::Text {
+                text: "héllo".into(),
+            }),
+            ControlMessage::Input(InputEvent::Gamepad {
+                pad: 1,
+                state: GamepadState {
+                    buttons: GamepadButtons::A | GamepadButtons::DPAD_LEFT,
+                    left_x: -32768,
+                    right_trigger: 255,
+                    ..Default::default()
+                },
+            }),
+            ControlMessage::Clipboard("copied".into()),
+        ];
+        for message in messages {
+            assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
+        }
     }
 
     #[test]
