@@ -393,6 +393,35 @@ pub unsafe extern "C" fn windowcast_session_send_microphone(
     status(session.send_microphone(std::slice::from_raw_parts(data, len)))
 }
 
+/// Sets this client's ceilings for a window's stream (kept for its next
+/// start, sent at once to a running one); 0 means no limit. The host adapts
+/// below them; its reports arrive as `stream_quality` events. Returns 0 or
+/// WINDOWCAST_ERROR.
+///
+/// # Safety
+/// `session` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_set_stream_limits(
+    session: *const ClientSession,
+    window: u64,
+    max_bitrate_kbps: u32,
+    max_fps: u32,
+    max_height: u32,
+) -> i64 {
+    let Some(session) = session.as_ref() else {
+        return WINDOWCAST_ERROR;
+    };
+    let some = |n: u32| (n > 0).then_some(n);
+    status(session.set_stream_limits(
+        WindowId(window),
+        windowcast_protocol::StreamLimits {
+            max_bitrate_kbps: some(max_bitrate_kbps),
+            max_fps: some(max_fps),
+            max_height: some(max_height),
+        },
+    ))
+}
+
 /// Stops sending the microphone. Returns 0 or WINDOWCAST_ERROR.
 ///
 /// # Safety

@@ -99,6 +99,14 @@ int64_t windowcast_session_send_microphone(const WindowcastSession *session, con
                                            size_t len);
 int64_t windowcast_session_stop_microphone(const WindowcastSession *session);
 
+/* This client's ceilings for a window's stream, 0 for no limit: kept for
+ * its next start and sent at once to a running one. The host adapts below
+ * them and reports what it sends as "stream_quality" events. Returns 0 or
+ * WINDOWCAST_ERROR. */
+int64_t windowcast_session_set_stream_limits(const WindowcastSession *session, uint64_t window,
+                                             uint32_t max_bitrate_kbps, uint32_t max_fps,
+                                             uint32_t max_height);
+
 /* Next Opus packet (48 kHz, stereo, 20 ms) of a window's sound. Returns its
  * length, WINDOWCAST_TIMEOUT (quiet, or no audio yet), WINDOWCAST_ENDED when
  * the window's audio is over, or WINDOWCAST_BUFFER_TOO_SMALL (the packet is

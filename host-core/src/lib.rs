@@ -10,6 +10,7 @@
 
 pub mod audio;
 pub mod gamepad;
+pub mod quality;
 pub mod video;
 
 use std::collections::HashMap;
@@ -24,8 +25,8 @@ use tokio::sync::Mutex;
 use windowcast_identity::{Identity, PeerId, TrustStore};
 use windowcast_protocol::selection;
 use windowcast_protocol::{
-    BackendKind, ControlMessage, InputEvent, StreamBackend, StreamOptions, StreamTarget,
-    VideoCodec, WindowId, WindowInfo,
+    BackendKind, ControlMessage, InputEvent, StreamBackend, StreamLimits, StreamOptions,
+    StreamQuality, StreamTarget, VideoCodec, WindowId, WindowInfo,
 };
 use windowcast_transport::{
     accept, is_keyframe, AudioTrack, HostCredential, Session, TransportError, WindowTrack,
@@ -128,6 +129,16 @@ pub trait FrameSource: Send {
     fn describe(&self) -> String {
         String::new()
     }
+
+    /// The frame rate the host's settings give this stream.
+    fn frame_rate(&self) -> u32 {
+        30
+    }
+
+    /// Holds the encoder to `quality` from the next picture on (adaptive
+    /// quality, [`quality`]): below its own bitrate and frame rate, and
+    /// the picture scaled down. A source that cannot adapt ignores it.
+    fn set_quality(&mut self, _quality: quality::Quality) {}
 }
 
 pub struct HostConfig {
@@ -241,6 +252,8 @@ pub struct StreamStatus {
     pub keyframe_requests: u64,
     /// Opus packets sent; `None` when the stream has no audio.
     pub audio_packets: Option<u64>,
+    /// What adaptive quality holds the stream to, and the network it sees.
+    pub quality: StreamQuality,
     pub since: Instant,
 }
 
@@ -410,6 +423,54 @@ pub async fn serve_with(
 /// One stream being fed: dropping it stops its frame thread.
 struct Stream {
     stop: Arc<AtomicBool>,
+    /// The client's ceilings, which it may change while it watches.
+    limits: Arc<std::sync::Mutex<StreamLimits>>,
+}
+
+/// The session's round trip, from the host's own pings.
+#[derive(Default)]
+struct RoundTrip {
+    sent: std::sync::Mutex<Option<Instant>>,
+    last: std::sync::Mutex<Option<Duration>>,
+}
+
+impl RoundTrip {
+    fn answered(&self) {
+        if let Some(sent) = self.sent.lock().expect("ping").take() {
+            *self.last.lock().expect("round trip") = Some(sent.elapsed());
+        }
+    }
+
+    fn last(&self) -> Option<Duration> {
+        *self.last.lock().expect("round trip")
+    }
+}
+
+/// Pings the client once a second for [`RoundTrip`]. A ping still
+/// unanswered after a second is not resent: the round trip then reads as
+/// at least that long, which is what congestion looks like. A client that
+/// never answers (one from before hosts pinged) leaves it unknown.
+async fn ping(session: Arc<Session>, rtt: Arc<RoundTrip>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let sent = *rtt.sent.lock().expect("ping");
+        match sent {
+            Some(_) if rtt.last().is_none() => {}
+            Some(at) => {
+                let waited = at.elapsed();
+                let mut last = rtt.last.lock().expect("round trip");
+                if last.is_none_or(|l| l < waited) {
+                    *last = Some(waited);
+                }
+            }
+            None => {
+                *rtt.sent.lock().expect("ping") = Some(Instant::now());
+                if session.send_control(&ControlMessage::Ping).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 impl Drop for Stream {
@@ -484,6 +545,8 @@ impl Host {
             Arc::clone(&session),
             Arc::clone(&self.source),
         )));
+        let rtt = Arc::new(RoundTrip::default());
+        let _ping_task = AbortOnDrop(tokio::spawn(ping(Arc::clone(&session), Arc::clone(&rtt))));
         loop {
             match session.recv_control().await? {
                 ControlMessage::Input(event) => {
@@ -515,7 +578,7 @@ impl Host {
                     target: StreamTarget::Window(window),
                     options,
                 } => {
-                    let response = match self.start(&session, peer, window, &options).await {
+                    let response = match self.start(&session, peer, window, &options, &rtt).await {
                         Ok((stream, track, backend)) => {
                             streams.insert(window, stream);
                             ControlMessage::StreamStartResponse {
@@ -542,6 +605,12 @@ impl Host {
                     session.detach_window(window).await?;
                 }
                 ControlMessage::Ping => session.send_control(&ControlMessage::Pong).await?,
+                ControlMessage::Pong => rtt.answered(),
+                ControlMessage::StreamLimits { window, limits } => {
+                    if let Some(stream) = streams.get(&window) {
+                        *stream.limits.lock().expect("limits") = limits;
+                    }
+                }
                 other => tracing::debug!("ignoring {other:?}"),
             }
         }
@@ -603,6 +672,7 @@ impl Host {
         peer: PeerId,
         window: WindowId,
         options: &StreamOptions,
+        rtt: &Arc<RoundTrip>,
     ) -> Result<(Stream, WindowTrack, StreamBackend), String> {
         // Of the backends the client may ask for, the session-track ones
         // are served here; one this host does not offer falls back to
@@ -649,20 +719,26 @@ impl Host {
                 bytes: 0,
                 keyframe_requests: 0,
                 audio_packets: None,
+                quality: StreamQuality::default(),
                 since: Instant::now(),
             },
         );
         let stop = Arc::new(AtomicBool::new(false));
+        let limits = Arc::new(std::sync::Mutex::new(options.limits));
         feed(
             Arc::clone(session),
             track.clone(),
             frames,
+            Feedback {
+                rtt: Arc::clone(rtt),
+                limits: Arc::clone(&limits),
+            },
             Arc::clone(&stop),
             Arc::clone(&self.control),
             serial,
         );
         self.start_audio(session, window, &stop, serial).await;
-        Ok((Stream { stop }, track, backend))
+        Ok((Stream { stop, limits }, track, backend))
     }
 
     /// Streams the window's sound beside its picture, if the agent captures
@@ -775,13 +851,136 @@ fn refusal(target: StreamTarget, reason: String) -> ControlMessage {
     }
 }
 
+/// What adaptive quality steers a stream by, besides its track's receiver
+/// reports.
+struct Feedback {
+    rtt: Arc<RoundTrip>,
+    limits: Arc<std::sync::Mutex<StreamLimits>>,
+}
+
+/// A stream's adaptive quality, run from its frame thread about once a
+/// second: what went out since the last round, the client's loss and the
+/// round trip in; the encoder's quality, the status and (when it changed,
+/// or every few seconds) a report to the client out.
+struct Adapting {
+    controller: quality::Controller,
+    feedback: Feedback,
+    since: Instant,
+    bytes: u64,
+    applied: quality::Quality,
+    /// The window's own size: the last announced size over the scale it
+    /// was made at.
+    window: (u32, u32),
+    last_report: Option<Instant>,
+    reported: StreamQuality,
+    last_loss_at: Option<Instant>,
+    loss: f32,
+}
+
+/// How often the client hears the quality even when nothing changed.
+const QUALITY_REPORT_EVERY: Duration = Duration::from_secs(5);
+
+impl Adapting {
+    fn new(feedback: Feedback) -> Self {
+        let limits = *feedback.limits.lock().expect("limits");
+        Adapting {
+            controller: quality::Controller::new(limits),
+            feedback,
+            since: Instant::now(),
+            bytes: 0,
+            applied: quality::Quality::default(),
+            window: (0, 0),
+            last_report: None,
+            reported: StreamQuality::default(),
+            last_loss_at: None,
+            loss: 0.0,
+        }
+    }
+
+    fn resized(&mut self, (width, height): (u32, u32)) {
+        let scale = self.applied.scale;
+        self.window = (
+            (width as f32 / scale).round() as u32,
+            (height as f32 / scale).round() as u32,
+        );
+    }
+
+    /// Counts a frame; once a second, decides. Returns a report for the
+    /// client when one is due.
+    fn sent(
+        &mut self,
+        bytes: usize,
+        track: &WindowTrack,
+        frames: &mut dyn FrameSource,
+    ) -> Option<StreamQuality> {
+        self.bytes += bytes as u64;
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.since);
+        if elapsed < Duration::from_secs(1) {
+            return None;
+        }
+        let sent_bps = (self.bytes as f64 * 8.0 / elapsed.as_secs_f64()) as u32;
+        self.since = now;
+        self.bytes = 0;
+        // Only a report newer than the last one counts.
+        let reception = track
+            .reception()
+            .filter(|r| self.last_loss_at.is_none_or(|at| r.at > at));
+        if let Some(reception) = reception {
+            self.last_loss_at = Some(reception.at);
+            self.loss = reception.loss;
+        }
+        let limits = *self.feedback.limits.lock().expect("limits");
+        self.controller.set_limits(limits);
+        let host_fps = frames.frame_rate();
+        let rtt = self.feedback.rtt.last();
+        let quality = self.controller.observe(
+            now,
+            quality::Observation {
+                sent_bps,
+                window: self.window,
+                host_fps,
+                loss: reception.map(|r| r.loss),
+                rtt,
+            },
+        );
+        if quality != self.applied {
+            frames.set_quality(quality);
+            self.applied = quality;
+        }
+        let scale = quality.scale;
+        let report = StreamQuality {
+            target_kbps: quality.bitrate.map(|b| b / 1000),
+            sent_kbps: sent_bps / 1000,
+            fps: quality.fps.unwrap_or(host_fps),
+            width: (self.window.0 as f32 * scale) as u32 & !1,
+            height: (self.window.1 as f32 * scale) as u32 & !1,
+            loss_percent: self.loss * 100.0,
+            rtt_ms: rtt.map(|r| r.as_millis() as u32),
+        };
+        let changed = report.target_kbps != self.reported.target_kbps
+            || report.fps != self.reported.fps
+            || report.height != self.reported.height;
+        let due = self
+            .last_report
+            .is_none_or(|at| now.duration_since(at) >= QUALITY_REPORT_EVERY);
+        self.reported = report;
+        (changed || due).then(|| {
+            self.last_report = Some(now);
+            report
+        })
+    }
+}
+
 /// Moves frames from the encoder thread onto the track until the stream is
 /// stopped, the window closes, or the session ends. Keyframe requests from
-/// the client reach the encoder through `want_keyframe`.
+/// the client reach the encoder through `want_keyframe`; adaptive quality
+/// ([`Adapting`]) steers it from the same thread.
 fn feed(
     session: Arc<Session>,
     track: WindowTrack,
     mut frames: Box<dyn FrameSource>,
+    feedback: Feedback,
     stop: Arc<AtomicBool>,
     control: Arc<HostControl>,
     serial: u64,
@@ -802,6 +1001,7 @@ fn feed(
 
     let runtime = tokio::runtime::Handle::current();
     std::thread::spawn(move || {
+        let mut adapting = Adapting::new(feedback);
         while !stop.load(Ordering::SeqCst) {
             let keyframe = want_keyframe.swap(false, Ordering::SeqCst);
             let Some(frame) = frames.next_frame(keyframe) else {
@@ -811,6 +1011,7 @@ fn feed(
                 break;
             }
             if let Some((width, height)) = frame.size {
+                adapting.resized((width, height));
                 let resized = ControlMessage::WindowResized {
                     window: track.window(),
                     width,
@@ -834,6 +1035,14 @@ fn feed(
                 runtime.block_on(track.write_frame(Bytes::from(frame.data), frame.duration));
             if written.is_err() {
                 break;
+            }
+            if let Some(quality) = adapting.sent(bytes as usize, &track, frames.as_mut()) {
+                control.update_stream(serial, |status| status.quality = quality);
+                let report = ControlMessage::StreamQuality {
+                    window: track.window(),
+                    quality,
+                };
+                let _ = runtime.block_on(session.send_control(&report));
             }
         }
         watcher.abort();

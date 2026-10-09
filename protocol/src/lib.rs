@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped on any incompatible change to the message shapes below. A peer
 /// that receives a mismatched version should refuse the session rather
 /// than guess at how to interpret an unknown wire format.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
@@ -279,6 +279,39 @@ pub struct StreamOptions {
     pub backend: BackendKind,
     /// Codecs the client decodes, most preferred first.
     pub codecs: Vec<VideoCodec>,
+    /// The client's own ceilings for this stream; the host adapts below
+    /// them (and below its own settings) to what the network carries.
+    pub limits: StreamLimits,
+}
+
+/// A client's ceilings for one stream, each `None` for "no limit of mine".
+/// The host never goes above them, and goes below them when the network
+/// cannot carry them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamLimits {
+    /// Kilobits a second.
+    pub max_bitrate_kbps: Option<u32>,
+    pub max_fps: Option<u32>,
+    /// Picture height; the width follows at the window's shape.
+    pub max_height: Option<u32>,
+}
+
+/// What a stream is being sent at now, and the network it is sent over,
+/// as the host sees it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct StreamQuality {
+    /// The rate the host holds the encoder to, kilobits a second; `None`
+    /// while only the settings and limits hold it (nothing to adapt to).
+    pub target_kbps: Option<u32>,
+    /// What actually went out over the last second or so.
+    pub sent_kbps: u32,
+    pub fps: u32,
+    pub width: u32,
+    pub height: u32,
+    /// Packets the client lost, percent, from its receiver reports.
+    pub loss_percent: f32,
+    /// Round trip over the session, milliseconds.
+    pub rtt_ms: Option<u32>,
 }
 
 /// Control-channel request/response traffic, independent of the actual
@@ -322,8 +355,21 @@ pub enum ControlMessage {
     /// clipboard changes.
     Clipboard(String),
 
+    /// Either side may ping; the other answers at once.
     Ping,
     Pong,
+
+    /// The client changes its ceilings for a stream it watches.
+    StreamLimits {
+        window: WindowId,
+        limits: StreamLimits,
+    },
+    /// The host reports a stream's quality when it changes and every few
+    /// seconds.
+    StreamQuality {
+        window: WindowId,
+        quality: StreamQuality,
+    },
 
     /// SDP renegotiation once the session is up (a window track attached or
     /// detached). It rides the control channel, which is already inside the

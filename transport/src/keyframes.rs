@@ -1,10 +1,13 @@
-//! Lets keyframe requests reach the host's window tracks.
+//! Lets keyframe requests and receiver reports reach the host's window
+//! tracks.
 //!
 //! webrtc's interceptors consume inbound RTCP; a packet only reaches a
 //! track's event stream when an interceptor marks it for the application.
 //! This one marks picture-loss and full-intra requests (what an encoder
-//! needs to know about) and drops every other RTCP packet from the
-//! application path after the default interceptors have acted on it.
+//! needs to know about) and receiver reports (the client's packet loss,
+//! which adaptive quality steers by), and drops every other RTCP packet
+//! from the application path after the default interceptors have acted on
+//! it.
 //! Adapted from the `rtcp-processing` example in webrtc-rs (MIT/Apache-2.0).
 
 use std::collections::VecDeque;
@@ -15,6 +18,7 @@ use rtc::peer_connection::configuration::interceptor_registry::register_default_
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+use rtc::rtcp::receiver_report::ReceiverReport;
 use rtc::sansio::Protocol;
 use rtc::shared::error::{Error, Result};
 
@@ -31,6 +35,21 @@ pub(crate) fn interceptor_registry(media_engine: &mut MediaEngine) -> Result<Reg
 pub(crate) fn is_keyframe_request(packet: &dyn rtc::rtcp::Packet) -> bool {
     let any = packet.as_any();
     any.is::<PictureLossIndication>() || any.is::<FullIntraRequest>()
+}
+
+/// The loss a client reports for `ssrc`, as a fraction, if `packet` is a
+/// receiver report that covers it.
+pub(crate) fn reported_loss(packet: &dyn rtc::rtcp::Packet, ssrc: u32) -> Option<f32> {
+    let report = packet.as_any().downcast_ref::<ReceiverReport>()?;
+    report
+        .reports
+        .iter()
+        .find(|r| r.ssrc == ssrc)
+        .map(|r| f32::from(r.fraction_lost) / 256.0)
+}
+
+fn for_application(packet: &dyn rtc::rtcp::Packet) -> bool {
+    is_keyframe_request(packet) || packet.as_any().is::<ReceiverReport>()
 }
 
 #[derive(Default)]
@@ -50,7 +69,7 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for KeyframeRequests {
         if let Packet::Rtcp(packets) = &msg.message.packet {
             let requests: Vec<Box<dyn rtc::rtcp::Packet>> = packets
                 .iter()
-                .filter(|packet| is_keyframe_request(packet.as_ref()))
+                .filter(|packet| for_application(packet.as_ref()))
                 .cloned()
                 .collect();
             if requests.is_empty() {

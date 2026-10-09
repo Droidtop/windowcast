@@ -25,8 +25,8 @@ use tokio::runtime::Runtime;
 use windowcast_identity::{Identity, TrustStore};
 use windowcast_protocol::selection::{self, BackendRule};
 use windowcast_protocol::{
-    BackendKind, ControlMessage, InputEvent, StreamOptions, StreamTarget, VideoCodec, WindowId,
-    WindowInfo,
+    BackendKind, ControlMessage, InputEvent, StreamLimits, StreamOptions, StreamQuality,
+    StreamTarget, VideoCodec, WindowId, WindowInfo,
 };
 use windowcast_transport::{
     connect, AudioPacket, AudioTrack, ClientCredential, RemoteAudio, RemoteTrack, RemoteWindow,
@@ -165,6 +165,12 @@ pub enum Event {
     Clipboard {
         text: String,
     },
+    /// What a stream is sent at now and the network the host sees: on
+    /// every change and every few seconds.
+    StreamQuality {
+        window: u64,
+        quality: StreamQuality,
+    },
     Closed,
 }
 
@@ -218,6 +224,8 @@ struct Shared {
     audio: Mutex<HashMap<WindowId, Arc<Mutex<Receiver<AudioPacket>>>>>,
     /// When the unanswered ping went out, and the last round trip.
     ping: Mutex<(Option<Instant>, Option<Duration>)>,
+    /// The ceilings this client set per window, sent with each start.
+    limits: Mutex<HashMap<WindowId, StreamLimits>>,
 }
 
 impl Shared {
@@ -292,6 +300,7 @@ impl ClientSession {
             slots: Mutex::new(HashMap::new()),
             audio: Mutex::new(HashMap::new()),
             ping: Mutex::new((None, None)),
+            limits: Mutex::default(),
         });
         let windows = Arc::new(Mutex::new(Vec::new()));
 
@@ -350,13 +359,39 @@ impl ClientSession {
                     selection::choose_backend(info, &rules)
                 })
         };
+        let limits = self
+            .shared
+            .limits
+            .lock()
+            .expect("limits")
+            .get(&window)
+            .copied()
+            .unwrap_or_default();
         self.send(ControlMessage::StreamStartRequest {
             target: StreamTarget::Window(window),
             options: StreamOptions {
                 backend,
                 codecs: codecs.to_vec(),
+                limits,
             },
         })
+    }
+
+    /// Sets this client's ceilings for a window's stream: kept for its
+    /// next start, and sent at once to a stream already running (the host
+    /// ignores it for a window it is not streaming). The host adapts below
+    /// them to what the network carries.
+    pub fn set_stream_limits(
+        &self,
+        window: WindowId,
+        limits: StreamLimits,
+    ) -> Result<(), ClientError> {
+        self.shared
+            .limits
+            .lock()
+            .expect("limits")
+            .insert(window, limits);
+        self.send(ControlMessage::StreamLimits { window, limits })
     }
 
     /// Sends input to the host. Pointer and touch events go to the window
@@ -593,6 +628,18 @@ async fn pump_events(
                 }
                 continue;
             }
+            // The host measures the round trip for adaptive quality.
+            ControlMessage::Ping => {
+                if session.send_control(&ControlMessage::Pong).await.is_err() {
+                    let _ = events.send(Event::Closed);
+                    return;
+                }
+                continue;
+            }
+            ControlMessage::StreamQuality { window, quality } => Event::StreamQuality {
+                window: window.0,
+                quality,
+            },
             _ => continue,
         };
         if events.send(event).is_err() {

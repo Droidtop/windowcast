@@ -39,7 +39,7 @@ use webrtc::peer_connection::PeerConnection;
 use webrtc::rtp_transceiver::RtpSender;
 use windowcast_protocol::{VideoCodec, WindowId};
 
-use crate::keyframes::is_keyframe_request;
+use crate::keyframes::{is_keyframe_request, reported_loss};
 use crate::TransportError;
 
 const VIDEO_CLOCK_RATE: u32 = 90_000;
@@ -118,14 +118,25 @@ impl PendingTrack {
 
         // Keyframe requests from the client arrive as track events (see
         // `keyframes`); the encoder waits on `keyframe_requested`.
+        // So do the client's receiver reports, whose loss feeds `loss`.
         let keyframe_requests = Arc::new(Notify::new());
+        let (loss_tx, loss) = watch::channel(None);
         let track = Arc::clone(&self.track);
         let notify = Arc::clone(&keyframe_requests);
+        let ssrc = self.ssrc;
         tokio::spawn(async move {
             while let Some(event) = track.poll().await {
                 if let TrackLocalEvent::OnRtcpPacket(packets) = event {
                     if packets.iter().any(|p| is_keyframe_request(p.as_ref())) {
                         notify.notify_one();
+                    }
+                    if let Some(fraction) =
+                        packets.iter().find_map(|p| reported_loss(p.as_ref(), ssrc))
+                    {
+                        let _ = loss_tx.send(Some(Reception {
+                            loss: fraction,
+                            at: Instant::now(),
+                        }));
                     }
                 }
             }
@@ -139,6 +150,7 @@ impl PendingTrack {
             track: self.track,
             sender: self.sender,
             keyframe_requests,
+            loss,
         })
     }
 }
@@ -153,6 +165,16 @@ pub struct WindowTrack {
     track: Arc<TrackLocalStaticSample>,
     sender: Arc<dyn RtpSender>,
     keyframe_requests: Arc<Notify>,
+    loss: watch::Receiver<Option<Reception>>,
+}
+
+/// The client's latest receiver report for a window's track.
+#[derive(Debug, Clone, Copy)]
+pub struct Reception {
+    /// Fraction of packets lost since the report before (0 to 1).
+    pub loss: f32,
+    /// When the report arrived.
+    pub at: Instant,
 }
 
 impl WindowTrack {
@@ -231,6 +253,11 @@ impl WindowTrack {
     /// or just started decoding). The encoder should emit one next.
     pub async fn keyframe_requested(&self) {
         self.keyframe_requests.notified().await
+    }
+
+    /// The client's latest receiver report, `None` before the first.
+    pub fn reception(&self) -> Option<Reception> {
+        *self.loss.borrow()
     }
 }
 

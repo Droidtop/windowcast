@@ -49,6 +49,14 @@ jobs:
           cargo test -p windowcast-transport --test loopback --no-run --message-format=json             | jq -r 'select(.profile.test == true and .target.name == "loopback") | .executable'             > loopback-test-path
           sudo unshare -n sh -c "ip link set lo up && $(cat loopback-test-path)"
 
+      # Adaptive quality over a real bottleneck: tc netem shapes lo in a
+      # namespace of the test's own (cli-tools/tests/adaptive.rs).
+      - name: Adaptive quality under netem
+        run: |
+          sudo modprobe sch_netem || { sudo apt-get install -y "linux-modules-extra-$(uname -r)" && sudo modprobe sch_netem; }
+          cargo test -p windowcast-cli-tools --test adaptive --no-run --message-format=json             | jq -r 'select(.profile.test == true and .target.name == "adaptive") | .executable'             > adaptive-test-path
+          sudo unshare -n sh -c "ip link set lo up && WINDOWCAST_TEST_NETEM=1 $(cat adaptive-test-path) --nocapture"
+
       # Virtual gamepads through uinput, read back from /dev/input. Root for
       # the device nodes; the module may live in the kernel's extra modules.
       - name: Gamepads through uinput

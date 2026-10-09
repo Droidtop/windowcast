@@ -47,7 +47,7 @@ use webrtc::peer_connection::{
 use windowcast_protocol::{ControlMessage, SdpKind, StreamTarget, VideoCodec, WindowId};
 
 pub use audio::{AudioPacket, AudioTrack, RemoteAudio};
-pub use media::{is_keyframe, RemoteWindow, WindowFrame, WindowTrack};
+pub use media::{is_keyframe, Reception, RemoteWindow, WindowFrame, WindowTrack};
 pub use signaling::{accept, connect, ClientCredential, Established, HostCredential};
 
 /// Label of the control data channel. Pre-negotiated with this id on both
