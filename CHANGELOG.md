@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Windows hosts convert each captured picture to the encoder's colour format on the graphics card and read back only that, instead of converting on the processor: about 8 ms less work per 1440p frame (NVENC H.265 at 60 fps: 30 to 37 frames a second on the owner's PC).
+
+### Added
+- `windowcast-client --codec h264|h265|av1` asks for a codec other than H.264 (only H.264 frames are decoded to check them).
+
+### Fixed
+- `windowcast-app --no-window` exits when the host cannot start instead of running with nothing to do.
+
 ## [0.7.0] - 2026-10-09
 
 ### Added

@@ -17,7 +17,7 @@ use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Variant::VARIANT;
 
-use crate::convert::{self, Bgra};
+use crate::convert::{self, Picture};
 
 /// Which encoder to use; an agent option (`--encoder`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +106,7 @@ pub trait Encoder {
     /// an encoder holds on to a picture, more than one when it catches up.
     fn encode(
         &mut self,
-        picture: &Bgra<'_>,
+        picture: &Picture<'_>,
         keyframe: bool,
         time: Duration,
     ) -> Result<Vec<Vec<u8>>, String>;
@@ -580,11 +580,11 @@ impl MfEncoder {
 impl Encoder for MfEncoder {
     fn encode(
         &mut self,
-        picture: &Bgra<'_>,
+        picture: &Picture<'_>,
         keyframe: bool,
         time: Duration,
     ) -> Result<Vec<Vec<u8>>, String> {
-        convert::to_nv12(picture, &mut self.nv12);
+        picture.to_nv12(&mut self.nv12);
         if keyframe {
             if let Some(api) = &self.codec_api {
                 let _ = unsafe {
@@ -648,12 +648,12 @@ impl OpenH264Encoder {
 impl Encoder for OpenH264Encoder {
     fn encode(
         &mut self,
-        picture: &Bgra<'_>,
+        picture: &Picture<'_>,
         keyframe: bool,
         _time: Duration,
     ) -> Result<Vec<Vec<u8>>, String> {
-        convert::to_i420(picture, &mut self.i420);
-        let (w, h) = convert::even(picture.width, picture.height);
+        picture.to_i420(&mut self.i420);
+        let (w, h) = convert::even(picture.width(), picture.height());
         let yuv = openh264::formats::YUVBuffer::from_vec(std::mem::take(&mut self.i420), w, h);
         if keyframe {
             self.encoder.force_intra_frame();

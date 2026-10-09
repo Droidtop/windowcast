@@ -101,6 +101,7 @@ impl WindowsSource {
             pending: Default::default(),
             announce: None,
             encoder_name: String::new(),
+            timings: std::env::var_os("WINDOWCAST_TIMINGS").map(|_| Timings::new()),
         }
     }
 }
@@ -191,6 +192,45 @@ struct WindowStream {
     /// The picture size to announce with the next frame sent.
     announce: Option<(u32, u32)>,
     encoder_name: String,
+    /// Per-stage timings, printed every few seconds when the environment
+    /// sets WINDOWCAST_TIMINGS (for measuring the capture pipeline).
+    timings: Option<Timings>,
+}
+
+struct Timings {
+    since: Instant,
+    frames: u32,
+    readback: Duration,
+    encode: Duration,
+}
+
+impl Timings {
+    fn add(&mut self, window: WindowId, readback: Duration, encode: Duration) {
+        self.frames += 1;
+        self.readback += readback;
+        self.encode += encode;
+        let elapsed = self.since.elapsed();
+        if elapsed >= Duration::from_secs(5) {
+            let per = |total: Duration| total.as_secs_f64() * 1000.0 / f64::from(self.frames);
+            println!(
+                "window {}: {:.1} fps; capture and read back {:.2} ms, convert and encode {:.2} ms a frame",
+                window.0,
+                f64::from(self.frames) / elapsed.as_secs_f64(),
+                per(self.readback),
+                per(self.encode)
+            );
+            *self = Timings::new();
+        }
+    }
+
+    fn new() -> Self {
+        Timings {
+            since: Instant::now(),
+            frames: 0,
+            readback: Duration::ZERO,
+            encode: Duration::ZERO,
+        }
+    }
 }
 
 impl WindowStream {
@@ -295,7 +335,7 @@ impl FrameSource for WindowStream {
             if !(changed || keyframe || self.last_sent.elapsed() >= REFRESH) {
                 continue;
             }
-            let size = convert::even(picture.width, picture.height);
+            let size = convert::even(picture.width(), picture.height());
             if size != state.size || generation != self.generation {
                 let settings = settings(&options, self.codec, size.0, size.1);
                 // A live change to an encoder that cannot make this
@@ -329,7 +369,12 @@ impl FrameSource for WindowStream {
             }
             self.next_at = Instant::now() + frame_time;
             let time = frame_time * self.frames as u32;
-            match state.encoder.encode(&picture, keyframe, time) {
+            let started = Instant::now();
+            let encoded = state.encoder.encode(&picture, keyframe, time);
+            if let Some(timings) = &mut self.timings {
+                timings.add(self.window, state.capture.readback, started.elapsed());
+            }
+            match encoded {
                 Ok(units) => {
                     self.frames += 1;
                     self.pending.extend(units);
@@ -352,7 +397,7 @@ struct NoEncoder;
 impl Encoder for NoEncoder {
     fn encode(
         &mut self,
-        _: &convert::Bgra<'_>,
+        _: &convert::Picture<'_>,
         _: bool,
         _: Duration,
     ) -> Result<Vec<Vec<u8>>, String> {

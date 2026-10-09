@@ -2,7 +2,10 @@
 //! DWM surface, whatever covers it, read back as BGRA. A free-threaded
 //! frame pool is polled from the stream's thread; nothing needs a message
 //! loop. The desktop backend captures the whole screen a window is on and
-//! cuts the window's bounds out of each picture instead.
+//! cuts the window's bounds out of each picture instead. Each picture is
+//! converted to NV12 on the GPU and only that is read back
+//! (gpu_convert.rs); a device without a video processor reads back BGRA
+//! for the processor to convert.
 
 use std::time::{Duration, Instant};
 
@@ -19,8 +22,9 @@ use windows::Win32::Graphics::Direct3D::{
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
@@ -33,7 +37,8 @@ use windows::Win32::System::WinRT::Direct3D11::{
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
-use crate::convert::Bgra;
+use crate::convert::{Bgra, Nv12, Picture};
+use crate::gpu_convert::Converter;
 
 const PIXEL_FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 const BUFFERS: i32 = 2;
@@ -63,10 +68,19 @@ pub struct Capture {
     height: usize,
     /// For a whole-screen capture: the window to cut out, and its screen.
     cut: Option<(HWND, HMONITOR)>,
+    /// How long the last picture took to reach the processor.
+    pub readback: Duration,
+    /// GPU colour conversion; `None` on a device without a video processor
+    /// or after it failed once.
+    converter: Option<Converter>,
+    /// The last picture in NV12 and its size, when the GPU converted it.
+    nv12: Vec<u8>,
+    nv12_size: Option<(usize, usize)>,
 }
 
 fn create_device(
     driver: D3D_DRIVER_TYPE,
+    flags: D3D11_CREATE_DEVICE_FLAG,
 ) -> windows::core::Result<(ID3D11Device, ID3D11DeviceContext)> {
     let mut device = None;
     let mut context = None;
@@ -75,7 +89,7 @@ fn create_device(
             None,
             driver,
             HMODULE::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            flags,
             None,
             D3D11_SDK_VERSION,
             Some(&mut device),
@@ -110,9 +124,13 @@ impl Capture {
         item: GraphicsCaptureItem,
         cut: Option<(HWND, HMONITOR)>,
     ) -> windows::core::Result<Self> {
-        // A GPU when there is one; WARP (software) otherwise, e.g. a VM.
-        let (device, context) = create_device(D3D_DRIVER_TYPE_HARDWARE)
-            .or_else(|_| create_device(D3D_DRIVER_TYPE_WARP))?;
+        // A GPU with its video processor when there is one; WARP
+        // (software) otherwise, e.g. a VM.
+        let video = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+        let (device, context) = create_device(D3D_DRIVER_TYPE_HARDWARE, video)
+            .or_else(|_| create_device(D3D_DRIVER_TYPE_HARDWARE, D3D11_CREATE_DEVICE_BGRA_SUPPORT))
+            .or_else(|_| create_device(D3D_DRIVER_TYPE_WARP, D3D11_CREATE_DEVICE_BGRA_SUPPORT))?;
+        let converter = Converter::new(&device, &context).ok();
         let dxgi: IDXGIDevice = device.cast()?;
         let winrt_device: IDirect3DDevice =
             unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi)? }.cast()?;
@@ -141,6 +159,10 @@ impl Capture {
             width: 0,
             height: 0,
             cut,
+            readback: Duration::ZERO,
+            converter,
+            nv12: Vec::new(),
+            nv12_size: None,
         })
     }
 
@@ -161,11 +183,15 @@ impl Capture {
                 }
                 let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
                 let texture: ID3D11Texture2D = unsafe { access.GetInterface()? };
-                self.read_back(
-                    &texture,
-                    size.Width.max(0) as usize,
-                    size.Height.max(0) as usize,
-                )?;
+                let started = Instant::now();
+                let (width, height) = (size.Width.max(0) as usize, size.Height.max(0) as usize);
+                if self.convert(&texture, width, height) {
+                    self.readback = started.elapsed();
+                    return Ok(true);
+                }
+                let result = self.read_back(&texture, width, height);
+                self.readback = started.elapsed();
+                result?;
                 return Ok(true);
             }
             if Instant::now() >= deadline {
@@ -175,8 +201,44 @@ impl Capture {
         }
     }
 
+    /// Converts the picture (cut to the window for a whole-screen
+    /// capture) to NV12 on the GPU. False when there is no converter (any
+    /// more): the caller reads back BGRA instead.
+    fn convert(&mut self, texture: &ID3D11Texture2D, width: usize, height: usize) -> bool {
+        let Some(converter) = &mut self.converter else {
+            return false;
+        };
+        let rect = match self.cut {
+            None => Some((0, 0, width, height)),
+            Some((window, monitor)) => cut_rect(window, monitor, width, height),
+        };
+        let Some(rect) = rect.filter(|r| r.2 >= 2 && r.3 >= 2) else {
+            // The window is off its screen: keep the last picture.
+            return true;
+        };
+        match converter.convert(texture, rect, &mut self.nv12) {
+            Ok(size) => {
+                self.nv12_size = Some(size);
+                true
+            }
+            Err(e) => {
+                eprintln!("colour conversion on the GPU failed ({e}); converting on the processor");
+                self.converter = None;
+                self.nv12_size = None;
+                false
+            }
+        }
+    }
+
     /// The latest picture, if any arrived yet.
-    pub fn picture(&self) -> Option<Bgra<'_>> {
+    pub fn picture(&self) -> Option<Picture<'_>> {
+        if let Some((width, height)) = self.nv12_size {
+            return Some(Picture::Nv12(Nv12 {
+                data: &self.nv12,
+                width,
+                height,
+            }));
+        }
         if self.width < 2 || self.height < 2 {
             return None;
         }
@@ -184,12 +246,12 @@ impl Capture {
             None => (0, 0, self.width, self.height),
             Some((window, monitor)) => cut_rect(window, monitor, self.width, self.height)?,
         };
-        Some(Bgra {
+        Some(Picture::Bgra(Bgra {
             data: &self.pixels[(top * self.width + left) * 4..],
             width,
             height,
             stride: self.width * 4,
-        })
+        }))
     }
 
     fn read_back(

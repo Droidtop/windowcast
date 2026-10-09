@@ -1,7 +1,9 @@
-//! Captured BGRA pixels to the 4:2:0 layouts encoders take: NV12 (Media
-//! Foundation) and I420 (OpenH264). BT.601 limited range, the default a
-//! decoder assumes when the stream does not say. Odd edges are dropped:
-//! encoders need even dimensions.
+//! Captured pictures to the 4:2:0 layouts encoders take: NV12 (Media
+//! Foundation) and I420 (OpenH264). Capture normally hands over NV12
+//! already converted on the GPU (gpu_convert.rs); the BGRA conversion here
+//! is the fallback for devices without a video processor. BT.601 limited
+//! range, the default a decoder assumes when the stream does not say. Odd
+//! edges are dropped: encoders need even dimensions.
 
 /// A captured picture: 8-bit BGRA rows, `stride` bytes apart.
 pub struct Bgra<'a> {
@@ -9,6 +11,73 @@ pub struct Bgra<'a> {
     pub width: usize,
     pub height: usize,
     pub stride: usize,
+}
+
+/// A picture already in NV12 at even dimensions: the Y rows, then the
+/// interleaved UV rows, tightly packed.
+pub struct Nv12<'a> {
+    pub data: &'a [u8],
+    pub width: usize,
+    pub height: usize,
+}
+
+/// A captured picture, in whichever layout capture produced.
+pub enum Picture<'a> {
+    Bgra(Bgra<'a>),
+    Nv12(Nv12<'a>),
+}
+
+impl Picture<'_> {
+    pub fn width(&self) -> usize {
+        match self {
+            Picture::Bgra(p) => p.width,
+            Picture::Nv12(p) => p.width,
+        }
+    }
+
+    pub fn height(&self) -> usize {
+        match self {
+            Picture::Bgra(p) => p.height,
+            Picture::Nv12(p) => p.height,
+        }
+    }
+
+    /// NV12 at even dimensions, converting BGRA on the way.
+    pub fn to_nv12(&self, out: &mut Vec<u8>) {
+        match self {
+            Picture::Bgra(p) => to_nv12(p, out),
+            Picture::Nv12(p) => {
+                out.clear();
+                out.extend_from_slice(p.data);
+            }
+        }
+    }
+
+    /// I420 at even dimensions.
+    pub fn to_i420(&self, out: &mut Vec<u8>) {
+        match self {
+            Picture::Bgra(p) => to_i420(p, out),
+            Picture::Nv12(p) => nv12_to_i420(p, out),
+        }
+    }
+}
+
+/// Splits NV12's interleaved chroma into I420's two planes.
+pub fn nv12_to_i420(src: &Nv12<'_>, out: &mut Vec<u8>) {
+    let luma = src.width * src.height;
+    let quarter = luma / 4;
+    out.resize(luma + 2 * quarter, 0);
+    out[..luma].copy_from_slice(&src.data[..luma]);
+    let (u_plane, v_plane) = out[luma..].split_at_mut(quarter);
+    for (i, uv) in src.data[luma..luma + 2 * quarter]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .enumerate()
+    {
+        u_plane[i] = uv[0];
+        v_plane[i] = uv[1];
+    }
 }
 
 /// The even dimensions a picture is encoded at.
@@ -121,6 +190,22 @@ mod tests {
             &mut nv12,
         );
         assert_eq!(&nv12[..8], &[16; 8]);
+    }
+
+    #[test]
+    fn nv12_splits_into_i420_planes() {
+        // 4x2: eight luma samples, then two UV pairs.
+        let nv12 = [1, 2, 3, 4, 5, 6, 7, 8, 10, 20, 11, 21];
+        let mut i420 = Vec::new();
+        nv12_to_i420(
+            &Nv12 {
+                data: &nv12,
+                width: 4,
+                height: 2,
+            },
+            &mut i420,
+        );
+        assert_eq!(i420, [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 20, 21]);
     }
 
     #[test]

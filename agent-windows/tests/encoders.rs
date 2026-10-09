@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use windowcast_agent_windows::convert::Bgra;
+use windowcast_agent_windows::convert::{Bgra, Picture};
 use windowcast_agent_windows::encoder::{self, EncoderChoice, Settings};
 use windowcast_cli_tools::H264Check;
 use windowcast_protocol::VideoCodec;
@@ -93,12 +93,12 @@ fn every_encoder_on_this_machine_encodes_and_obeys_keyframe_requests() {
         let (mut units, mut openh264_refused) = (Vec::new(), Vec::new());
         for frame in 0..60 {
             let data = picture(frame);
-            let bgra = Bgra {
+            let bgra = Picture::Bgra(Bgra {
                 data: &data,
                 width: W,
                 height: H,
                 stride: W * 4,
-            };
+            });
             // A keyframe first, and one asked for at frame 30.
             let want_key = frame == 0 || frame == 30;
             let time = Duration::from_millis(33 * frame as u64);
