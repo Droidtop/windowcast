@@ -146,6 +146,9 @@ fn main() {
     }
 
     if args.no_window && client.is_none() {
+        if !matches!(host, Some(Ok(_))) {
+            std::process::exit(1);
+        }
         // A host without a window: serve until the process is ended.
         loop {
             std::thread::park();
