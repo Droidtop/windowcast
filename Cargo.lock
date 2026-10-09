@@ -2834,19 +2834,21 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windowcast-agent-linux"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror 1.0.69",
+ "tokio",
  "wayland-client",
  "wayland-protocols-wlr",
  "windowcast-identity",
  "windowcast-pairing",
  "windowcast-protocol",
+ "windowcast-transport",
 ]
 
 [[package]]
 name = "windowcast-apollo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quick-xml 0.36.2",
  "reqwest",
@@ -2858,18 +2860,17 @@ dependencies = [
 
 [[package]]
 name = "windowcast-cli-tools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tokio",
  "windowcast-identity",
- "windowcast-pairing",
  "windowcast-protocol",
  "windowcast-transport",
 ]
 
 [[package]]
 name = "windowcast-client-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tokio",
  "tracing",
@@ -2881,7 +2882,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-directory"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "ed25519-dalek",
@@ -2897,7 +2898,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-identity"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "rand_core 0.6.4",
@@ -2906,7 +2907,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-pairing"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hkdf",
  "hmac",
@@ -2919,7 +2920,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "serde",
@@ -2928,9 +2929,10 @@ dependencies = [
 
 [[package]]
 name = "windowcast-transport"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
+ "rand_core 0.6.4",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

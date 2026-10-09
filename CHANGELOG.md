@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-10-08
+
+### Added
+- Two devices now actually connect: the first time by the PIN the host shows, afterwards with the identities they pinned then. Each side's connection details are signed end to end, so whatever carries them (a LAN socket today) cannot swap them.
+- Per-window video: the host can start and stop sending any number of windows as separate video streams on one connection, and the client receives each as whole frames ready for a hardware decoder, asking the host for a fresh keyframe after a loss.
+- The Linux host agent now accepts clients over the network and answers their window-list requests, and the reference client pairs with it, reconnects to it and lists its windows.
+
+### Changed
+- The protocol version is now 2; version 1 peers are refused.
+
+### Security
+- A host stops accepting a PIN after three failed pairing attempts.
+
 ## [0.1.0] - 2026-09-28
 
 ### Added
