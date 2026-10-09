@@ -15,3 +15,6 @@ bytes = "1"
 # The software H.264 encoder every host can fall back to (BSD-2-Clause,
 # built from source).
 openh264 = "0.9"
+# Opus for window audio (BSD-3-Clause), libopus built from source.
+opus = "0.3"
+audiopus_sys = { version = "0.2", features = ["static"] }

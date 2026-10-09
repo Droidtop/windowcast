@@ -8,6 +8,7 @@
 //! steers a running host through [`HostControl`]: the PIN, the trusted
 //! clients, who is connected and what each stream is doing.
 
+pub mod audio;
 pub mod video;
 
 use std::collections::HashMap;
@@ -26,7 +27,7 @@ use windowcast_protocol::{
     VideoCodec, WindowId, WindowInfo,
 };
 use windowcast_transport::{
-    accept, is_keyframe, HostCredential, Session, TransportError, WindowTrack,
+    accept, is_keyframe, AudioTrack, HostCredential, Session, TransportError, WindowTrack,
 };
 
 /// The default signaling address.
@@ -78,6 +79,12 @@ pub trait WindowSource: Send + Sync + 'static {
         _codec: VideoCodec,
     ) -> Result<Box<dyn FrameSource>, String> {
         Err("this host does not capture whole screens".into())
+    }
+
+    /// The sound `window` makes (its application's), streamed beside its
+    /// picture. `None` when this host captures no window audio.
+    fn open_audio(&self, _window: WindowId) -> Option<Result<Box<dyn audio::AudioSource>, String>> {
+        None
     }
 
     /// Delivers one input event. `focus` is the session's input focus: the
@@ -218,6 +225,8 @@ pub struct StreamStatus {
     pub bytes: u64,
     /// Keyframes the client asked for (lost packets, a decoder behind).
     pub keyframe_requests: u64,
+    /// Opus packets sent; `None` when the stream has no audio.
+    pub audio_packets: Option<u64>,
     pub since: Instant,
 }
 
@@ -511,6 +520,7 @@ impl Host {
                 }
                 ControlMessage::StreamStopRequest(StreamTarget::Window(window)) => {
                     streams.remove(&window);
+                    session.detach_audio(window).await?;
                     session.detach_window(window).await?;
                 }
                 ControlMessage::Ping => session.send_control(&ControlMessage::Pong).await?,
@@ -593,6 +603,7 @@ impl Host {
                 keyframes: 0,
                 bytes: 0,
                 keyframe_requests: 0,
+                audio_packets: None,
                 since: Instant::now(),
             },
         );
@@ -605,7 +616,48 @@ impl Host {
             Arc::clone(&self.control),
             serial,
         );
+        self.start_audio(session, window, &stop, serial).await;
         Ok((Stream { stop }, track, backend))
+    }
+
+    /// Streams the window's sound beside its picture, if the agent captures
+    /// it. Audio that cannot start leaves the picture streaming.
+    async fn start_audio(
+        &self,
+        session: &Arc<Session>,
+        window: WindowId,
+        stop: &Arc<AtomicBool>,
+        serial: u64,
+    ) {
+        let source = Arc::clone(&self.source);
+        let opened = tokio::task::spawn_blocking(move || source.open_audio(window))
+            .await
+            .ok()
+            .flatten();
+        let capture = match opened {
+            None => return,
+            Some(Err(e)) => {
+                eprintln!("window {}: no audio: {e}", window.0);
+                return;
+            }
+            Some(Ok(capture)) => capture,
+        };
+        let track = match session.attach_audio(window).await {
+            Ok(track) => track,
+            Err(e) => {
+                eprintln!("window {}: no audio: {e}", window.0);
+                return;
+            }
+        };
+        self.control
+            .update_stream(serial, |status| status.audio_packets = Some(0));
+        feed_audio(
+            track,
+            capture,
+            Arc::clone(stop),
+            Arc::clone(&self.control),
+            serial,
+        );
     }
 }
 
@@ -745,7 +797,54 @@ fn feed(
         // was already detached by the session loop.
         if !stop.load(Ordering::SeqCst) {
             let window = track.window();
+            let _ = runtime.block_on(session.detach_audio(window));
             let _ = runtime.block_on(session.detach_window(window));
+        }
+    });
+}
+
+/// Moves the window's sound from the agent's capture through Opus onto its
+/// audio track until the stream stops or the capture ends.
+fn feed_audio(
+    track: AudioTrack,
+    mut capture: Box<dyn audio::AudioSource>,
+    stop: Arc<AtomicBool>,
+    control: Arc<HostControl>,
+    serial: u64,
+) {
+    let runtime = tokio::runtime::Handle::current();
+    std::thread::spawn(move || {
+        let mut packets = match audio::OpusPackets::new() {
+            Ok(packets) => packets,
+            Err(e) => {
+                eprintln!("window {}: no Opus encoder: {e}", track.window().0);
+                return;
+            }
+        };
+        while !stop.load(Ordering::SeqCst) {
+            let Some(samples) = capture.next_samples() else {
+                break;
+            };
+            let encoded = match packets.push(&samples) {
+                Ok(encoded) => encoded,
+                Err(e) => {
+                    eprintln!("window {}: audio encoding failed: {e}", track.window().0);
+                    break;
+                }
+            };
+            let count = encoded.len() as u64;
+            for packet in encoded {
+                let written = runtime
+                    .block_on(track.write_packet(Bytes::from(packet), Duration::from_millis(20)));
+                if written.is_err() {
+                    return;
+                }
+            }
+            if count > 0 {
+                control.update_stream(serial, |status| {
+                    *status.audio_packets.get_or_insert(0) += count;
+                });
+            }
         }
     });
 }
