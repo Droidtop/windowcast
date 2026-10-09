@@ -54,3 +54,39 @@ jobs:
 
       - name: Format check
         run: cargo fmt --all -- --check
+
+  linux-sway:
+    # The Linux agent against a real compositor: a headless sway (Arch's,
+    # for ext-image-copy-capture and the toplevel capture source, which
+    # Ubuntu's sway 1.9 lacks) runs a test window that the agent captures,
+    # streams over loopback and types into.
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install system dependencies
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rust nasm sway wayland libxkbcommon xkeyboard-config
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Build the agent's tests
+        run: cargo test -p windowcast-agent-linux --no-run
+
+      - name: Capture and input under headless sway
+        shell: bash
+        run: |
+          trap 'echo "--- sway log"; cat /tmp/sway.log' EXIT
+          export XDG_RUNTIME_DIR=/tmp/xdg
+          mkdir -m 700 -p "$XDG_RUNTIME_DIR"
+          printf 'output HEADLESS-1 resolution 1280x720\n' > /tmp/sway.cfg
+          # Arch's sway carries a file capability (cap_sys_nice) the
+          # container may not grant, which fails exec; a plain copy has none.
+          cp "$(command -v sway)" /tmp/sway
+          WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
+            /tmp/sway -c /tmp/sway.cfg > /tmp/sway.log 2>&1 &
+          for i in $(seq 1 100); do ls "$XDG_RUNTIME_DIR"/sway-ipc.*.sock >/dev/null 2>&1 && break; sleep 0.1; done
+          export WAYLAND_DISPLAY=$(cd "$XDG_RUNTIME_DIR" && ls wayland-* | grep -v lock | head -1)
+          export SWAYSOCK=$(ls "$XDG_RUNTIME_DIR"/sway-ipc.*.sock | head -1)
+          WINDOWCAST_TEST_SWAY=1 cargo test -p windowcast-agent-linux -- --nocapture
