@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-09
+
+### Added
+- A Windows host agent (`windowcast-agent-windows`). It lists the windows you would see in Alt+Tab, captures any one of them on its own (even when other windows cover it), and encodes it on the graphics card with NVIDIA, AMD or Intel's encoder, in H.265 when the card offers it, or in software. Choose the encoder with `--encoder` and see what the machine has with `--list-encoders`.
+
 ## [0.4.0] - 2026-10-09
 
 ### Added

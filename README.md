@@ -41,10 +41,13 @@ with no network. Loopback tests run all of it between two real WebRTC
 stacks. Real H.264 video streams end to end: the test-pattern host
 (`windowcast-testhost`, OpenH264) to any client through `client-core`,
 and the Android library decodes it with MediaCodec (not yet run on a
-device). What's **not** done yet: capturing real windows (the Linux agent
-lists windows but cannot capture them — see `agent-linux/src/capture.rs`;
-there is no Windows or macOS agent), input, audio, and every backend
-except the native one (their seam is in place: see docs/BACKENDS.md).
+device). Real windows stream from Windows: the Windows agent captures a
+window with Windows.Graphics.Capture and encodes it on the GPU (NVIDIA,
+AMD or Intel through Media Foundation, H.264 or H.265) or in software.
+What's **not** done yet: capturing on Linux (the Linux agent lists
+windows but cannot capture them — see `agent-linux/src/capture.rs`) and
+macOS, input, audio, and every backend except the native one (their seam
+is in place: see docs/BACKENDS.md).
 
 | Crate | Status |
 |---|---|
@@ -58,7 +61,7 @@ except the native one (their seam is in place: see docs/BACKENDS.md).
 | `client-core` | Real, tested: the client surface, a Rust API and the C interface `include/windowcast.h` (connect/pair/resume, window list, streams, events as JSON, whole frames per window) |
 | `android/` | The Android library (JNI over the C interface, MediaCodec decoding onto a Surface) and a viewer app; built by CI for arm64-v8a and x86_64; not yet run on a device |
 | `agent-linux` | Thin over `host-core`: window lists from a real compositor (`zwlr_foreign_toplevel_manager_v1`); capture is an explicit refusal (needs `ext-image-copy-capture-v1`, not vendored yet) |
-| `agent-windows` | Not started |
+| `agent-windows` | Real, tested: the desktop's windows, per-window capture (Windows.Graphics.Capture), BGRA to NV12/I420, encoders behind one interface chosen with `--encoder` (Media Foundation hardware, i.e. the GPU vendor's NVENC/AMF/Quick Sync MFT, with H.265 where offered; Microsoft's software H.264 MFT; OpenH264). CI captures a real window, encodes it with each encoder, streams it over loopback and decodes it |
 | `agent-macos` | Not started |
 | GameStream, RDP, VNC, passthrough, whole-desktop backends | Not started; the seam is in `protocol` (`StreamBackend`, `selection`). Each is our own implementation of its protocol; GameStream pairing follows the real protocol's salted-PIN AES challenge/response, read from reference sources, not guessed at |
 | `cli-tools` | `windowcast-client` (pairs or resumes, lists windows, `--watch` streams one and decodes it) and `windowcast-testhost` (a host whose one window is an OpenH264 test pattern, Windows included) |
