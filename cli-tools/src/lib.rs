@@ -26,6 +26,8 @@ pub struct H264Check {
     decoder: openh264::decoder::Decoder,
     pub pictures: usize,
     pub dimensions: Option<(usize, usize)>,
+    /// Y, U and V of the last picture's centre pixel.
+    pub center: Option<(u8, u8, u8)>,
 }
 
 impl H264Check {
@@ -34,6 +36,7 @@ impl H264Check {
             decoder: openh264::decoder::Decoder::new()?,
             pictures: 0,
             dimensions: None,
+            center: None,
         })
     }
 
@@ -42,7 +45,15 @@ impl H264Check {
         use openh264::formats::YUVSource;
         if let Some(picture) = self.decoder.decode(frame)? {
             self.pictures += 1;
-            self.dimensions = Some(picture.dimensions());
+            let (w, h) = picture.dimensions();
+            let (y_stride, u_stride, v_stride) = picture.strides();
+            let (x, y) = (w / 2, h / 2);
+            self.center = Some((
+                picture.y()[y * y_stride + x],
+                picture.u()[(y / 2) * u_stride + x / 2],
+                picture.v()[(y / 2) * v_stride + x / 2],
+            ));
+            self.dimensions = Some((w, h));
         }
         Ok(())
     }
