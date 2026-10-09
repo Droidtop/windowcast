@@ -18,6 +18,8 @@ import java.nio.ByteOrder
 class AudioPlayer(
     private val session: WindowcastSession,
     private val window: Long,
+    /** Called on the audio thread every 50 packets (one second) played. */
+    private val onProgress: (packets: Long) -> Unit = {},
 ) {
     @Volatile private var running = true
     @Volatile var muted = false
@@ -36,6 +38,7 @@ class AudioPlayer(
         var codec: MediaCodec? = null
         var track: AudioTrack? = null
         val output = MediaCodec.BufferInfo()
+        var packets = 0L
         try {
             while (running) {
                 val len = Native.nextAudio(session.handle, window, 100, buffer, info)
@@ -79,6 +82,11 @@ class AudioPlayer(
                         input.put(packet)
                         codec.queueInputBuffer(index, 0, packet.size, rtpMicros, 0)
                     }
+                }
+                packets++
+                if (packets % 50 == 0L) {
+                    Log.i(TAG, "window $window: $packets Opus packets played")
+                    onProgress(packets)
                 }
                 while (true) {
                     val out = codec.dequeueOutputBuffer(output, 0)

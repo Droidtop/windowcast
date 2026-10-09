@@ -61,6 +61,7 @@ class MainActivity : Activity() {
     private var session: WindowcastSession? = null
     private var decoder: WindowDecoder? = null
     private var audio: AudioPlayer? = null
+    @Volatile private var soundPackets = 0L
     private var windows: List<WindowInfo> = emptyList()
     private var watching: WindowInfo? = null
     @Volatile private var listening = false
@@ -185,7 +186,7 @@ class MainActivity : Activity() {
         val begin = {
             decoder = WindowDecoder(s, event.window, surface.holder.surface, window.width, window.height) { stats ->
                 main.post {
-                    title = "${window.title}: ${stats.frames} frames (${stats.codec ?: event.codec})"
+                    title = "${window.title}: ${stats.frames} frames (${stats.codec ?: event.codec}), sound $soundPackets packets"
                     if (stats.ended) {
                         status.text = "Stream ended after ${stats.frames} frames" +
                             (stats.error?.let { ": $it" } ?: "")
@@ -193,7 +194,8 @@ class MainActivity : Activity() {
                     }
                 }
             }.also { it.start() }
-            audio = AudioPlayer(s, event.window).also { it.start() }
+            soundPackets = 0
+            audio = AudioPlayer(s, event.window) { packets -> soundPackets = packets }.also { it.start() }
         }
         if (surface.holder.surface?.isValid == true) {
             begin()
