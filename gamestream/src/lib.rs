@@ -15,9 +15,9 @@
 //! - [`input`]: the input packets a client sends on the control stream.
 //! - [`stream`]: a host's launched stream; [`windows`]: a windowcast host's
 //!   windows as the apps it offers.
-//!
-//! Not yet: sound in either direction.
+//! - [`audio`]: the sound packets.
 
+pub mod audio;
 pub mod client;
 pub mod control;
 pub mod crypto;

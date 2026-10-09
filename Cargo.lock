@@ -4543,6 +4543,7 @@ version = "0.17.0"
 dependencies = [
  "aes",
  "aes-gcm",
+ "opus",
  "rand_core 0.6.4",
  "rcgen 0.13.2",
  "rsa",

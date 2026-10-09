@@ -5,8 +5,6 @@
 pub const RATE: u32 = 48_000;
 /// Channels, interleaved.
 pub const CHANNELS: usize = 2;
-/// Samples (all channels) in one 20 ms packet.
-const PACKET_SAMPLES: usize = RATE as usize / 50 * CHANNELS;
 
 /// An agent's capture of one window's sound.
 pub trait AudioSource: Send {
@@ -23,15 +21,23 @@ pub trait MicrophoneSink: Send {
     fn play(&mut self, samples: &[i16]);
 }
 
-/// PCM in, 20 ms Opus packets out.
+/// PCM in, Opus packets out (20 ms each unless asked otherwise).
 pub struct OpusPackets {
     encoder: opus::Encoder,
     pending: Vec<i16>,
     out: Vec<u8>,
+    /// Samples (all channels) in one packet.
+    packet_samples: usize,
 }
 
 impl OpusPackets {
     pub fn new() -> Result<Self, String> {
+        Self::with_duration(20)
+    }
+
+    /// Packets of `milliseconds` (2.5, 5, 10, 20, 40 or 60 ms are Opus's
+    /// sizes; GameStream clients ask for 5 or 10).
+    pub fn with_duration(milliseconds: u32) -> Result<Self, String> {
         let mut encoder =
             opus::Encoder::new(RATE, opus::Channels::Stereo, opus::Application::LowDelay)
                 .map_err(|e| e.to_string())?;
@@ -42,6 +48,7 @@ impl OpusPackets {
             encoder,
             pending: Vec::new(),
             out: vec![0; 4000],
+            packet_samples: (RATE / 1000 * milliseconds) as usize * CHANNELS,
         })
     }
 
@@ -49,13 +56,13 @@ impl OpusPackets {
     pub fn push(&mut self, samples: &[i16]) -> Result<Vec<Vec<u8>>, String> {
         self.pending.extend_from_slice(samples);
         let mut packets = Vec::new();
-        while self.pending.len() >= PACKET_SAMPLES {
+        while self.pending.len() >= self.packet_samples {
             let length = self
                 .encoder
-                .encode(&self.pending[..PACKET_SAMPLES], &mut self.out)
+                .encode(&self.pending[..self.packet_samples], &mut self.out)
                 .map_err(|e| e.to_string())?;
             packets.push(self.out[..length].to_vec());
-            self.pending.drain(..PACKET_SAMPLES);
+            self.pending.drain(..self.packet_samples);
         }
         Ok(packets)
     }

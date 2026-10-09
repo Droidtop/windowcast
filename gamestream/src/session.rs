@@ -45,6 +45,9 @@ impl Default for StreamRequest {
 /// A running stream: frames as they complete, and the end.
 pub struct Stream {
     pub frames: Receiver<Frame>,
+    /// The host's sound: stereo Opus packets at 48 kHz, decrypted, in the
+    /// order they came.
+    pub audio: Receiver<Vec<u8>>,
     stop: Arc<AtomicBool>,
     pub ended: Arc<AtomicBool>,
     control: control::ControlSender,
@@ -107,6 +110,7 @@ pub async fn start(
     host: IpAddr,
     session_url: &str,
     key: [u8; 16],
+    key_id: u32,
     request: &StreamRequest,
 ) -> Result<Stream, GameStreamError> {
     let address = rtsp_address(session_url, host)?;
@@ -145,9 +149,9 @@ pub async fn start(
         flag("x-ss-general.encryptionSupported"),
         flag("x-ss-general.encryptionRequested"),
     );
-    if requested & 0x06 != 0 {
+    if requested & 0x02 != 0 {
         return Err(GameStreamError::Rtsp(
-            "the host requires encrypted video or audio, which is not built here yet",
+            "the host requires encrypted video, which is not built here yet",
         ));
     }
     let encryption = supported & 0x01;
@@ -225,7 +229,9 @@ pub async fn start(
             "a=x-nv-vqos[0].videoQualityScoreUpdateTime:5000\r\n",
             "a=x-nv-vqos[0].qosTrafficType:5\r\n",
             "a=x-nv-aqos.qosTrafficType:4\r\n",
-            "a=x-nv-general.featureFlags:135\r\n",
+            // Base features, encrypted input and encrypted audio (the
+            // bit Sunshine reads as the audio encryption a client wants).
+            "a=x-nv-general.featureFlags:167\r\n",
             "a=x-nv-general.useReliableUdp:13\r\n",
             "a=x-nv-vqos[0].fec.minRequiredFecPackets:2\r\n",
             "a=x-nv-vqos[0].bllFec.enable:0\r\n",
@@ -386,8 +392,30 @@ pub async fn start(
             }
         });
     }
+    // Sound.
+    let (audio_tx, audio_rx) = mpsc::sync_channel(256);
+    {
+        let (stop, ended) = (Arc::clone(&stop), Arc::clone(&ended));
+        let audio_key = crate::audio::AudioKey { key, key_id };
+        audio.set_read_timeout(Some(Duration::from_millis(100)))?;
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; 4096];
+            while !stop.load(Ordering::SeqCst) && !ended.load(Ordering::SeqCst) {
+                let Ok((n, from)) = audio.recv_from(&mut buf) else {
+                    continue;
+                };
+                if from.ip() != host {
+                    continue;
+                }
+                if let Some((_, opus)) = crate::audio::open_packet(&buf[..n], Some(&audio_key)) {
+                    let _ = audio_tx.try_send(opus);
+                }
+            }
+        });
+    }
     Ok(Stream {
         frames,
+        audio: audio_rx,
         stop,
         ended,
         control: sender,

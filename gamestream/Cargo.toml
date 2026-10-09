@@ -29,4 +29,5 @@ aes-gcm = "0.10"
 
 [dev-dependencies]
 windowcast-cli-tools = { path = "../cli-tools" }
+opus = "0.3"
 tokio = { workspace = true, features = ["net", "io-util", "time", "macros", "rt-multi-thread"] }

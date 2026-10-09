@@ -2,7 +2,7 @@
 //! `WindowSource` lists is an app Moonlight can launch, streamed with the
 //! host's own capture and H.264 encoder. The client's input goes to that
 //! window through the host's own input delivery, as a windowcast
-//! session's does.
+//! session's does, and its sound is the window's own.
 
 use std::sync::Arc;
 
@@ -41,6 +41,16 @@ impl Apps for WindowApps {
         let window = self.window(app).ok_or("that window is gone")?;
         let frames = self.0.open(window, VideoCodec::H264)?;
         Ok(Box::new(WindowVideo(frames)))
+    }
+
+    fn audio(&self, app: u32) -> Option<Box<dyn windowcast_host::audio::AudioSource>> {
+        match self.0.open_audio(self.window(app)?)? {
+            Ok(sound) => Some(sound),
+            Err(e) => {
+                eprintln!("gamestream: no sound: {e}");
+                None
+            }
+        }
     }
 
     fn input(&self, app: u32, config: &StreamConfig) -> Option<Box<dyn InputSink>> {

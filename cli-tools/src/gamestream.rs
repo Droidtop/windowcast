@@ -90,7 +90,7 @@ fn main() {
                 .stream(&host, app, &StreamRequest::default())
                 .unwrap_or_else(|e| fail(&e.to_string()));
             let mut check = H264Check::new().unwrap_or_else(|e| fail(&e.to_string()));
-            let (mut frames, mut keyframes, mut bytes) = (0u64, 0u64, 0u64);
+            let (mut frames, mut keyframes, mut bytes, mut sound) = (0u64, 0u64, 0u64, 0u64);
             let started = Instant::now();
             while started.elapsed() < Duration::from_secs(seconds) {
                 if let Ok(frame) = stream.frames.recv_timeout(Duration::from_millis(500)) {
@@ -99,6 +99,7 @@ fn main() {
                     bytes += frame.data.len() as u64;
                     let _ = check.decode(&frame.data);
                 }
+                sound += stream.audio.try_iter().count() as u64;
                 if stream.ended.load(std::sync::atomic::Ordering::SeqCst) {
                     println!("the host ended the stream");
                     break;
@@ -106,7 +107,7 @@ fn main() {
             }
             let secs = started.elapsed().as_secs_f64();
             println!(
-                "{frames} frames ({keyframes} keyframes) in {secs:.1} s: {:.1} fps, {:.2} Mbit/s; OpenH264 decoded {} at {:?}",
+                "{frames} frames ({keyframes} keyframes) in {secs:.1} s: {:.1} fps, {:.2} Mbit/s; OpenH264 decoded {} at {:?}; {sound} sound packets",
                 frames as f64 / secs,
                 bytes as f64 * 8.0 / secs / 1e6,
                 check.pictures,

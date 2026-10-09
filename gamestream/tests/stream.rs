@@ -1,7 +1,8 @@
 //! Our GameStream client against our GameStream host on loopback: pair,
 //! launch the test pattern window, set the stream up over RTSP, and decode
-//! the frames that arrive (the first a keyframe); then send input of each
-//! kind and see it reach the window and its gamepads. Uses the standard
+//! the frames that arrive (the first a keyframe); hear the window's tone
+//! through the encrypted audio packets; then send input of each kind and
+//! see it reach the window and its gamepads. Uses the standard
 //! GameStream ports, so it runs on Linux only (Windows machines often run
 //! Sunshine on them).
 #![cfg(target_os = "linux")]
@@ -9,7 +10,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use windowcast_cli_tools::testpattern::{TestPatternSource, HEIGHT, WIDTH};
+use windowcast_cli_tools::testpattern::{TestPatternSource, TestPatternWithTone, HEIGHT, WIDTH};
 use windowcast_cli_tools::H264Check;
 use windowcast_gamestream::client::{GameStreamClient, Host};
 use windowcast_gamestream::crypto::Credentials;
@@ -52,6 +53,12 @@ impl WindowSource for Recording {
     }
     fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
         TestPatternSource.open(window, codec)
+    }
+    fn open_audio(
+        &self,
+        window: WindowId,
+    ) -> Option<Result<Box<dyn windowcast_host::audio::AudioSource>, String>> {
+        TestPatternWithTone.open_audio(window)
     }
     fn input(&self, event: &InputEvent, _focus: Option<WindowId>) {
         self.events.lock().unwrap().push(event.clone());
@@ -144,6 +151,33 @@ fn our_client_streams_from_our_host() {
     assert_eq!(first_idr, Some(true), "the first frame must be a keyframe");
     assert!(frames >= 30, "only {frames} frames");
     assert_eq!(check.dimensions, Some((WIDTH, HEIGHT)));
+
+    // The window's 440 Hz tone, in 5 ms packets: a second of it.
+    let mut decoder = opus::Decoder::new(48_000, opus::Channels::Stereo).unwrap();
+    let mut sound = Vec::new();
+    let mut pcm = vec![0i16; 5760 * 2];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while sound.len() < 48_000 * 2 && Instant::now() < deadline {
+        if let Ok(packet) = stream.audio.recv_timeout(Duration::from_millis(500)) {
+            let samples = decoder.decode(&packet, &mut pcm, false).unwrap();
+            assert_eq!(samples, 240, "5 ms packets");
+            sound.extend_from_slice(&pcm[..samples * 2]);
+        }
+    }
+    assert!(
+        sound.len() >= 48_000 * 2,
+        "only {} samples of sound",
+        sound.len() / 2
+    );
+    let left: Vec<f32> = sound.iter().step_by(2).map(|s| *s as f32).collect();
+    let level = (left.iter().map(|s| s * s).sum::<f32>() / left.len() as f32).sqrt() / 32768.0;
+    let crossings = left
+        .windows(2)
+        .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
+        .count();
+    println!("sound: level {level:.3}, {crossings} cycles in a second");
+    assert!(level > 0.1, "level {level}");
+    assert!((420..=460).contains(&crossings), "{crossings} Hz");
 
     // Input of each kind, as Moonlight sends it.
     let window = TestPatternSource.list_windows()[0].id;

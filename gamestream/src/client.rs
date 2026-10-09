@@ -292,7 +292,7 @@ impl GameStreamClient {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        runtime.block_on(crate::session::start(address, &url, key, request))
+        runtime.block_on(crate::session::start(address, &url, key, key_id, request))
     }
 
     /// Quits the running app.

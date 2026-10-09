@@ -99,6 +99,51 @@ pub fn ecb_decrypt(key: &[u8; 16], data: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+/// AES-128-CBC with PKCS#7 padding, as GameStream encrypts audio.
+pub fn cbc_encrypt(key: &[u8; 16], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
+    let cipher = Aes128::new(key.into());
+    let pad = 16 - data.len() % 16;
+    let mut padded = data.to_vec();
+    padded.resize(data.len() + pad, pad as u8);
+    let mut previous = *iv;
+    let mut out = Vec::with_capacity(padded.len());
+    for block in padded.as_chunks::<16>().0 {
+        let mut block =
+            aes::Block::from(std::array::from_fn::<u8, 16, _>(|i| block[i] ^ previous[i]));
+        cipher.encrypt_block(&mut block);
+        previous = block.into();
+        out.extend_from_slice(&previous);
+    }
+    out
+}
+
+/// Undoes [`cbc_encrypt`]; `None` when the padding is wrong (the wrong key).
+pub fn cbc_decrypt(key: &[u8; 16], iv: &[u8; 16], data: &[u8]) -> Option<Vec<u8>> {
+    if data.is_empty() || !data.len().is_multiple_of(16) {
+        return None;
+    }
+    let cipher = Aes128::new(key.into());
+    let mut previous = *iv;
+    let mut out = Vec::with_capacity(data.len());
+    for block in data.as_chunks::<16>().0 {
+        let mut plain = aes::Block::from(*block);
+        cipher.decrypt_block(&mut plain);
+        out.extend(plain.iter().zip(previous).map(|(p, c)| p ^ c));
+        previous = *block;
+    }
+    let pad = usize::from(*out.last()?);
+    if pad == 0
+        || pad > 16
+        || out[out.len() - pad..]
+            .iter()
+            .any(|b| usize::from(*b) != pad)
+    {
+        return None;
+    }
+    out.truncate(out.len() - pad);
+    Some(out)
+}
+
 /// A certificate in DER from its PEM text.
 pub fn pem_to_der(pem: &[u8]) -> Result<Vec<u8>, GameStreamError> {
     let (_, parsed) = x509_parser::pem::parse_x509_pem(pem)

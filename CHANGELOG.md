@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Sound over GameStream, both ends: the host sends the window's sound as Opus in RTP packets (5 or 10 ms, as the client asks) to where the client's audio pings come from, AES-CBC encrypted under the launch's input key when the client wants it (Moonlight does), and our client receives, decrypts and hands on the packets. Its sound is stereo; a client set to 5.1 or 7.1 is offered one coupled stream mapped over its speakers, so it still plays. Checked in CI: our client hears the test window's 440 Hz tone (a second of it, level 0.18, 440 cycles), and stock moonlight-qt receives and decrypts it.
+
 ## [0.17.0] - 2026-10-09
 
 ### Added

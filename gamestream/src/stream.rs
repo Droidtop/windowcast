@@ -3,10 +3,8 @@
 //! and control, ANNOUNCE with the client's stream settings, PLAY), then the
 //! video packets to the address the client's pings come from, and the
 //! encrypted control stream for keyframe requests, input (handed to the
-//! app's [`InputSink`]) and the end.
-//!
-//! Sound over GameStream is not sent yet: the audio port takes the
-//! client's pings and stays quiet, which Moonlight accepts.
+//! app's [`InputSink`]) and the end. The app's sound goes as Opus to where
+//! the client's audio pings come from ([`crate::audio`]).
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use tokio::net::TcpStream;
 
+use crate::audio::{self, AudioKey, AudioPacketizer};
 use crate::client::App;
 use crate::control::{self, Control, ControlEvent};
 use crate::input::{self, Input};
@@ -35,6 +34,10 @@ pub struct StreamConfig {
     pub packet_size: usize,
     /// 0 H.264, 1 HEVC, 2 AV1.
     pub codec: u32,
+    /// Milliseconds of sound in each audio packet (5 or 10).
+    pub audio_ms: u32,
+    /// Whether the client wants its audio encrypted.
+    pub audio_encrypted: bool,
 }
 
 /// One encoded frame for a GameStream client.
@@ -61,6 +64,10 @@ pub trait Apps: Send + Sync {
     fn open(&self, app: u32, config: &StreamConfig) -> Result<Box<dyn VideoSource>, String>;
     /// Where the client's input for `app` goes; `None` drops it.
     fn input(&self, _app: u32, _config: &StreamConfig) -> Option<Box<dyn InputSink>> {
+        None
+    }
+    /// The app's sound, if it has any.
+    fn audio(&self, _app: u32) -> Option<Box<dyn windowcast_host::audio::AudioSource>> {
         None
     }
 }
@@ -107,13 +114,21 @@ impl Launch {
 }
 
 /// The DESCRIBE answer: Sunshine's feature and encryption attributes.
-/// windowcast's host encodes H.264 only, takes touch and pen input, asks
-/// for (and supports) only the control stream encryption, and sends
-/// stereo.
+/// windowcast's host encodes H.264 only, takes touch and pen input, and
+/// supports control and audio encryption (asking for the control one).
+///
+/// Its sound is stereo. A client set to 5.1 or 7.1 is told the stream is
+/// one coupled Opus stream mapped onto every speaker, left and right
+/// alternating, so the stereo packets decode as they are.
 fn describe() -> Vec<u8> {
     format!(
-        "a=x-ss-general.featureFlags:{}\na=x-ss-general.encryptionSupported:1\na=x-ss-general.encryptionRequested:1\n",
-        input::FEATURE_PEN_TOUCH
+        "a=x-ss-general.featureFlags:{}\n\
+         a=x-ss-general.encryptionSupported:{}\n\
+         a=x-ss-general.encryptionRequested:1\n\
+         a=fmtp:97 surround-params=611010101\n\
+         a=fmtp:97 surround-params=81101010101\n",
+        input::FEATURE_PEN_TOUCH,
+        1 | audio::SS_AUDIO_ENCRYPTION,
     )
     .into_bytes()
 }
@@ -204,6 +219,15 @@ pub fn announce(payload: &[u8], launch: &Launch) -> Option<StreamConfig> {
         bitrate_kbps: number("x-nv-vqos[0].bw.maximumBitrateKbps").unwrap_or(10_000),
         packet_size: number("x-nv-video[0].packetSize")? as usize,
         codec: number("x-nv-vqos[0].bitStreamFormat").unwrap_or(0),
+        audio_ms: match number("x-nv-aqos.packetDuration") {
+            Some(10) => 10,
+            _ => 5,
+        },
+        audio_encrypted: number("x-nv-general.featureFlags").unwrap_or(0)
+            & audio::NV_AUDIO_ENCRYPTION
+            != 0
+            || number("x-ss-general.encryptionEnabled").unwrap_or(0) & audio::SS_AUDIO_ENCRYPTION
+                != 0,
     })
 }
 
@@ -216,24 +240,17 @@ fn run(
 ) -> Result<(), String> {
     let any = |port: u16| SocketAddr::from(([0, 0, 0, 0], port));
     let video = UdpSocket::bind(any(VIDEO_PORT)).map_err(|e| format!("video port: {e}"))?;
-    // The client pings the audio port too; nothing is sent there yet.
     let audio = UdpSocket::bind(any(AUDIO_PORT)).map_err(|e| format!("audio port: {e}"))?;
-    audio
-        .set_read_timeout(Some(Duration::from_millis(100)))
-        .ok();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 256];
-        loop {
-            if let Err(e) = audio.recv_from(&mut buf) {
-                if !matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) {
-                    return;
-                }
-            }
-        }
+    let key = config.audio_encrypted.then_some(AudioKey {
+        key: launch.key,
+        key_id: launch.key_id,
     });
+    let sound = apps.audio(launch.app);
+    let audio_thread = {
+        let (stop, ping) = (Arc::clone(&launch.stop), launch.ping_payload.clone());
+        let duration = config.audio_ms;
+        std::thread::spawn(move || send_audio(audio, sound, duration, key, &ping, rtsp_peer, &stop))
+    };
     let control = Control::listen(any(control::CONTROL_PORT), launch.key, launch.connect_data)
         .map_err(|e| format!("control port: {e}"))?;
 
@@ -312,6 +329,7 @@ fn run(
             );
             std::thread::sleep(Duration::from_millis(200));
             let _ = listener.join();
+            let _ = audio_thread.join();
             return Ok(());
         }
         if left.load(Ordering::SeqCst) {
@@ -328,5 +346,64 @@ fn run(
             let _ = video.send_to(&packet, peer);
         }
         sent += 1;
+    }
+}
+
+/// Waits for the client's audio pings, then sends the app's sound there
+/// until the stream stops. Without sound it only takes the pings.
+fn send_audio(
+    socket: UdpSocket,
+    sound: Option<Box<dyn windowcast_host::audio::AudioSource>>,
+    duration_ms: u32,
+    key: Option<AudioKey>,
+    ping_payload: &str,
+    rtsp_peer: Option<SocketAddr>,
+    stop: &AtomicBool,
+) {
+    socket
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .ok();
+    let mut buf = [0u8; 256];
+    let peer = loop {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Ok((n, from)) = socket.recv_from(&mut buf) {
+            let ping = &buf[..n];
+            let ours = ping.len() >= 16 && &ping[..16] == ping_payload.as_bytes();
+            if (ours || ping == b"PING") && rtsp_peer.is_none_or(|p| p.ip() == from.ip()) {
+                break from;
+            }
+        }
+    };
+    let Some(mut sound) = sound else {
+        while !stop.load(Ordering::SeqCst) {
+            let _ = socket.recv_from(&mut buf);
+        }
+        return;
+    };
+    let mut encoder = match windowcast_host::audio::OpusPackets::with_duration(duration_ms) {
+        Ok(encoder) => encoder,
+        Err(e) => {
+            eprintln!("gamestream: no sound: {e}");
+            return;
+        }
+    };
+    let mut packetizer = AudioPacketizer::new(duration_ms, key);
+    while !stop.load(Ordering::SeqCst) {
+        let Some(samples) = sound.next_samples() else {
+            return;
+        };
+        match encoder.push(&samples) {
+            Ok(packets) => {
+                for opus in packets {
+                    let _ = socket.send_to(&packetizer.packet(&opus), peer);
+                }
+            }
+            Err(e) => {
+                eprintln!("gamestream: the sound stopped: {e}");
+                return;
+            }
+        }
     }
 }

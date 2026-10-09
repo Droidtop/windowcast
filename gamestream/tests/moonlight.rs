@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use windowcast_cli_tools::testpattern::TestPatternSource;
+use windowcast_cli_tools::testpattern::TestPatternWithTone;
 use windowcast_gamestream::server::{GameStreamServer, HTTPS_PORT};
 use windowcast_gamestream::windows::WindowApps;
 
@@ -63,7 +63,7 @@ fn stock_moonlight_pairs_and_lists_our_apps() {
     let server = GameStreamServer::open(
         "windowcast test host",
         &dir,
-        Arc::new(WindowApps(Arc::new(TestPatternSource))),
+        Arc::new(WindowApps(Arc::new(TestPatternWithTone))),
     )
     .unwrap();
     let (http, https) = runtime.block_on(async {
@@ -120,7 +120,8 @@ fn stock_moonlight_pairs_and_lists_our_apps() {
     );
 
     // And streams it: Moonlight sets the stream up over RTSP, pings the
-    // video port, connects the control stream, and decodes what comes.
+    // video and audio ports, connects the control stream, and decodes what
+    // comes, the window's tone included (encrypted, as Moonlight asks).
     let streamed = moonlight(
         &[
             "stream",
@@ -143,6 +144,14 @@ fn stock_moonlight_pairs_and_lists_our_apps() {
     assert!(
         streamed.contains("Received first video packet"),
         "no video reached Moonlight"
+    );
+    assert!(
+        streamed.contains("Received first audio packet"),
+        "no sound reached Moonlight"
+    );
+    assert!(
+        !streamed.contains("Failed to decrypt audio packet"),
+        "Moonlight could not decrypt the sound"
     );
     assert!(
         !streamed.contains("Terminating connection"),
