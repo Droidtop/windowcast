@@ -45,8 +45,12 @@ device). Real windows stream from Windows: the Windows agent captures a
 window with Windows.Graphics.Capture and encodes it on the GPU (NVIDIA,
 AMD or Intel through Media Foundation, H.264 or H.265) or in software.
 Input goes back: mouse, keyboard, typed text, touch and gamepads from the
-client, and the clipboard both ways; the Windows agent delivers all but
-gamepads. Real windows stream from Linux too: the Linux agent captures a
+client, and the clipboard both ways. A client's gamepads (up to four)
+become Xbox 360 pads on the host: through the ViGEmBus driver on Windows
+(the one Parsec and others install; without it the host has no pads), and
+through uinput on Linux, laid out as the kernel's xpad driver reports a
+real pad (the host's user needs write access to /dev/uinput). The pads
+are the session's and go when it ends. Real windows stream from Linux too: the Linux agent captures a
 window under any compositor with ext-image-copy-capture (wlroots 0.19,
 sway 1.11 and later), encodes it with OpenH264, and under sway delivers
 the pointer and keys. A window's sound streams with it from Windows hosts:
@@ -63,9 +67,9 @@ into a virtual audio cable (VB-CABLE, VoiceMeeter, Virtual Audio Cable, or
 one named with `--microphone-device`) and applications record from the
 cable's other end. The Windows client and the Android viewer send their
 microphone (Android 10 and later, which encode Opus).
-What's **not** done yet: macOS, gamepads on Windows (they need a virtual
-gamepad driver) and Linux, the clipboard and GPU encoding on Linux, the
-microphone from the Linux client, and every backend
+What's **not** done yet: macOS, rumble back to the client's pads,
+sending gamepads from the Windows client, the clipboard and GPU encoding
+on Linux, the microphone from the Linux client, and every backend
 except the native and desktop ones (their seam is in place: see
 docs/BACKENDS.md).
 

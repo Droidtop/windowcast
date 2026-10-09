@@ -170,10 +170,15 @@ independent streams without independent handshakes.
 
 Input from a client (pointer, keys, text, touch, gamepads) is accepted
 only for windows that session is streaming: a pointer or touch event for
-any other window is dropped, and keys, text and gamepads go to the last
-streamed window the client pointed at, never to whatever happens to have
-focus on the host. A paired client therefore cannot drive a window it was
-not given. The clipboard is shared both ways while a session is open.
+any other window is dropped, and keys and text go to the last streamed
+window the client pointed at, never to whatever happens to have focus on
+the host. A paired client therefore cannot drive a window it was not
+given with them. Gamepads are different by nature: a session's pads are
+virtual devices on the whole host (ViGEmBus or uinput), read by whatever
+application reads pads, so they are accepted only while the session
+streams a window and only while the host allows input, and they are
+unplugged when the session ends. The clipboard is shared both ways while
+a session is open.
 
 ## Authorization is separate from authentication
 
