@@ -1,0 +1,5 @@
+[env]
+# libopus (audiopus_sys) is built with CMake from a CMakeLists that asks
+# for an old minimum version, which CMake 4 refuses unless told this
+# policy floor.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

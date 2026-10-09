@@ -65,7 +65,7 @@ jobs:
     steps:
       - name: Install system dependencies
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rust nasm sway wayland libxkbcommon xkeyboard-config
+          pacman -Syu --noconfirm --needed base-devel git rust nasm cmake sway wayland libxkbcommon xkeyboard-config
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
