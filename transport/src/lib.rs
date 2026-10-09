@@ -57,6 +57,9 @@ const CONTROL_CHANNEL_ID: u16 = 0;
 /// by webrtc) plus loopback, for same-device sessions.
 const UDP_BIND_ADDRS: [&str; 2] = ["0.0.0.0:0", "127.0.0.1:0"];
 
+/// The one socket a [`Session::local_only`] binds.
+const LOCAL_UDP_BIND_ADDRS: [&str; 1] = ["127.0.0.1:0"];
+
 /// How long either side waits for ICE gathering, for the control channel
 /// to open after the answer is applied, and for the client's answer to a
 /// renegotiation. On a LAN all of these take well under a second; this
@@ -183,7 +186,15 @@ impl Session {
     /// host candidates. For a session that might cross a NAT/firewall, use
     /// [`Session::with_relay`] instead.
     pub async fn new() -> Result<Self, TransportError> {
-        Self::build(vec![]).await
+        Self::build(vec![], &UDP_BIND_ADDRS).await
+    }
+
+    /// A session for two peers on this device only: it binds loopback and
+    /// nothing else, so no other machine can reach it and no network port
+    /// is opened. Hosts listening on a loopback address, and clients
+    /// connecting to one, use this.
+    pub async fn local_only() -> Result<Self, TransportError> {
+        Self::build(vec![], &LOCAL_UDP_BIND_ADDRS).await
     }
 
     /// Same as [`Session::new`], but with a TURN relay available as an ICE
@@ -193,10 +204,13 @@ impl Session {
     /// only when it doesn't. See [`RelayConfig`] for why this stays a
     /// blind relay rather than a terminating proxy.
     pub async fn with_relay(relay: &RelayConfig) -> Result<Self, TransportError> {
-        Self::build(vec![relay.to_ice_server()]).await
+        Self::build(vec![relay.to_ice_server()], &UDP_BIND_ADDRS).await
     }
 
-    async fn build(ice_servers: Vec<RTCIceServer>) -> Result<Self, TransportError> {
+    async fn build(
+        ice_servers: Vec<RTCIceServer>,
+        udp_addrs: &[&'static str],
+    ) -> Result<Self, TransportError> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
         let registry = keyframes::interceptor_registry(&mut media_engine)?;
@@ -229,7 +243,7 @@ impl Session {
                 )
                 .with_interceptor_registry(registry)
                 .with_handler(Arc::clone(&events) as Arc<dyn PeerConnectionEventHandler>)
-                .with_udp_addrs(UDP_BIND_ADDRS.to_vec())
+                .with_udp_addrs(udp_addrs.to_vec())
                 .build()
                 .await?,
         );

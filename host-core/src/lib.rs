@@ -228,14 +228,27 @@ impl Drop for Stream {
 }
 
 impl Host {
-    async fn serve(self: &Arc<Self>, stream: TcpStream) -> Result<(), TransportError> {
-        let session = Session::new().await?;
-        let trusted = self.trust.lock().await.clone();
-        let pin = self.pairing.current().await;
+    async fn serve(
+        self: &Arc<Self>,
+        stream: TcpStream,
+        address: String,
+    ) -> Result<(), TransportError> {
+        // A host that only listens on loopback opens nothing else either.
+        let local = stream
+            .local_addr()
+            .is_ok_and(|local| local.ip().is_loopback());
+        let session = if local {
+            Session::local_only().await?
+        } else {
+            Session::new().await?
+        };
+        let control = &self.control;
+        let trusted = control.trust.lock().await.clone();
+        let pin = control.pairing.current().await;
         let established = accept(
             stream,
             session,
-            &self.identity,
+            &control.identity,
             HostCredential {
                 pin: pin.as_deref(),
                 trusted: &trusted,

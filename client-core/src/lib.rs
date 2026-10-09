@@ -92,7 +92,13 @@ impl Client {
             let stream = tokio::net::TcpStream::connect(address)
                 .await
                 .map_err(|e| ClientError::Unreachable(address.to_owned(), e))?;
-            let session = Session::new().await?;
+            // A host on this device is reached over loopback alone.
+            let local = stream.peer_addr().is_ok_and(|peer| peer.ip().is_loopback());
+            let session = if local {
+                Session::local_only().await?
+            } else {
+                Session::new().await?
+            };
             let credential = match pin {
                 Some(pin) => ClientCredential::Pin(pin),
                 None => ClientCredential::Pinned(&trusted),
