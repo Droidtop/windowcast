@@ -64,8 +64,19 @@ int64_t windowcast_session_start_window(const WindowcastSession *session, uint64
                                         const uint32_t *codecs, size_t count);
 int64_t windowcast_session_stop_window(const WindowcastSession *session, uint64_t window);
 
+/* Sends one input event as JSON (serde's form of windowcast_protocol's
+ * InputEvent; examples in client-core/src/ffi.rs), e.g.
+ * {"Touch":{"window":7,"id":0,"x":0.5,"y":0.5,"phase":"Start"}}.
+ * Pointer and touch go to the window they name (one this session
+ * streams); keys (evdev codes), text and gamepads to the last such window. */
+int64_t windowcast_session_send_input(const WindowcastSession *session, const char *json);
+/* Gives the host this client's clipboard text; the host's changes arrive
+ * as "clipboard" events. */
+int64_t windowcast_session_set_clipboard(const WindowcastSession *session, const char *text);
+
 /* Next session event as JSON, tagged by "type": windows, stream_started,
- * stream_refused, stream_stopped, window_resized, window_focused, closed.
+ * stream_refused, stream_stopped, window_resized, window_focused,
+ * clipboard, closed.
  * Returns its length, WINDOWCAST_TIMEOUT, or WINDOWCAST_BUFFER_TOO_SMALL
  * with the length needed in *needed (that event is lost). */
 int64_t windowcast_session_next_event(const WindowcastSession *session, uint32_t timeout_ms,

@@ -77,10 +77,12 @@ impl FrameSource for TestPattern {
             self.encoder.force_intra_frame();
         }
         let data = self.encoder.encode(&picture).ok()?.to_vec();
+        let first = self.frame == 0;
         self.frame += 1;
         Some(EncodedFrame {
             data,
             duration: FRAME_TIME,
+            size: first.then_some((WIDTH as u32, HEIGHT as u32)),
         })
     }
 }

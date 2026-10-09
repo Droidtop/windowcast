@@ -235,6 +235,48 @@ pub unsafe extern "C" fn windowcast_session_stop_window(
     }
 }
 
+/// Sends one input event, given as JSON in serde's form of
+/// `windowcast_protocol::InputEvent`, e.g.
+/// `{"PointerMove":{"window":7,"x":0.5,"y":0.25}}`,
+/// `{"PointerButton":{"window":7,"button":"Left","pressed":true}}`,
+/// `{"Key":{"keycode":30,"pressed":true}}` (evdev keycodes),
+/// `{"Text":{"text":"é"}}`,
+/// `{"Touch":{"window":7,"id":0,"x":0.5,"y":0.5,"phase":"Start"}}`,
+/// `{"Gamepad":{"pad":0,"state":{"buttons":4096,"left_x":0,"left_y":0,"right_x":0,"right_y":0,"left_trigger":0,"right_trigger":0}}}`.
+/// Returns 0, or [`WINDOWCAST_ERROR`] for malformed JSON or a gone session.
+///
+/// # Safety
+/// `session` must be valid; `json` a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_send_input(
+    session: *const ClientSession,
+    json: *const c_char,
+) -> i64 {
+    let (Some(session), Some(json)) = (session.as_ref(), str_arg(json)) else {
+        return WINDOWCAST_ERROR;
+    };
+    match serde_json::from_str(json).map(|event| session.send_input(event)) {
+        Ok(Ok(())) => 0,
+        _ => WINDOWCAST_ERROR,
+    }
+}
+
+/// Gives the host this client's clipboard text. The host's own clipboard
+/// changes arrive as `clipboard` events.
+///
+/// # Safety
+/// `session` must be valid; `text` a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_set_clipboard(
+    session: *const ClientSession,
+    text: *const c_char,
+) -> i64 {
+    match (session.as_ref(), str_arg(text)) {
+        (Some(session), Some(text)) if session.set_clipboard(text).is_ok() => 0,
+        _ => WINDOWCAST_ERROR,
+    }
+}
+
 /// Waits up to `timeout_ms` for the next session event and writes it as
 /// JSON (`{"type": ...}`, see [`Event`]) into `out`. Returns its length,
 /// [`WINDOWCAST_TIMEOUT`], or [`WINDOWCAST_BUFFER_TOO_SMALL`] with the
@@ -321,6 +363,28 @@ mod tests {
         assert_eq!(json, r#"{"type":"stream_stopped","window":4}"#);
         let json = serde_json::to_string(&Event::Closed).unwrap();
         assert_eq!(json, r#"{"type":"closed"}"#);
+    }
+
+    #[test]
+    fn input_json_is_the_documented_form() {
+        use windowcast_protocol::{InputEvent, PointerButton, WindowId};
+        let event: InputEvent = serde_json::from_str(
+            r#"{"PointerButton":{"window":7,"button":"Left","pressed":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            event,
+            InputEvent::PointerButton {
+                window: WindowId(7),
+                button: PointerButton::Left,
+                pressed: true
+            }
+        );
+        let event: InputEvent = serde_json::from_str(
+            r#"{"Gamepad":{"pad":0,"state":{"buttons":4096,"left_x":0,"left_y":0,"right_x":0,"right_y":0,"left_trigger":0,"right_trigger":0}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(event, InputEvent::Gamepad { pad: 0, .. }));
     }
 
     #[test]

@@ -24,7 +24,8 @@ use tokio::runtime::Runtime;
 use windowcast_identity::{Identity, TrustStore};
 use windowcast_protocol::selection::{self, BackendRule};
 use windowcast_protocol::{
-    BackendKind, ControlMessage, StreamOptions, StreamTarget, VideoCodec, WindowId, WindowInfo,
+    BackendKind, ControlMessage, InputEvent, StreamOptions, StreamTarget, VideoCodec, WindowId,
+    WindowInfo,
 };
 use windowcast_transport::{
     connect, ClientCredential, RemoteWindow, Session, TransportError, WindowFrame,
@@ -141,6 +142,10 @@ pub enum Event {
     },
     WindowFocused {
         window: u64,
+    },
+    /// The host's clipboard text changed.
+    Clipboard {
+        text: String,
     },
     Closed,
 }
@@ -307,6 +312,18 @@ impl ClientSession {
         })
     }
 
+    /// Sends input to the host. Pointer and touch events go to the window
+    /// they name (one this session streams); keys, text and gamepads to the
+    /// last such window.
+    pub fn send_input(&self, event: InputEvent) -> Result<(), ClientError> {
+        self.send(ControlMessage::Input(event))
+    }
+
+    /// Gives the host this client's clipboard text.
+    pub fn set_clipboard(&self, text: &str) -> Result<(), ClientError> {
+        self.send(ControlMessage::Clipboard(text.to_owned()))
+    }
+
     pub fn stop_window(&self, window: WindowId) -> Result<(), ClientError> {
         self.send(ControlMessage::StreamStopRequest(StreamTarget::Window(
             window,
@@ -438,6 +455,7 @@ async fn pump_events(
                 height,
             },
             ControlMessage::WindowFocused(window) => Event::WindowFocused { window: window.0 },
+            ControlMessage::Clipboard(text) => Event::Clipboard { text },
             _ => continue,
         };
         if events.send(event).is_err() {
