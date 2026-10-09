@@ -91,11 +91,7 @@ fn a_client_microphone_plays_into_the_virtual_cable() {
     let talking = {
         let session = Arc::clone(&session);
         std::thread::spawn(move || {
-            let mut encoder =
-                opus::Encoder::new(48_000, opus::Channels::Stereo, opus::Application::Voip)
-                    .unwrap();
             let mut phase = 0f32;
-            let mut packet = vec![0u8; 4000];
             // Paced to real time, as a microphone delivers.
             let start = Instant::now();
             for n in 0..150u32 {
@@ -106,8 +102,7 @@ fn a_client_microphone_plays_into_the_virtual_cable() {
                     phase =
                         (phase + 440.0 * std::f32::consts::TAU / 48_000.0) % std::f32::consts::TAU;
                 }
-                let len = encoder.encode(&pcm, &mut packet).unwrap();
-                session.send_microphone(&packet[..len]).unwrap();
+                session.send_microphone(&pcm).unwrap();
                 let due = start + Duration::from_millis(20) * (n + 1);
                 std::thread::sleep(due.saturating_duration_since(Instant::now()));
             }

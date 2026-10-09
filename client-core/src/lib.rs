@@ -51,6 +51,8 @@ pub enum ClientError {
     Identity(#[from] windowcast_identity::IdentityError),
     #[error("i/o: {0}")]
     Io(#[from] std::io::Error),
+    #[error("sound: {0}")]
+    Audio(String),
     /// The host cannot be looked for away from the LAN: not paired, or no
     /// session on the LAN told this client its discovery ID yet.
     #[error("{0} cannot be reached away from the LAN yet: connect on the LAN once first")]
@@ -58,6 +60,17 @@ pub enum ClientError {
     /// Discovery has no address for the host, or none answered.
     #[error("{0} was not found away from the LAN ({1})")]
     NotFound(String, String),
+}
+
+/// 20 ms of interleaved stereo at 48 kHz: one Opus packet's worth.
+const MICROPHONE_FRAME: usize = 960 * 2;
+
+/// The microphone while it is on: its track, and the Opus encoder with the
+/// samples not yet a whole packet.
+struct Microphone {
+    track: AudioTrack,
+    encoder: opus::Encoder,
+    pending: Vec<i16>,
 }
 
 /// Where a session keeps the host's discovery ID, and this client's own.
@@ -412,8 +425,8 @@ pub struct ClientSession {
     rules: Mutex<Vec<BackendRule>>,
     /// The last window list, for choosing backends by content.
     windows: Arc<Mutex<Vec<WindowInfo>>>,
-    /// The microphone track, while the microphone is on.
-    microphone: Mutex<Option<AudioTrack>>,
+    /// The microphone track and its encoder, while the microphone is on.
+    microphone: Mutex<Option<Microphone>>,
 }
 
 impl ClientSession {
@@ -641,25 +654,49 @@ impl ClientSession {
         }
     }
 
-    /// Starts sending this client's microphone to the host: Opus packets
-    /// given to [`Self::send_microphone`] reach the host's virtual
-    /// microphone (where the host has one and allows it).
+    /// Starts sending this client's microphone to the host: sound given to
+    /// [`Self::send_microphone`] reaches the host's virtual microphone
+    /// (where the host has one and allows it).
     pub fn start_microphone(&self) -> Result<(), ClientError> {
         let track = self.runtime.block_on(self.session.attach_microphone())?;
-        *self.microphone.lock().expect("microphone") = Some(track);
+        let encoder = opus::Encoder::new(48_000, opus::Channels::Stereo, opus::Application::Voip)
+            .map_err(|e| ClientError::Audio(e.to_string()))?;
+        *self.microphone.lock().expect("microphone") = Some(Microphone {
+            track,
+            encoder,
+            pending: Vec::new(),
+        });
         Ok(())
     }
 
-    /// Sends one Opus packet (48 kHz, stereo, 20 ms) of microphone sound.
-    pub fn send_microphone(&self, packet: &[u8]) -> Result<(), ClientError> {
-        let track = self.microphone.lock().expect("microphone").clone();
-        let Some(track) = track else {
-            return Err(ClientError::Transport(TransportError::Closed));
+    /// Sends microphone sound: interleaved stereo 16-bit samples at 48 kHz,
+    /// any amount at a time. It goes out as 20 ms Opus packets (libopus,
+    /// the same on every client) as soon as each is whole.
+    pub fn send_microphone(&self, samples: &[i16]) -> Result<(), ClientError> {
+        let packets = {
+            let mut microphone = self.microphone.lock().expect("microphone");
+            let Some(microphone) = microphone.as_mut() else {
+                return Err(ClientError::Transport(TransportError::Closed));
+            };
+            microphone.pending.extend_from_slice(samples);
+            let mut packets = Vec::new();
+            let mut out = vec![0u8; 4000];
+            while microphone.pending.len() >= MICROPHONE_FRAME {
+                let len = microphone
+                    .encoder
+                    .encode(&microphone.pending[..MICROPHONE_FRAME], &mut out)
+                    .map_err(|e| ClientError::Audio(e.to_string()))?;
+                microphone.pending.drain(..MICROPHONE_FRAME);
+                packets.push(bytes::Bytes::copy_from_slice(&out[..len]));
+            }
+            (microphone.track.clone(), packets)
         };
-        Ok(self.runtime.block_on(track.write_packet(
-            bytes::Bytes::copy_from_slice(packet),
-            Duration::from_millis(20),
-        ))?)
+        let (track, packets) = packets;
+        for packet in packets {
+            self.runtime
+                .block_on(track.write_packet(packet, Duration::from_millis(20)))?;
+        }
+        Ok(())
     }
 
     /// Stops sending the microphone.

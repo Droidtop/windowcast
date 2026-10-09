@@ -402,24 +402,25 @@ pub unsafe extern "C" fn windowcast_session_start_microphone(session: *const Cli
     status(session.start_microphone())
 }
 
-/// Sends one Opus packet (48 kHz, stereo, 20 ms) of microphone sound.
-/// Returns 0 or WINDOWCAST_ERROR.
+/// Sends microphone sound: `count` interleaved stereo 16-bit samples at
+/// 48 kHz (any amount; encoded to Opus here). Returns 0 or
+/// WINDOWCAST_ERROR.
 ///
 /// # Safety
-/// `session` must be valid; `data` valid for `len` bytes.
+/// `session` must be valid; `samples` valid for `count` samples.
 #[no_mangle]
 pub unsafe extern "C" fn windowcast_session_send_microphone(
     session: *const ClientSession,
-    data: *const u8,
-    len: usize,
+    samples: *const i16,
+    count: usize,
 ) -> i64 {
     let Some(session) = session.as_ref() else {
         return WINDOWCAST_ERROR;
     };
-    if data.is_null() {
+    if samples.is_null() {
         return WINDOWCAST_ERROR;
     }
-    status(session.send_microphone(std::slice::from_raw_parts(data, len)))
+    status(session.send_microphone(std::slice::from_raw_parts(samples, count)))
 }
 
 /// Sets this client's ceilings for a window's stream (kept for its next

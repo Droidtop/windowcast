@@ -4454,6 +4454,7 @@ name = "windowcast-client-core"
 version = "0.16.0"
 dependencies = [
  "bytes",
+ "opus",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

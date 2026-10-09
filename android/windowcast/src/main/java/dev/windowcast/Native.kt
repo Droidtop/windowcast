@@ -29,8 +29,8 @@ internal object Native {
     @JvmStatic external fun setClipboard(session: Long, text: String): Long
     @JvmStatic external fun nextEvent(session: Long, timeoutMs: Int): String?
     @JvmStatic external fun startMicrophone(session: Long): Long
-    /** Sends the first [length] bytes of [packet], one Opus packet of microphone sound. */
-    @JvmStatic external fun sendMicrophone(session: Long, packet: ByteBuffer, length: Int): Long
+    /** Sends the first [count] samples of [samples]: interleaved stereo, 16-bit, 48 kHz. */
+    @JvmStatic external fun sendMicrophone(session: Long, samples: ShortArray, count: Int): Long
     @JvmStatic external fun stopMicrophone(session: Long): Long
     /** The next Opus packet of a window's sound into [buffer]; info[0] gets its RTP timestamp. */
     @JvmStatic external fun nextAudio(

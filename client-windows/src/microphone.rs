@@ -1,6 +1,6 @@
 //! Sending this PC's microphone to the host: the default recording device
-//! through WASAPI (48 kHz stereo 16-bit, Windows converting), cut into
-//! 20 ms Opus packets for the session's microphone track.
+//! through WASAPI (48 kHz stereo 16-bit, Windows converting), handed to the
+//! session, which sends it as Opus.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -93,11 +93,7 @@ fn run(session: &ClientSession, stop: &AtomicBool) -> Result<(), String> {
             .map_err(err("microphone initialize"))?;
         let capture: IAudioCaptureClient = client.GetService().map_err(err("capture"))?;
         client.Start().map_err(err("microphone start"))?;
-        let mut encoder =
-            opus::Encoder::new(48_000, opus::Channels::Stereo, opus::Application::Voip)
-                .map_err(|e| format!("opus: {e}"))?;
         let mut pending: Vec<i16> = Vec::new();
-        let mut packet = vec![0u8; 4000];
         while !stop.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(10));
             loop {
@@ -120,14 +116,11 @@ fn run(session: &ClientSession, stop: &AtomicBool) -> Result<(), String> {
                 }
                 let _ = capture.ReleaseBuffer(frames);
             }
-            while pending.len() >= 1920 {
-                let len = encoder
-                    .encode(&pending[..1920], &mut packet)
-                    .map_err(|e| format!("opus: {e}"))?;
-                pending.drain(..1920);
+            if !pending.is_empty() {
                 session
-                    .send_microphone(&packet[..len])
+                    .send_microphone(&pending)
                     .map_err(|e| format!("microphone: {e}"))?;
+                pending.clear();
             }
         }
         let _ = client.Stop();

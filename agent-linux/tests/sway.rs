@@ -147,10 +147,7 @@ fn check_sound(session: &ClientSession, window: WindowId) {
 fn check_microphone(session: &ClientSession) {
     use std::io::Read;
     session.start_microphone().unwrap();
-    let mut encoder =
-        opus::Encoder::new(48_000, opus::Channels::Stereo, opus::Application::Voip).unwrap();
     let mut phase = 0f32;
-    let mut packet = vec![0u8; 4000];
     // Paced to real time on an absolute schedule, as a microphone delivers;
     // sleeping 20 ms after each packet runs slow and leaves gaps.
     let mut talk = |packets: u32| {
@@ -162,8 +159,7 @@ fn check_microphone(session: &ClientSession) {
                 pcm.extend([v, v]);
                 phase = (phase + 660.0 * std::f32::consts::TAU / 48_000.0) % std::f32::consts::TAU;
             }
-            let len = encoder.encode(&pcm, &mut packet).unwrap();
-            session.send_microphone(&packet[..len]).unwrap();
+            session.send_microphone(&pcm).unwrap();
             let due = start + Duration::from_millis(20) * (n + 1);
             std::thread::sleep(due.saturating_duration_since(Instant::now()));
         }

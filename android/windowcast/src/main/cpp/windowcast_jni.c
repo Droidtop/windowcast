@@ -166,7 +166,7 @@ Java_dev_windowcast_Native_nextAudio(JNIEnv *env, jclass cls, jlong session, jlo
     return len;
 }
 
-/* The microphone: start, one Opus packet from a direct buffer, stop. Each
+/* The microphone: start, sound as it comes (16-bit stereo samples), stop. Each
  * returns 0 or WINDOWCAST_ERROR. */
 JNIEXPORT jlong JNICALL
 Java_dev_windowcast_Native_startMicrophone(JNIEnv *env, jclass cls, jlong session) {
@@ -174,12 +174,14 @@ Java_dev_windowcast_Native_startMicrophone(JNIEnv *env, jclass cls, jlong sessio
 }
 
 JNIEXPORT jlong JNICALL
-Java_dev_windowcast_Native_sendMicrophone(JNIEnv *env, jclass cls, jlong session, jobject packet,
-                                          jint length) {
-    const uint8_t *data = (*env)->GetDirectBufferAddress(env, packet);
-    jlong cap = (*env)->GetDirectBufferCapacity(env, packet);
-    if (!data || length < 0 || length > cap) return WINDOWCAST_ERROR;
-    return windowcast_session_send_microphone(SESSION(session), data, (size_t)length);
+Java_dev_windowcast_Native_sendMicrophone(JNIEnv *env, jclass cls, jlong session,
+                                          jshortArray samples, jint count) {
+    if (count < 0 || count > (*env)->GetArrayLength(env, samples)) return WINDOWCAST_ERROR;
+    jshort *data = (*env)->GetShortArrayElements(env, samples, NULL);
+    if (!data) return WINDOWCAST_ERROR;
+    int64_t result = windowcast_session_send_microphone(SESSION(session), data, (size_t)count);
+    (*env)->ReleaseShortArrayElements(env, samples, data, JNI_ABORT);
+    return result;
 }
 
 JNIEXPORT jlong JNICALL

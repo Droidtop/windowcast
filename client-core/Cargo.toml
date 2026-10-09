@@ -18,5 +18,8 @@ windowcast-transport = { path = "../transport" }
 tokio = { workspace = true, features = ["net"] }
 serde.workspace = true
 serde_json = "1"
+# Opus for the microphone (libopus, BSD-3-Clause, built from source), the
+# one encoder every client sends with.
+opus = "0.3"
 bytes = "1"
 thiserror.workspace = true

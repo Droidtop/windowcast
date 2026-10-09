@@ -95,7 +95,6 @@ class MainActivity : Activity() {
         status = TextView(this).apply { text = "Not connected" }
         sendMicrophone = CheckBox(this).apply {
             text = "Send my microphone to the host"
-            isEnabled = Microphone.available()
             setOnCheckedChangeListener { _, on ->
                 if (!on) stopMicrophone()
                 else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
