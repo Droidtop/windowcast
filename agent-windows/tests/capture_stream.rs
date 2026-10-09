@@ -1,7 +1,8 @@
 //! A real window, captured with Windows.Graphics.Capture, encoded by each
 //! encoder this machine has, streamed over loopback through the host and
 //! client libraries, and decoded: the centre pixel must be the window's
-//! colour.
+//! colour. With a client height limit, adaptive quality scales the picture
+//! down on the GPU, and it decodes at the smaller size.
 //!
 //! The test window is placed on screen only when `WINDOWCAST_TEST_ON_SCREEN`
 //! is set (CI); otherwise it sits off screen. It is a plain popup:
@@ -21,7 +22,7 @@ use windowcast_cli_tools::H264Check;
 use windowcast_client::{Client, Event, FramePoll};
 use windowcast_host::HostConfig;
 use windowcast_identity::{Identity, TrustStore};
-use windowcast_protocol::{VideoCodec, WindowId};
+use windowcast_protocol::{StreamLimits, VideoCodec, WindowId};
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -121,8 +122,14 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// Streams the test window with one encoder choice; returns what decoded.
-fn stream_with(choice: EncoderChoice, window: u64) -> H264Check {
+/// Streams the test window with one encoder choice and the client's
+/// `limits`, until a picture decodes at `size`; returns what decoded.
+fn stream_with(
+    choice: EncoderChoice,
+    window: u64,
+    limits: StreamLimits,
+    size: (usize, usize),
+) -> H264Check {
     let host_dir = temp_dir(&format!("host-{choice:?}"));
     let client_dir = temp_dir(&format!("client-{choice:?}"));
     let host_id = Identity::load_or_generate(&host_dir.join("agent-identity.key"))
@@ -162,6 +169,7 @@ fn stream_with(choice: EncoderChoice, window: u64) -> H264Check {
 
     let client = Client::new(&client_dir).unwrap();
     let session = client.connect(&address, None).unwrap();
+    session.set_stream_limits(WindowId(window), limits).unwrap();
     session
         .start_window(WindowId(window), &[VideoCodec::H264])
         .unwrap();
@@ -171,7 +179,13 @@ fn stream_with(choice: EncoderChoice, window: u64) -> H264Check {
     }
 
     let mut check = H264Check::new().unwrap();
-    for n in 0..3 {
+    // At least three frames, and on until one decodes at `size` (a static
+    // window sends one a second; a limit applies from the host's first
+    // round of adaptive quality, a second in).
+    for n in 0..12 {
+        if n >= 3 && check.dimensions == Some(size) {
+            break;
+        }
         match session.next_frame(WindowId(window), WAIT) {
             FramePoll::Frame(frame) => {
                 if n == 0 {
@@ -209,7 +223,12 @@ fn a_window_is_captured_encoded_streamed_and_decoded() {
         println!("{line}");
     }
     for choice in choices {
-        let check = stream_with(choice, window);
+        let check = stream_with(
+            choice,
+            window,
+            StreamLimits::default(),
+            (WIDTH as usize, HEIGHT as usize),
+        );
         println!(
             "{choice:?}: {} pictures at {:?}, centre YUV {:?}",
             check.pictures, check.dimensions, check.center
@@ -223,6 +242,30 @@ fn a_window_is_captured_encoded_streamed_and_decoded() {
                 "{choice:?}: centre {name} is {got}, expected about {want}"
             );
         }
+    }
+
+    // Half the height: the picture comes down to 160x120.
+    let half = (WIDTH as usize / 2, HEIGHT as usize / 2);
+    for choice in [EncoderChoice::OpenH264, EncoderChoice::Auto] {
+        let check = stream_with(
+            choice,
+            window,
+            StreamLimits {
+                max_height: Some(half.1 as u32),
+                ..StreamLimits::default()
+            },
+            half,
+        );
+        println!(
+            "{choice:?} limited to {} lines: {} pictures, last at {:?}, centre YUV {:?}",
+            half.1, check.pictures, check.dimensions, check.center
+        );
+        assert_eq!(check.dimensions, Some(half), "{choice:?}: not scaled down");
+        let (y, _, _) = check.center.unwrap();
+        assert!(
+            (i32::from(y) - YUV.0).abs() <= 12,
+            "{choice:?}: centre Y {y}"
+        );
     }
 
     close_window(window);

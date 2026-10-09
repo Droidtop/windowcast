@@ -95,6 +95,7 @@ impl EncoderChoice {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
     pub codec: VideoCodec,
     pub width: usize,
@@ -118,6 +119,12 @@ pub trait Encoder {
     /// Whether it takes NV12 textures on the capture device as they are
     /// (`Picture::Texture`), with no copy through memory.
     fn takes_textures(&self) -> bool {
+        false
+    }
+
+    /// Changes the bitrate of the running encoder (adaptive quality).
+    /// False when it cannot; the caller then opens a new one.
+    fn set_bitrate(&mut self, _bitrate: u32) -> bool {
         false
     }
 }
@@ -720,6 +727,15 @@ impl Encoder for MfEncoder {
     fn takes_textures(&self) -> bool {
         self.manager.is_some()
     }
+
+    fn set_bitrate(&mut self, bitrate: u32) -> bool {
+        // Hardware encoders take a new mean bitrate mid-stream; one that
+        // refuses is reopened.
+        self.codec_api.as_ref().is_some_and(|api| {
+            unsafe { api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bitrate)) }
+                .is_ok()
+        })
+    }
 }
 
 /// The LUID of the adapter `device` is on.
@@ -796,12 +812,13 @@ impl Drop for MfEncoder {
     }
 }
 
-/// OpenH264, in software (host-core's).
-struct OpenH264Encoder(windowcast_host::video::OpenH264);
+/// OpenH264, in software (host-core's), and its frame rate.
+struct OpenH264Encoder(windowcast_host::video::OpenH264, u32);
 
 impl OpenH264Encoder {
     fn new(s: &Settings) -> Result<Self, String> {
-        windowcast_host::video::OpenH264::new(s.bitrate, s.fps).map(OpenH264Encoder)
+        windowcast_host::video::OpenH264::new(s.bitrate, s.fps)
+            .map(|encoder| OpenH264Encoder(encoder, s.fps))
     }
 }
 
@@ -822,5 +839,9 @@ impl Encoder for OpenH264Encoder {
 
     fn describe(&self) -> String {
         "OpenH264 (software)".into()
+    }
+
+    fn set_bitrate(&mut self, bitrate: u32) -> bool {
+        self.0.set_rate(bitrate, self.1).is_ok()
     }
 }

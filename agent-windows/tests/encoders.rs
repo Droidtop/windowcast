@@ -160,6 +160,74 @@ fn every_encoder_on_this_machine_encodes_and_obeys_keyframe_requests() {
     }
 }
 
+/// A grainy moving picture, busy enough that any encoder's rate binds.
+fn busy(frame: usize, seed: &mut u32) -> Vec<u8> {
+    let mut data = vec![0u8; W * H * 4];
+    for (i, px) in data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        *seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        let v = ((i % W + i / W + frame * 5) as u8) ^ ((*seed >> 26) as u8);
+        px.copy_from_slice(&[v, v.wrapping_add(40), v.wrapping_mul(3), 255]);
+    }
+    data
+}
+
+/// Adaptive quality changes a running encoder's bitrate: each encoder
+/// either takes a lower one mid-stream and makes smaller frames, or says
+/// it cannot (the agent then opens a new encoder).
+#[test]
+fn encoders_take_a_lower_bitrate_mid_stream() {
+    let mut runs = vec![(EncoderChoice::OpenH264, VideoCodec::H264)];
+    for codec in encoder::available_codecs(EncoderChoice::MfHardware) {
+        runs.push((EncoderChoice::MfHardware, codec));
+    }
+    for (choice, codec) in runs {
+        let settings = Settings {
+            codec,
+            width: W,
+            height: H,
+            fps: 30,
+            bitrate: 4_000_000,
+        };
+        let mut encoder = encoder::open(choice, &settings)
+            .unwrap_or_else(|e| panic!("{choice:?} {codec:?}: {e}"));
+        let mut seed = 1;
+        let mut run = |encoder: &mut Box<dyn encoder::Encoder>, from: usize, frames: usize| {
+            let mut bytes = 0;
+            for frame in from..from + frames {
+                let data = busy(frame, &mut seed);
+                let bgra = Picture::Bgra(Bgra {
+                    data: &data,
+                    width: W,
+                    height: H,
+                    stride: W * 4,
+                });
+                let time = Duration::from_millis(33 * frame as u64);
+                for out in encoder.encode(&bgra, frame == 0, time).unwrap() {
+                    bytes += out.len();
+                }
+            }
+            bytes
+        };
+        let high = run(&mut encoder, 0, 60);
+        let taken = encoder.set_bitrate(500_000);
+        run(&mut encoder, 60, 15);
+        let low = run(&mut encoder, 75, 60);
+        println!(
+            "{choice:?} {codec:?} ({}): 60 frames {} KiB at 4 Mbit/s; lower rate {}; then {} KiB",
+            encoder.describe(),
+            high / 1024,
+            if taken { "taken" } else { "refused" },
+            low / 1024
+        );
+        if taken {
+            assert!(
+                low * 2 < high,
+                "{choice:?} {codec:?} took the lower rate but kept its frame sizes"
+            );
+        }
+    }
+}
+
 /// Windows' own H.264 decoder (Media Foundation), as a second opinion on
 /// streams OpenH264's strict decoder rejects. Returns pictures decoded and
 /// the frames it refused.

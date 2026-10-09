@@ -6,6 +6,7 @@
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use windowcast_host::quality::Quality;
 use windowcast_host::{EncodedFrame, FrameSource, WindowSource};
 use windowcast_protocol::{BackendKind, InputEvent, VideoCodec, WindowId, WindowInfo};
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
@@ -106,6 +107,9 @@ impl WindowsSource {
             announce: None,
             encoder_name: String::new(),
             timings: std::env::var_os("WINDOWCAST_TIMINGS").map(|_| Timings::new()),
+            quality: Quality::default(),
+            settings: None,
+            scaled: Vec::new(),
         }
     }
 }
@@ -220,6 +224,12 @@ struct WindowStream {
     /// Per-stage timings, printed every few seconds when the environment
     /// sets WINDOWCAST_TIMINGS (for measuring the capture pipeline).
     timings: Option<Timings>,
+    /// What adaptive quality holds the stream to.
+    quality: Quality,
+    /// What the encoder was opened with or last changed to.
+    settings: Option<Settings>,
+    /// A read-back picture scaled down, when the GPU does not scale.
+    scaled: Vec<u8>,
 }
 
 struct Timings {
@@ -290,27 +300,53 @@ unsafe impl Send for WindowStream {}
 /// joined or lost a packet is never left without a picture.
 const REFRESH: Duration = Duration::from_secs(1);
 
-fn frame_time(options: &Options) -> Duration {
-    Duration::from_nanos(1_000_000_000 / u64::from(options.fps.max(1)))
+/// The frame rate in force: the setting, or less under adaptive quality.
+fn fps(options: &Options, quality: &Quality) -> u32 {
+    quality
+        .fps
+        .map_or(options.fps, |fps| fps.min(options.fps))
+        .max(1)
 }
 
-/// Encoder settings for a picture size; the bitrate scales with area.
-fn settings(options: &Options, codec: VideoCodec, width: usize, height: usize) -> Settings {
+fn frame_time(fps: u32) -> Duration {
+    Duration::from_nanos(1_000_000_000 / u64::from(fps.max(1)))
+}
+
+/// Encoder settings for a picture size; the bitrate scales with area, and
+/// adaptive quality may hold it and the frame rate lower.
+fn settings(
+    options: &Options,
+    quality: &Quality,
+    codec: VideoCodec,
+    width: usize,
+    height: usize,
+) -> Settings {
     let area = (width * height) as u64;
-    let bitrate =
+    let nominal =
         (u64::from(options.bitrate_1080p) * area / (1920 * 1080)).clamp(500_000, 50_000_000) as u32;
     Settings {
         codec,
         width,
         height,
-        fps: options.fps,
-        bitrate,
+        fps: fps(options, quality),
+        bitrate: quality.bitrate.map_or(nominal, |held| held.min(nominal)),
     }
 }
 
 impl FrameSource for WindowStream {
     fn describe(&self) -> String {
         self.encoder_name.clone()
+    }
+
+    fn frame_rate(&self) -> u32 {
+        self.current.read().expect("options").options.fps
+    }
+
+    fn set_quality(&mut self, quality: Quality) {
+        self.quality = quality;
+        if let Some(state) = &mut self.state {
+            state.capture.set_scale(quality.scale);
+        }
     }
 
     fn next_frame(&mut self, mut keyframe: bool) -> Option<EncodedFrame> {
@@ -329,7 +365,10 @@ impl FrameSource for WindowStream {
                 Capture::new(hwnd)
             };
             let capture = match capture {
-                Ok(capture) => capture,
+                Ok(mut capture) => {
+                    capture.set_scale(self.quality.scale);
+                    capture
+                }
                 Err(e) => {
                     eprintln!("capture of window {} failed: {e}", self.window.0);
                     return None;
@@ -347,7 +386,7 @@ impl FrameSource for WindowStream {
                 return None;
             }
             let (options, generation) = self.options();
-            let frame_time = frame_time(&options);
+            let frame_time = frame_time(fps(&options, &self.quality));
             // Never faster than the frame rate: wait out the frame time, then
             // up to one more frame time for a new picture.
             std::thread::sleep(self.next_at.saturating_duration_since(Instant::now()));
@@ -360,16 +399,38 @@ impl FrameSource for WindowStream {
                 }
             };
 
-            let Some(picture) = state.capture.picture() else {
+            let Some(mut picture) = state.capture.picture() else {
                 continue;
             };
             if !(changed || keyframe || self.last_sent.elapsed() >= REFRESH) {
                 continue;
             }
+            // A picture read back into memory is scaled here; the GPU path
+            // scales during conversion.
+            if let convert::Picture::Bgra(bgra) = &picture {
+                let to = convert::scaled(bgra.width, bgra.height, self.quality.scale);
+                if to != convert::even(bgra.width, bgra.height) {
+                    picture =
+                        convert::Picture::Bgra(convert::scale_bgra(bgra, to, &mut self.scaled));
+                }
+            }
             let size = convert::even(picture.width(), picture.height());
             let mut texture_output = None;
-            if size != state.size || generation != self.generation {
-                let settings = settings(&options, self.codec, size.0, size.1);
+            let wanted = settings(&options, &self.quality, self.codec, size.0, size.1);
+            // A new bitrate alone goes to the running encoder; anything else
+            // (or an encoder that cannot) opens a new one.
+            let reopen = size != state.size
+                || generation != self.generation
+                || self.settings.is_some_and(|s| s.fps != wanted.fps);
+            if !reopen && self.settings.is_some_and(|s| s.bitrate != wanted.bitrate) {
+                if state.encoder.set_bitrate(wanted.bitrate) {
+                    self.settings = Some(wanted);
+                } else {
+                    state.size = (0, 0);
+                }
+            }
+            if size != state.size || reopen {
+                let settings = wanted;
                 // A live change to an encoder that cannot make this
                 // stream's codec keeps the stream going on the best one
                 // that can.
@@ -394,6 +455,7 @@ impl FrameSource for WindowStream {
                     }
                 };
                 self.encoder_name = state.encoder.describe();
+                self.settings = Some(settings);
                 // From the next picture on (this one is already read).
                 texture_output = Some(state.encoder.takes_textures());
                 self.generation = generation;

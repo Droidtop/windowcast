@@ -37,7 +37,7 @@ use windows::Win32::System::WinRT::Direct3D11::{
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
-use crate::convert::{Bgra, Nv12, Picture};
+use crate::convert::{self, Bgra, Nv12, Picture};
 use crate::gpu_convert::Converter;
 
 const PIXEL_FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
@@ -80,6 +80,8 @@ pub struct Capture {
     /// (it is on this device's GPU), and the last such texture.
     texture_output: bool,
     texture: Option<(ID3D11Texture2D, usize, usize)>,
+    /// Adaptive quality's picture scale, applied by the GPU conversion.
+    scale: f32,
 }
 
 fn create_device(
@@ -169,6 +171,7 @@ impl Capture {
             nv12_size: None,
             texture_output: false,
             texture: None,
+            scale: 1.0,
         })
     }
 
@@ -215,6 +218,12 @@ impl Capture {
 
     /// From the next picture on, hand over NV12 textures (`true`) or
     /// pictures read back into memory.
+    /// From the next picture on, converts at `scale` of the window's size
+    /// (GPU conversion only; read-back pictures stay full size).
+    pub fn set_scale(&mut self, scale: f32) {
+        self.scale = scale.clamp(0.1, 1.0);
+    }
+
     pub fn set_texture_output(&mut self, on: bool) {
         self.texture_output = on && self.converter.is_some();
         if !self.texture_output {
@@ -237,8 +246,9 @@ impl Capture {
             // The window is off its screen: keep the last picture.
             return true;
         };
+        let size = convert::scaled(rect.2, rect.3, self.scale);
         if self.texture_output {
-            match converter.convert_to_texture(texture, rect) {
+            match converter.convert_to_texture(texture, rect, size) {
                 Ok(converted) => {
                     self.texture = Some(converted);
                     return true;
@@ -252,7 +262,7 @@ impl Capture {
                 }
             }
         }
-        match converter.convert(texture, rect, &mut self.nv12) {
+        match converter.convert(texture, rect, size, &mut self.nv12) {
             Ok(size) => {
                 self.nv12_size = Some(size);
                 true

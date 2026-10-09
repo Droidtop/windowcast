@@ -4,7 +4,9 @@
 //! conversions (host-core's `video`) are the fallback for devices without
 //! a video processor.
 
-pub use windowcast_host::video::{even, nv12_to_i420, to_i420, to_nv12, Bgra, Nv12};
+pub use windowcast_host::video::{
+    even, nv12_to_i420, scale_bgra, scaled, to_i420, to_nv12, Bgra, Nv12,
+};
 
 /// A captured picture, in whichever layout capture produced.
 pub enum Picture<'a> {

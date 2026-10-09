@@ -1,7 +1,8 @@
 //! Colour conversion on the GPU: the captured BGRA texture goes through
 //! the GPU's video processor (the same unit the client uses on the way
 //! out) into an NV12 texture, cut to the window and at the encoder's even
-//! size, and only that NV12 picture is read back: 1.5 bytes a pixel
+//! size (scaled down there when adaptive quality asks for a smaller
+//! picture), and only that NV12 picture is read back: 1.5 bytes a pixel
 //! instead of 4, and no conversion loop on the processor. When the encoder
 //! is on the same GPU it takes the NV12 texture itself and nothing is read
 //! back at all (`convert_to_texture`). The output is BT.601 at studio
@@ -148,16 +149,18 @@ impl Converter {
     }
 
     /// Converts `rect` (left, top, width, height) of `texture` to NV12 at
-    /// the rectangle's even size and reads it into `out`: the Y rows, then
-    /// the interleaved UV rows, tightly packed. Returns the picture size.
+    /// `size` (even; the rectangle's even size, or smaller to scale down)
+    /// and reads it into `out`: the Y rows, then the interleaved UV rows,
+    /// tightly packed. Returns the picture size.
     pub fn convert(
         &mut self,
         texture: &ID3D11Texture2D,
         rect: (usize, usize, usize, usize),
+        size: (usize, usize),
         out: &mut Vec<u8>,
     ) -> windows::core::Result<(usize, usize)> {
-        let (w, h) = (rect.2 & !1, rect.3 & !1);
-        let target = self.blit(texture, rect, false)?;
+        let (w, h) = size;
+        let target = self.blit(texture, rect, size, false)?;
         let context = self.context.clone();
         let stage = self.stage.as_ref().expect("stage");
         unsafe {
@@ -184,26 +187,29 @@ impl Converter {
         &mut self,
         texture: &ID3D11Texture2D,
         rect: (usize, usize, usize, usize),
+        size: (usize, usize),
     ) -> windows::core::Result<(ID3D11Texture2D, usize, usize)> {
-        let target = self.blit(texture, rect, true)?;
-        Ok((target, rect.2 & !1, rect.3 & !1))
+        let target = self.blit(texture, rect, size, true)?;
+        Ok((target, size.0, size.1))
     }
 
     /// Runs the video processor from `rect` of `texture` into the stage's
-    /// NV12 texture, or the ring's next one.
+    /// NV12 texture, or the ring's next one, at `size`.
     fn blit(
         &mut self,
         texture: &ID3D11Texture2D,
         rect: (usize, usize, usize, usize),
+        size: (usize, usize),
         ring: bool,
     ) -> windows::core::Result<ID3D11Texture2D> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { texture.GetDesc(&mut desc) };
         let (left, top, width, height) = rect;
         let (w, h) = (width & !1, height & !1);
+        let (out_w, out_h) = size;
         let video_device = self.video_device.clone();
         let video_context = self.video_context.clone();
-        self.stage((desc.Width, desc.Height), (w as u32, h as u32))?;
+        self.stage((desc.Width, desc.Height), (out_w as u32, out_h as u32))?;
         let stage = self.stage.as_mut().expect("stage");
         let destination = if ring {
             let texture = stage.ring[stage.next].clone();
@@ -252,8 +258,8 @@ impl Converter {
             let target = RECT {
                 left: 0,
                 top: 0,
-                right: w as i32,
-                bottom: h as i32,
+                right: out_w as i32,
+                bottom: out_h as i32,
             };
             video_context.VideoProcessorSetStreamSourceRect(
                 &stage.processor,

@@ -5,6 +5,7 @@
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use windowcast_host::quality::Quality;
 use windowcast_host::video::{self, OpenH264};
 use windowcast_host::{EncodedFrame, FrameSource, WindowSource};
 use windowcast_protocol::{BackendKind, InputEvent, VideoCodec, WindowId, WindowInfo};
@@ -124,6 +125,12 @@ struct WindowStream {
     size: (usize, usize),
     next_at: Instant,
     last_sent: Instant,
+    /// What adaptive quality holds the stream to.
+    quality: Quality,
+    /// The bitrate and frame rate the encoder runs at now.
+    rate: (u32, u32),
+    /// The picture scaled down, when the quality scales it.
+    scaled: Vec<u8>,
 }
 
 impl WindowStream {
@@ -135,8 +142,28 @@ impl WindowStream {
             size: (0, 0),
             next_at: Instant::now(),
             last_sent: Instant::now(),
+            quality: Quality::default(),
+            rate: (0, 0),
+            scaled: Vec::new(),
         }
     }
+}
+
+/// The frame rate in force: the setting, or less under adaptive quality.
+fn fps(options: &Options, quality: &Quality) -> u32 {
+    quality
+        .fps
+        .map_or(options.fps, |fps| fps.min(options.fps))
+        .max(1)
+}
+
+/// The bitrate for a picture of `size`: the setting scaled by area, or less
+/// under adaptive quality.
+fn bitrate(options: &Options, quality: &Quality, size: (usize, usize)) -> u32 {
+    let area = (size.0 * size.1) as u64;
+    let nominal =
+        (u64::from(options.bitrate_1080p) * area / (1920 * 1080)).clamp(500_000, 50_000_000) as u32;
+    quality.bitrate.map_or(nominal, |held| held.min(nominal))
 }
 
 impl FrameSource for WindowStream {
@@ -144,9 +171,18 @@ impl FrameSource for WindowStream {
         "OpenH264 (software)".into()
     }
 
+    fn frame_rate(&self) -> u32 {
+        self.options.fps
+    }
+
+    fn set_quality(&mut self, quality: Quality) {
+        self.quality = quality;
+    }
+
     fn next_frame(&mut self, mut keyframe: bool) -> Option<EncodedFrame> {
-        let frame_time = Duration::from_nanos(1_000_000_000 / u64::from(self.options.fps.max(1)));
         loop {
+            let frame_time =
+                Duration::from_nanos(1_000_000_000 / u64::from(fps(&self.options, &self.quality)));
             // Never faster than the frame rate.
             std::thread::sleep(self.next_at.saturating_duration_since(Instant::now()));
             let changed = match self.capture.poll(frame_time) {
@@ -159,17 +195,17 @@ impl FrameSource for WindowStream {
             if !(changed || keyframe || self.last_sent.elapsed() >= REFRESH) {
                 continue;
             }
-            let options = self.options.clone();
             let Some(picture) = self.capture.picture() else {
                 continue;
             };
-            let size = video::even(picture.width, picture.height);
+            let size = video::scaled(picture.width, picture.height, self.quality.scale);
+            let rate = (
+                bitrate(&self.options, &self.quality, size),
+                fps(&self.options, &self.quality),
+            );
             let mut announce = None;
             if size != self.size || self.encoder.is_none() {
-                let area = (size.0 * size.1) as u64;
-                let bitrate = (u64::from(options.bitrate_1080p) * area / (1920 * 1080))
-                    .clamp(500_000, 50_000_000) as u32;
-                match OpenH264::new(bitrate, options.fps) {
+                match OpenH264::new(rate.0, rate.1) {
                     Ok(encoder) => self.encoder = Some(encoder),
                     Err(e) => {
                         eprintln!("encoder: {e}");
@@ -178,11 +214,23 @@ impl FrameSource for WindowStream {
                 }
                 println!("streaming {}x{} with OpenH264", size.0, size.1);
                 self.size = size;
+                self.rate = rate;
                 announce = Some((size.0 as u32, size.1 as u32));
                 keyframe = true;
             }
-            self.next_at = Instant::now() + frame_time;
             let encoder = self.encoder.as_mut().expect("encoder");
+            if rate != self.rate {
+                if let Err(e) = encoder.set_rate(rate.0, rate.1) {
+                    eprintln!("{e}");
+                }
+                self.rate = rate;
+            }
+            self.next_at = Instant::now() + frame_time;
+            let picture = if size == video::even(picture.width, picture.height) {
+                picture
+            } else {
+                video::scale_bgra(&picture, size, &mut self.scaled)
+            };
             let encoded = encoder.encode(size.0, size.1, keyframe, |i420| {
                 video::to_i420(&picture, i420);
                 Ok(())
