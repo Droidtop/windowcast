@@ -158,6 +158,13 @@ impl WindowSource for WindowsSource {
         check_window(window)?;
         Ok(Box::new(self.open_stream(window, codec, true)))
     }
+
+    fn open_audio(
+        &self,
+        window: WindowId,
+    ) -> Option<Result<Box<dyn windowcast_host::audio::AudioSource>, String>> {
+        Some(crate::audio::ProcessAudio::open(window).map(|audio| Box::new(audio) as _))
+    }
 }
 
 fn check_window(window: WindowId) -> Result<(), String> {

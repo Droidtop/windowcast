@@ -8,12 +8,21 @@ license.workspace = true
 name = "windowcast-agent-windows"
 path = "src/main.rs"
 
+# A process playing a tone with its session muted: what the audio tests
+# capture.
+[[bin]]
+name = "windowcast-test-tone"
+path = "src/bin/test_tone.rs"
+test = false
+
 [dependencies]
 windowcast-protocol = { path = "../protocol" }
 windowcast-host = { path = "../host-core" }
 tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# For #[implement] (the audio activation's completion handler).
+windows-core = "0.62"
 windows = { version = "0.62", features = [
     "Foundation",
     "Graphics",
@@ -27,8 +36,11 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
     "Win32_Media_MediaFoundation",
+    "Win32_Security",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_LibraryLoader",
@@ -43,6 +55,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [target.'cfg(windows)'.dev-dependencies]
+opus = "0.3"
 tokio = { workspace = true, features = ["net"] }
 windowcast-client-core = { path = "../client-core" }
 windowcast-identity = { path = "../identity" }
