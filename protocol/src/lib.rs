@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped on any incompatible change to the message shapes below. A peer
 /// that receives a mismatched version should refuse the session rather
 /// than guess at how to interpret an unknown wire format.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
@@ -186,6 +186,93 @@ pub enum ControlMessage {
 
     Ping,
     Pong,
+
+    /// SDP renegotiation once the session is up (a window track attached or
+    /// detached). It rides the control channel, which is already inside the
+    /// DTLS session both sides authenticated at connect time, so it needs no
+    /// signature of its own. Handled inside `windowcast-transport`; an
+    /// embedder never sees it.
+    SessionDescription {
+        kind: SdpKind,
+        sdp: String,
+    },
+
+    /// A streamed window changed size on the host. The video track's own
+    /// bitstream also carries the new size; this lets the client resize its
+    /// surface before the first frame at the new size arrives.
+    WindowResized {
+        window: WindowId,
+        width: u32,
+        height: u32,
+    },
+    /// Which streamed window has keyboard focus on the host now.
+    WindowFocused(WindowId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SdpKind {
+    Offer,
+    Answer,
+}
+
+/// Which credential a connecting client presents during signaling. See
+/// docs/SECURITY.md: `Pair` runs the PIN-seeded PAKE once and pins both
+/// identities; `Resume` relies on identities pinned by an earlier pairing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConnectMode {
+    Pair,
+    Resume,
+}
+
+/// Messages on the signaling channel: whatever carries the very first
+/// offer/answer before any WebRTC connection exists (a LAN TCP socket
+/// today). The channel itself is NOT trusted; every description it carries
+/// is signed by the sender's persistent identity and, when pairing,
+/// HMAC-tagged with the PIN-derived key, over a transcript that binds both
+/// peers' identities and fresh nonces. See `windowcast-transport::signaling`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SignalMessage {
+    Hello {
+        version: u16,
+        /// The sender's Ed25519 public key (`windowcast-identity::PeerId`).
+        peer_id: [u8; 32],
+        /// Fresh per connection, so a recorded handshake cannot be replayed.
+        nonce: [u8; 32],
+        /// Only meaningful from the client; the host echoes the client's.
+        mode: ConnectMode,
+    },
+    /// One SPAKE2 message (pairing only).
+    Pake(Vec<u8>),
+    Description {
+        kind: SdpKind,
+        sdp: String,
+        /// Ed25519 signature (64 bytes) over the signaling transcript.
+        signature: Vec<u8>,
+        /// HMAC-SHA256 of the same transcript under the PIN-derived key;
+        /// present only while pairing.
+        pin_tag: Option<[u8; 32]>,
+    },
+    /// The peer refuses the session. The text is for logs; it never says
+    /// which check failed beyond "authentication failed", so it is no
+    /// oracle for a PIN guesser.
+    Reject(String),
+}
+
+pub fn encode_signal(message: &SignalMessage) -> Result<Vec<u8>, ProtocolError> {
+    Ok(bincode::serialize(message)?)
+}
+
+pub fn decode_signal(bytes: &[u8]) -> Result<SignalMessage, ProtocolError> {
+    let message: SignalMessage = bincode::deserialize(bytes)?;
+    if let SignalMessage::Hello { version, .. } = &message {
+        if *version != PROTOCOL_VERSION {
+            return Err(ProtocolError::VersionMismatch {
+                found: *version,
+                expected: PROTOCOL_VERSION,
+            });
+        }
+    }
+    Ok(message)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,6 +397,31 @@ mod tests {
             decode(&encode(&experimental_msg).unwrap()).unwrap(),
             experimental_msg
         );
+    }
+
+    #[test]
+    fn signal_messages_round_trip_and_hello_checks_the_version() {
+        let hello = SignalMessage::Hello {
+            version: PROTOCOL_VERSION,
+            peer_id: [1; 32],
+            nonce: [2; 32],
+            mode: ConnectMode::Pair,
+        };
+        assert_eq!(
+            decode_signal(&encode_signal(&hello).unwrap()).unwrap(),
+            hello
+        );
+
+        let old = SignalMessage::Hello {
+            version: PROTOCOL_VERSION - 1,
+            peer_id: [1; 32],
+            nonce: [2; 32],
+            mode: ConnectMode::Resume,
+        };
+        assert!(matches!(
+            decode_signal(&encode_signal(&old).unwrap()),
+            Err(ProtocolError::VersionMismatch { .. })
+        ));
     }
 
     #[test]
