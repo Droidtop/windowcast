@@ -4525,19 +4525,26 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 name = "windowcast-agent-linux"
 version = "0.8.0"
 dependencies = [
+ "rustix 1.1.4",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-misc",
  "wayland-protocols-wlr",
+ "windowcast-cli-tools",
+ "windowcast-client-core",
  "windowcast-host",
+ "windowcast-identity",
  "windowcast-protocol",
+ "xkbcommon",
 ]
 
 [[package]]
 name = "windowcast-agent-windows"
 version = "0.8.0"
 dependencies = [
- "openh264",
  "tokio",
  "windowcast-cli-tools",
  "windowcast-client-core",
@@ -4631,6 +4638,7 @@ name = "windowcast-host"
 version = "0.8.0"
 dependencies = [
  "bytes",
+ "openh264",
  "tokio",
  "tracing",
  "windowcast-identity",
@@ -5023,6 +5031,16 @@ name = "xcursor"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
+
+[[package]]
+name = "xkbcommon"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d66ca9352cbd4eecbbc40871d8a11b4ac8107cfc528a6e14d7c19c69d0e1ac9"
+dependencies = [
+ "libc",
+ "xkeysym",
+]
 
 [[package]]
 name = "xkbcommon-dl"

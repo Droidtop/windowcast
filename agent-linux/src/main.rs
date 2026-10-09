@@ -1,49 +1,36 @@
-//! windowcast Linux/Wayland host agent: the Linux end of the windowcast
-//! library. `windowcast-host` does the serving (pairing, sessions,
-//! streams); this agent supplies the compositor's windows. It does not
-//! capture windows yet — see `capture.rs` for exactly what's still missing
-//! and why.
+//! windowcast Linux/Wayland host agent.
 //!
-//! Usage: `windowcast-agent-linux [--listen ADDR:PORT] [--no-pairing]`
-//! (`--listen` defaults to 0.0.0.0:47100).
-
-mod capture;
-mod toplevels;
+//! Usage: `windowcast-agent-linux [--listen ADDR:PORT] [--no-pairing]
+//! [--fps N] [--bitrate BPS_AT_1080P]` (`--listen` defaults to
+//! 0.0.0.0:47100). Runs inside the Wayland session it streams from
+//! (`WAYLAND_DISPLAY`; `SWAYSOCK` for input and the desktop backend).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use windowcast_host::{FrameSource, HostConfig, WindowSource, DEFAULT_LISTEN};
-use windowcast_protocol::{VideoCodec, WindowId, WindowInfo};
-
-struct LinuxWindows;
-
-impl WindowSource for LinuxWindows {
-    fn list_windows(&self) -> Vec<WindowInfo> {
-        toplevels::list_windows().unwrap_or_else(|e| {
-            eprintln!("failed to list windows: {e}");
-            Vec::new()
-        })
-    }
-
-    fn encoders(&self) -> Vec<VideoCodec> {
-        vec![VideoCodec::H264]
-    }
-
-    fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
-        capture::open(window, codec)
-    }
-}
+use windowcast_agent_linux::{LinuxSource, Options};
+use windowcast_host::{HostConfig, DEFAULT_LISTEN};
 
 #[tokio::main]
 async fn main() {
     let mut listen = DEFAULT_LISTEN.to_owned();
     let mut pairing = true;
+    let mut options = Options::default();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
+        let mut value = |name: &str| {
+            args.next()
+                .unwrap_or_else(|| panic!("{name} needs a value"))
+        };
         match arg.as_str() {
-            "--listen" => listen = args.next().expect("--listen needs ADDR:PORT"),
+            "--listen" => listen = value("--listen"),
             "--no-pairing" => pairing = false,
+            "--fps" => options.fps = value("--fps").parse().expect("--fps needs a number"),
+            "--bitrate" => {
+                options.bitrate_1080p = value("--bitrate")
+                    .parse()
+                    .expect("--bitrate needs a number")
+            }
             other => panic!("unknown argument {other}"),
         }
     }
@@ -52,7 +39,7 @@ async fn main() {
         pairing,
         data_dir: data_dir(),
     };
-    if let Err(e) = windowcast_host::run(config, Arc::new(LinuxWindows)).await {
+    if let Err(e) = windowcast_host::run(config, Arc::new(LinuxSource::new(options))).await {
         eprintln!("host stopped: {e}");
         std::process::exit(1);
     }
