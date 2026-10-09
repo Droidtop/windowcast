@@ -91,6 +91,15 @@ int64_t windowcast_session_next_frame(const WindowcastSession *session, uint64_t
                                       uint32_t timeout_ms, uint8_t *out, size_t cap,
                                       WindowcastFrameInfo *info);
 
+/* Next Opus packet (48 kHz, stereo, 20 ms) of a window's sound. Returns its
+ * length, WINDOWCAST_TIMEOUT (quiet, or no audio yet), WINDOWCAST_ENDED when
+ * the window's audio is over, or WINDOWCAST_BUFFER_TOO_SMALL (the packet is
+ * dropped; Opus packets are under 1500 bytes). rtp_timestamp, if not null,
+ * gets the packet's 48 kHz timestamp. */
+int64_t windowcast_session_next_audio(const WindowcastSession *session, uint64_t window,
+                                      uint32_t timeout_ms, uint8_t *out, size_t cap,
+                                      uint32_t *rtp_timestamp);
+
 #ifdef __cplusplus
 }
 #endif

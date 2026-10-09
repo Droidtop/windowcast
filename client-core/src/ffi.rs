@@ -352,6 +352,45 @@ pub unsafe extern "C" fn windowcast_session_next_frame(
     frame.data.len() as i64
 }
 
+/// Next Opus packet (48 kHz, stereo, 20 ms) of a window's sound. Returns
+/// its length, WINDOWCAST_TIMEOUT (quiet, or no audio yet),
+/// WINDOWCAST_ENDED when the window's audio is over, or
+/// WINDOWCAST_BUFFER_TOO_SMALL (the packet is dropped; Opus packets are
+/// under 1500 bytes). `rtp_timestamp` gets the packet's 48 kHz timestamp.
+///
+/// # Safety
+/// `session` must be valid; `out` valid for `cap` bytes; `rtp_timestamp`
+/// null or valid.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_next_audio(
+    session: *const ClientSession,
+    window: u64,
+    timeout_ms: u32,
+    out: *mut u8,
+    cap: usize,
+    rtp_timestamp: *mut u32,
+) -> i64 {
+    let Some(session) = session.as_ref() else {
+        return WINDOWCAST_ERROR;
+    };
+    let packet = match session.next_audio(
+        WindowId(window),
+        Duration::from_millis(u64::from(timeout_ms)),
+    ) {
+        crate::AudioPoll::Packet(packet) => packet,
+        crate::AudioPoll::Timeout => return WINDOWCAST_TIMEOUT,
+        crate::AudioPoll::Ended => return WINDOWCAST_ENDED,
+    };
+    if let Some(timestamp) = rtp_timestamp.as_mut() {
+        *timestamp = packet.rtp_timestamp;
+    }
+    if packet.data.len() > cap || out.is_null() {
+        return WINDOWCAST_BUFFER_TOO_SMALL;
+    }
+    std::ptr::copy_nonoverlapping(packet.data.as_ptr(), out, packet.data.len());
+    packet.data.len() as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

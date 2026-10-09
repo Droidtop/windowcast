@@ -29,7 +29,8 @@ use windowcast_protocol::{
     WindowInfo,
 };
 use windowcast_transport::{
-    connect, ClientCredential, RemoteWindow, Session, TransportError, WindowFrame,
+    connect, AudioPacket, ClientCredential, RemoteAudio, RemoteTrack, RemoteWindow, Session,
+    TransportError, WindowFrame,
 };
 
 /// Frames queued per window before the client is considered behind. When
@@ -167,6 +168,21 @@ pub enum Event {
     Closed,
 }
 
+/// Opus packets queued per window before the oldest are dropped: a second
+/// of sound, more than any player buffers.
+const AUDIO_QUEUE: usize = 50;
+
+/// The result of waiting for a window's sound.
+pub enum AudioPoll {
+    /// One Opus packet (48 kHz, stereo), 20 ms of sound.
+    Packet(AudioPacket),
+    /// Nothing within the timeout: the window is quiet, or it has no
+    /// audio (yet, or at all).
+    Timeout,
+    /// The window's audio ended.
+    Ended,
+}
+
 /// The result of waiting for a frame.
 pub enum FramePoll {
     Frame(WindowFrame),
@@ -198,6 +214,8 @@ struct WindowSlot {
 struct Shared {
     events: Mutex<Receiver<Event>>,
     slots: Mutex<HashMap<WindowId, Arc<WindowSlot>>>,
+    /// Each window's sound, from its audio track's arrival to its end.
+    audio: Mutex<HashMap<WindowId, Arc<Mutex<Receiver<AudioPacket>>>>>,
     /// When the unanswered ping went out, and the last round trip.
     ping: Mutex<(Option<Instant>, Option<Duration>)>,
 }
@@ -270,6 +288,7 @@ impl ClientSession {
         let shared = Arc::new(Shared {
             events: Mutex::new(event_rx),
             slots: Mutex::new(HashMap::new()),
+            audio: Mutex::new(HashMap::new()),
             ping: Mutex::new((None, None)),
         });
         let windows = Arc::new(Mutex::new(Vec::new()));
@@ -393,6 +412,38 @@ impl ClientSession {
                     slots.remove(&window);
                 }
                 FramePoll::Ended
+            }
+        }
+    }
+
+    /// The next Opus packet of `window`'s sound, waiting up to `timeout`.
+    /// A window's audio track arrives a little after its stream starts, and
+    /// only if the host captures its sound; until then this times out.
+    pub fn next_audio(&self, window: WindowId, timeout: Duration) -> AudioPoll {
+        let queue = self
+            .shared
+            .audio
+            .lock()
+            .expect("audio")
+            .get(&window)
+            .cloned();
+        let Some(queue) = queue else {
+            std::thread::sleep(timeout.min(Duration::from_millis(50)));
+            return AudioPoll::Timeout;
+        };
+        let received = queue.lock().expect("audio queue").recv_timeout(timeout);
+        match received {
+            Ok(packet) => AudioPoll::Packet(packet),
+            Err(RecvTimeoutError::Timeout) => AudioPoll::Timeout,
+            Err(RecvTimeoutError::Disconnected) => {
+                let mut audio = self.shared.audio.lock().expect("audio");
+                if audio
+                    .get(&window)
+                    .is_some_and(|current| Arc::ptr_eq(current, &queue))
+                {
+                    audio.remove(&window);
+                }
+                AudioPoll::Ended
             }
         }
     }
@@ -522,9 +573,32 @@ async fn pump_events(
 /// Takes each window track as it arrives and pumps its frames into that
 /// window's queue.
 async fn pump_windows(session: Arc<Session>, shared: Arc<Shared>) {
-    while let Ok(remote) = session.next_remote_window().await {
-        let (sender, keyframe) = shared.take_sender(remote.window());
-        tokio::spawn(pump_frames(remote, sender, keyframe));
+    while let Ok(remote) = session.next_remote_track().await {
+        match remote {
+            RemoteTrack::Window(remote) => {
+                let (sender, keyframe) = shared.take_sender(remote.window());
+                tokio::spawn(pump_frames(remote, sender, keyframe));
+            }
+            RemoteTrack::Audio(remote) => {
+                let (sender, receiver) = mpsc::sync_channel(AUDIO_QUEUE);
+                shared
+                    .audio
+                    .lock()
+                    .expect("audio")
+                    .insert(remote.window(), Arc::new(Mutex::new(receiver)));
+                tokio::spawn(pump_audio(remote, sender));
+            }
+        }
+    }
+}
+
+/// A window's Opus packets into its queue; a full queue (nobody playing)
+/// drops the new packet rather than block the session.
+async fn pump_audio(mut remote: RemoteAudio, queue: SyncSender<AudioPacket>) {
+    while let Ok(packet) = remote.next_packet().await {
+        if let Err(TrySendError::Disconnected(_)) = queue.try_send(packet) {
+            return;
+        }
     }
 }
 
