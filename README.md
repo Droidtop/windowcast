@@ -49,10 +49,15 @@ client, and the clipboard both ways; the Windows agent delivers all but
 gamepads. Real windows stream from Linux too: the Linux agent captures a
 window under any compositor with ext-image-copy-capture (wlroots 0.19,
 sway 1.11 and later), encodes it with OpenH264, and under sway delivers
-the pointer and keys. What's **not** done yet: macOS, gamepads on Windows
-(they need a virtual gamepad driver) and Linux, the clipboard and GPU
-encoding on Linux, audio, and every backend except the native and desktop
-ones (their seam is in place: see docs/BACKENDS.md).
+the pointer and keys. A window's sound streams with it from Windows hosts:
+WASAPI process loopback captures what the window's application plays (and
+nothing else), sent as Opus on an audio track beside the picture, and
+played by the Windows client (WASAPI) and the Android library (MediaCodec,
+AudioTrack). What's **not** done yet: macOS, gamepads on Windows (they
+need a virtual gamepad driver) and Linux, the clipboard, GPU encoding and
+sound on Linux hosts, the microphone back to the host, and every backend
+except the native and desktop ones (their seam is in place: see
+docs/BACKENDS.md).
 
 | Crate | Status |
 |---|---|
