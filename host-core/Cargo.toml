@@ -12,3 +12,6 @@ windowcast-transport = { path = "../transport" }
 tokio = { workspace = true, features = ["net"] }
 tracing.workspace = true
 bytes = "1"
+# The software H.264 encoder every host can fall back to (BSD-2-Clause,
+# built from source).
+openh264 = "0.9"

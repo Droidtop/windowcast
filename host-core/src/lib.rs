@@ -8,6 +8,8 @@
 //! steers a running host through [`HostControl`]: the PIN, the trusted
 //! clients, who is connected and what each stream is doing.
 
+pub mod video;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};

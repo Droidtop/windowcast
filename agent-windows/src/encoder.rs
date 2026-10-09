@@ -796,30 +796,12 @@ impl Drop for MfEncoder {
     }
 }
 
-/// OpenH264, in software.
-struct OpenH264Encoder {
-    encoder: openh264::encoder::Encoder,
-    i420: Vec<u8>,
-}
-
-unsafe impl Send for OpenH264Encoder {}
+/// OpenH264, in software (host-core's).
+struct OpenH264Encoder(windowcast_host::video::OpenH264);
 
 impl OpenH264Encoder {
     fn new(s: &Settings) -> Result<Self, String> {
-        use openh264::encoder::{BitRate, EncoderConfig, FrameRate, IntraFramePeriod};
-        let config = EncoderConfig::new()
-            .bitrate(BitRate::from_bps(s.bitrate))
-            .max_frame_rate(FrameRate::from_hz(s.fps as f32))
-            .intra_frame_period(IntraFramePeriod::from_num_frames(s.fps * 2));
-        let encoder = openh264::encoder::Encoder::with_api_config(
-            openh264::OpenH264API::from_source(),
-            config,
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(OpenH264Encoder {
-            encoder,
-            i420: Vec::new(),
-        })
+        windowcast_host::video::OpenH264::new(s.bitrate, s.fps).map(OpenH264Encoder)
     }
 }
 
@@ -830,23 +812,12 @@ impl Encoder for OpenH264Encoder {
         keyframe: bool,
         _time: Duration,
     ) -> Result<Vec<Vec<u8>>, String> {
-        picture.to_i420(&mut self.i420)?;
         let (w, h) = convert::even(picture.width(), picture.height());
-        let yuv = openh264::formats::YUVBuffer::from_vec(std::mem::take(&mut self.i420), w, h);
-        if keyframe {
-            self.encoder.force_intra_frame();
-        }
-        let out = self
-            .encoder
-            .encode(&yuv)
-            .map_err(|e| e.to_string())?
-            .to_vec();
-        self.i420 = Vec::new();
-        Ok(if out.is_empty() {
-            Vec::new()
-        } else {
-            vec![out]
-        })
+        Ok(self
+            .0
+            .encode(w, h, keyframe, |i420| picture.to_i420(i420))?
+            .into_iter()
+            .collect())
     }
 
     fn describe(&self) -> String {

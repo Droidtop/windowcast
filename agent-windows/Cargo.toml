@@ -14,8 +14,6 @@ windowcast-host = { path = "../host-core" }
 tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# Software H.264 fallback encoder (BSD-2-Clause, built from source).
-openh264 = "0.9"
 windows = { version = "0.62", features = [
     "Foundation",
     "Graphics",
