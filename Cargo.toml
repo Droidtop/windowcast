@@ -12,6 +12,8 @@ members = [
     "agent-linux",
     "agent-windows",
     "cli-tools",
+    "client-windows",
+    "app",
 ]
 
 [workspace.package]
