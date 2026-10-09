@@ -505,3 +505,75 @@ async fn window_tracks_in_each_codec_attach_carry_frames_and_detach() {
         .unwrap();
     assert_eq!(decode_units(VideoCodec::H265, &frame.data), more);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_audio_track_carries_opus_packets_and_ends_with_the_window() {
+    let peers = Peers::new();
+    let (host, client) = peers
+        .run(Some("482913"), ClientCredential::Pin("482913"))
+        .await;
+    let host = host.expect("host side").session;
+    let client = client.expect("client side").session;
+
+    let window = WindowId(5);
+    let video = host.attach_window(window, VideoCodec::H264).await.unwrap();
+    let audio = host.attach_audio(window).await.unwrap();
+    let (keyframe, _) = test_frames(VideoCodec::H264, 6);
+    video
+        .write_frame(
+            encode_units(VideoCodec::H264, &keyframe),
+            Duration::from_millis(16),
+        )
+        .await
+        .unwrap();
+    // Opus packets are opaque here: three 20 ms "packets".
+    let packets: Vec<Bytes> = (0..3u8).map(|n| Bytes::from(vec![0xf8, n, n, n])).collect();
+    for packet in &packets {
+        audio
+            .write_packet(packet.clone(), Duration::from_millis(20))
+            .await
+            .unwrap();
+    }
+
+    let mut remote_audio = None;
+    let mut remote_video = None;
+    while remote_audio.is_none() || remote_video.is_none() {
+        match tokio::time::timeout(TEST_TIMEOUT, client.next_remote_track())
+            .await
+            .expect("no track arrived")
+            .unwrap()
+        {
+            windowcast_transport::RemoteTrack::Audio(a) => remote_audio = Some(a),
+            windowcast_transport::RemoteTrack::Window(w) => remote_video = Some(w),
+        }
+    }
+    let mut remote_audio = remote_audio.unwrap();
+    assert_eq!(remote_audio.window(), window);
+    // Packets written before the track was negotiated on the client may
+    // be gone; ones written now must arrive whole.
+    for packet in &packets {
+        audio
+            .write_packet(packet.clone(), Duration::from_millis(20))
+            .await
+            .unwrap();
+    }
+    let got = tokio::time::timeout(TEST_TIMEOUT, remote_audio.next_packet())
+        .await
+        .expect("no audio packet")
+        .unwrap();
+    assert!(
+        packets.contains(&got.data),
+        "unexpected packet {:?}",
+        got.data
+    );
+
+    assert!(host.detach_audio(window).await.unwrap());
+    assert!(host.detach_window(window).await.unwrap());
+    let ended = loop {
+        match tokio::time::timeout(TEST_TIMEOUT, remote_audio.next_packet()).await {
+            Ok(Ok(_)) => continue,
+            other => break other,
+        }
+    };
+    assert!(matches!(ended, Ok(Err(_))), "the audio track should end");
+}

@@ -22,6 +22,7 @@
 //! its own desktop container) connect over loopback even with no network
 //! up; across machines the loopback pair simply never succeeds.
 
+mod audio;
 mod keyframes;
 mod media;
 pub mod signaling;
@@ -45,6 +46,7 @@ use webrtc::peer_connection::{
 };
 use windowcast_protocol::{ControlMessage, SdpKind, StreamTarget, VideoCodec, WindowId};
 
+pub use audio::{AudioPacket, AudioTrack, RemoteAudio};
 pub use media::{is_keyframe, RemoteWindow, WindowFrame, WindowTrack};
 pub use signaling::{accept, connect, ClientCredential, Established, HostCredential};
 
@@ -117,6 +119,8 @@ pub enum TransportError {
     Pairing(#[from] windowcast_pairing::PairingError),
     #[error("the negotiated session has no {0:?} codec")]
     CodecNotNegotiated(VideoCodec),
+    #[error("the negotiated session has no Opus")]
+    AudioNotNegotiated,
     #[error("timed out")]
     Timeout,
     #[error("the session is closed")]
@@ -169,15 +173,24 @@ pub struct Session {
     negotiation: Mutex<()>,
     /// Host side: the window tracks this session is sending.
     windows: Mutex<HashMap<WindowId, WindowTrack>>,
+    /// Host side: the windows' audio tracks.
+    audio: Mutex<HashMap<WindowId, AudioTrack>>,
+}
+
+/// A track the host attached: a window's video or its audio.
+pub enum RemoteTrack {
+    Window(RemoteWindow),
+    Audio(RemoteAudio),
 }
 
 type PendingAnswer = Arc<std::sync::Mutex<Option<oneshot::Sender<String>>>>;
 
-/// Client side: one flag per received window, set when the host says the
-/// window stopped. webrtc 0.21 never reports a remote track ending (its
-/// track close events are declared but not emitted), so the end of a
-/// window's track is signalled by the host's `StreamStopped` instead.
-type EndedWindows = Arc<std::sync::Mutex<HashMap<WindowId, watch::Sender<bool>>>>;
+/// Client side: flags per received window (its video and its audio), set
+/// when the host says the window stopped. webrtc 0.21 never reports a
+/// remote track ending (its track close events are declared but not
+/// emitted), so the end of a window's tracks is signalled by the host's
+/// `StreamStopped` instead.
+type EndedWindows = Arc<std::sync::Mutex<HashMap<WindowId, Vec<watch::Sender<bool>>>>>;
 
 impl Session {
     /// Builds a fresh peer connection plus the always-present control data
@@ -284,6 +297,7 @@ impl Session {
             ended_windows,
             negotiation: Mutex::new(()),
             windows: Mutex::new(HashMap::new()),
+            audio: Mutex::new(HashMap::new()),
         })
     }
 
@@ -301,18 +315,66 @@ impl Session {
     /// Client side: the next window track the host attached. Tracks whose
     /// id is not a window's are skipped.
     pub async fn next_remote_window(&self) -> Result<RemoteWindow, TransportError> {
+        loop {
+            if let RemoteTrack::Window(window) = self.next_remote_track().await? {
+                return Ok(window);
+            }
+        }
+    }
+
+    /// Client side: the next track the host attached, a window's video or
+    /// its audio. Tracks that are neither are skipped.
+    pub async fn next_remote_track(&self) -> Result<RemoteTrack, TransportError> {
         let mut remote_tracks = self.remote_tracks.lock().await;
         loop {
             let track = self.until_closed(remote_tracks.recv()).await?;
             let (ended_tx, ended) = watch::channel(false);
-            if let Some(window) = RemoteWindow::new(track, ended).await {
-                self.ended_windows
-                    .lock()
-                    .expect("ended windows")
-                    .insert(window.window(), ended_tx);
-                return Ok(window);
-            }
+            let remote =
+                if let Some(audio) = RemoteAudio::new(Arc::clone(&track), ended.clone()).await {
+                    RemoteTrack::Audio(audio)
+                } else if let Some(window) = RemoteWindow::new(track, ended).await {
+                    RemoteTrack::Window(window)
+                } else {
+                    continue;
+                };
+            let window = match &remote {
+                RemoteTrack::Window(w) => w.window(),
+                RemoteTrack::Audio(a) => a.window(),
+            };
+            self.ended_windows
+                .lock()
+                .expect("ended windows")
+                .entry(window)
+                .or_default()
+                .push(ended_tx);
+            return Ok(remote);
         }
+    }
+
+    /// Host side: starts sending `window`'s audio as an Opus track and
+    /// renegotiates. Attaching twice returns the existing track.
+    pub async fn attach_audio(&self, window: WindowId) -> Result<AudioTrack, TransportError> {
+        let mut audio = self.audio.lock().await;
+        if let Some(existing) = audio.get(&window) {
+            return Ok(existing.clone());
+        }
+        let pending = audio::PendingAudio::add_to(&*self.peer_connection, window).await?;
+        self.renegotiate().await?;
+        let track = pending.negotiated().await?;
+        audio.insert(window, track.clone());
+        Ok(track)
+    }
+
+    /// Host side: stops sending `window`'s audio and renegotiates. The
+    /// client's end of it finishes with the window's `StreamStopped`.
+    pub async fn detach_audio(&self, window: WindowId) -> Result<bool, TransportError> {
+        let mut audio = self.audio.lock().await;
+        let Some(track) = audio.remove(&window) else {
+            return Ok(false);
+        };
+        self.peer_connection.remove_track(track.sender()).await?;
+        self.renegotiate().await?;
+        Ok(true)
     }
 
     /// Host side: starts sending `window` as its own video track in
@@ -533,9 +595,9 @@ async fn run_control_channel(
             ControlMessage::Goodbye => break,
             other => {
                 if let ControlMessage::StreamStopped(StreamTarget::Window(window)) = &other {
-                    if let Some(ended) = ended_windows.lock().expect("ended windows").remove(window)
-                    {
-                        let _ = ended.send(true);
+                    let ended = ended_windows.lock().expect("ended windows").remove(window);
+                    for flag in ended.into_iter().flatten() {
+                        let _ = flag.send(true);
                     }
                 }
                 let _ = inbound.send(other);
