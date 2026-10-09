@@ -101,15 +101,58 @@ fn check_stream(session: &ClientSession, window: WindowId, backend: BackendKind)
     });
 }
 
+/// Streams `window` and checks its sound decodes to the test window's
+/// 440 Hz tone.
+fn check_sound(session: &ClientSession, window: WindowId) {
+    session.set_rules(Vec::new());
+    session.start_window(window, &[VideoCodec::H264]).unwrap();
+    let mut decoder = opus::Decoder::new(48_000, opus::Channels::Stereo).unwrap();
+    let mut pcm = vec![0f32; 5760 * 2];
+    let mut left: Vec<f32> = Vec::new();
+    let deadline = Instant::now() + WAIT;
+    while left.len() < 48_000 {
+        assert!(Instant::now() < deadline, "no sound arrived");
+        let _ = session.next_event(Duration::ZERO);
+        let _ = session.next_frame(window, Duration::ZERO);
+        if let windowcast_client::AudioPoll::Packet(packet) =
+            session.next_audio(window, Duration::from_millis(50))
+        {
+            let frames = decoder.decode_float(&packet.data, &mut pcm, false).unwrap();
+            left.extend(pcm[..frames * 2].iter().step_by(2));
+        }
+    }
+    let sound = &left[12_000..];
+    let rms = (sound.iter().map(|s| s * s).sum::<f32>() / sound.len() as f32).sqrt();
+    let crossings = sound
+        .windows(2)
+        .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
+        .count();
+    let pitch = crossings as f32 * 48_000.0 / sound.len() as f32;
+    println!("sound: level {rms:.3}, pitch {pitch:.0} Hz");
+    assert!(rms > 0.05, "silence (level {rms})");
+    assert!((pitch - 440.0).abs() < 15.0, "pitch {pitch}");
+    session.stop_window(window).unwrap();
+    wait_for("the stream to stop", || {
+        matches!(
+            session.next_event(Duration::from_millis(100)),
+            Some(Event::StreamStopped { .. })
+        )
+        .then_some(())
+    });
+}
+
 #[test]
 fn a_window_streams_and_takes_input_under_sway() {
     if std::env::var_os("WINDOWCAST_TEST_SWAY").is_none() {
         println!("skipped: needs a running sway; set WINDOWCAST_TEST_SWAY to run");
         return;
     }
+    // With a Pulse server (WINDOWCAST_TEST_PULSE), the window plays a tone.
+    let pulse = std::env::var_os("WINDOWCAST_TEST_PULSE").is_some();
     let mut child = KillOnDrop(
         Command::new(env!("CARGO_BIN_EXE_windowcast-test-window"))
             .args([TITLE, "3366cc"])
+            .args(pulse.then_some("tone"))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -203,6 +246,9 @@ fn a_window_streams_and_takes_input_under_sway() {
 
     check_stream(&session, id, BackendKind::Native);
     check_stream(&session, id, BackendKind::Desktop);
+    if pulse {
+        check_sound(&session, id);
+    }
 
     // Input needs a streamed window: stream it again, then click a
     // quarter of the way across, half way down, and press A.

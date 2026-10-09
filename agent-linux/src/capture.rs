@@ -403,8 +403,10 @@ impl Capture {
         Ok(())
     }
 
-    /// Waits up to `timeout` for a new picture: true when one arrived (the
-    /// compositor completes a capture only once the window changed).
+    /// Waits up to `timeout` for a new picture: true when one arrived. The
+    /// compositor completes a capture only when the window draws, so a
+    /// window that never changes after the stream starts gives no first
+    /// picture until it does (live windows draw all the time).
     /// Fails when the window went away.
     pub fn poll(&mut self, timeout: Duration) -> Result<bool> {
         let deadline = Instant::now() + timeout;

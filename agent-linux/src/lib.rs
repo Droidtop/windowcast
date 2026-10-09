@@ -9,6 +9,7 @@
 //! compositor with the ext protocols (wlroots 0.19 and later, sway 1.11 and
 //! later).
 
+pub mod audio;
 pub mod capture;
 pub mod input;
 mod source;

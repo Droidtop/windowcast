@@ -28,7 +28,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwayland-dev libxkbcommon-dev pkg-config
+          sudo apt-get install -y libwayland-dev libxkbcommon-dev libpulse-dev pkg-config
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -65,7 +65,7 @@ jobs:
     steps:
       - name: Install system dependencies
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rust nasm cmake sway wayland libxkbcommon xkeyboard-config
+          pacman -Syu --noconfirm --needed base-devel git rust nasm cmake sway wayland libxkbcommon xkeyboard-config pulseaudio libpulse
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -89,4 +89,13 @@ jobs:
           for i in $(seq 1 100); do ls "$XDG_RUNTIME_DIR"/sway-ipc.*.sock >/dev/null 2>&1 && break; sleep 0.1; done
           export WAYLAND_DISPLAY=$(cd "$XDG_RUNTIME_DIR" && ls wayland-* | grep -v lock | head -1)
           export SWAYSOCK=$(ls "$XDG_RUNTIME_DIR"/sway-ipc.*.sock | head -1)
-          WINDOWCAST_TEST_SWAY=1 cargo test -p windowcast-agent-linux -- --nocapture
+          # PulseAudio with no sound card plays into a null sink, which is
+          # all the window-sound check needs.
+          # It refuses to start without a machine id, which containers lack.
+          [ -s /etc/machine-id ] || tr -d - < /proc/sys/kernel/random/uuid > /etc/machine-id
+          # The job's HOME belongs to another user; the daemon gets its own,
+          # and clients find its cookie through PULSE_COOKIE.
+          mkdir -p /tmp/pulsehome
+          HOME=/tmp/pulsehome pulseaudio --daemonize --exit-idle-time=-1             --log-target=file:/tmp/pulse.log || { cat /tmp/pulse.log; exit 1; }
+          export PULSE_COOKIE=/tmp/pulsehome/.config/pulse/cookie
+          WINDOWCAST_TEST_SWAY=1 WINDOWCAST_TEST_PULSE=1 cargo test -p windowcast-agent-linux -- --nocapture

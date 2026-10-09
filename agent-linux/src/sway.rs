@@ -44,6 +44,8 @@ pub struct Window {
     pub rect: Rect,
     /// The output it is on.
     pub output: String,
+    /// The process that shows it.
+    pub pid: Option<u32>,
 }
 
 pub struct Sway {
@@ -153,6 +155,10 @@ fn walk(node: &Value, output: &str, found: &mut Vec<Window>) {
             identifier: identifier.to_owned(),
             rect,
             output: output.to_owned(),
+            pid: node
+                .get("pid")
+                .and_then(Value::as_u64)
+                .and_then(|pid| u32::try_from(pid).ok()),
         });
     }
     for key in ["nodes", "floating_nodes"] {

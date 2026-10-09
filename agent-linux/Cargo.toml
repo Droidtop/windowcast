@@ -25,10 +25,13 @@ wayland-protocols-misc = { version = "0.3", features = ["client"] }
 xkbcommon = { version = "0.8", default-features = false }
 rustix = { version = "1", features = ["fs", "mm", "event"] }
 serde_json = "1"
+# The PulseAudio client API (PulseAudio, or PipeWire's pulse server).
+libpulse-binding = "2"
 thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+opus = "0.3"
 tokio = { workspace = true, features = ["net"] }
 windowcast-client-core = { path = "../client-core" }
 windowcast-identity = { path = "../identity" }

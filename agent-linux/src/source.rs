@@ -85,6 +85,13 @@ impl WindowSource for LinuxSource {
         Ok(Box::new(WindowStream::new(capture, &self.options())))
     }
 
+    fn open_audio(
+        &self,
+        window: WindowId,
+    ) -> Option<Result<Box<dyn windowcast_host::audio::AudioSource>, String>> {
+        Some(crate::audio::WindowAudio::open(window).map(|audio| Box::new(audio) as _))
+    }
+
     fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
         let mut injector = self.injector.lock().expect("injector");
         let injector = injector.get_or_insert_with(|| {

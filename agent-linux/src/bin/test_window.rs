@@ -2,7 +2,10 @@
 //! the input it receives, one line each, so a test can check what reached
 //! it.
 //!
-//! Usage: `windowcast-test-window TITLE RRGGBB`. Lines: `ready WxH`,
+//! Usage: `windowcast-test-window TITLE RRGGBB [tone]`. With `tone` it also
+//! plays a 440 Hz tone through a `pacat` it starts (PulseAudio or
+//! PipeWire's pulse server): sound from a process the window's started,
+//! as a browser plays. Lines: `ready WxH`,
 //! `motion X Y` (surface coordinates), `button CODE pressed|released`,
 //! `key CODE pressed|released`, `axis VALUE`.
 
@@ -13,8 +16,8 @@ use rustix::fs::{ftruncate, memfd_create, MemfdFlags};
 use rustix::mm::{mmap, MapFlags, ProtFlags};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::{
-    wl_buffer, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool,
-    wl_surface,
+    wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm,
+    wl_shm_pool, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -60,6 +63,10 @@ impl Window {
         pool.destroy();
         self.surface.attach(Some(&buffer), 0, 0);
         self.surface.damage_buffer(0, 0, w, h);
+        // Keep drawing (the same picture) every frame, as a live window
+        // does: a compositor renders, and completes captures, only when
+        // something changes.
+        self.surface.frame(qh, ());
         self.surface.commit();
         say(format!("ready {w}x{h}"));
     }
@@ -89,6 +96,23 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Window {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<wl_callback::WlCallback, ()> for Window {
+    fn event(
+        window: &mut Self,
+        _: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            window.surface.damage_buffer(0, 0, 1, 1);
+            window.surface.frame(qh, ());
+            window.surface.commit();
+        }
     }
 }
 
@@ -245,6 +269,60 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Window {
     }
 }
 
+/// A child `pacat` fed a 440 Hz sine in real time; killed with the window.
+struct ToneChild(std::process::Child);
+
+impl Drop for ToneChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn play_tone() -> ToneChild {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("pacat")
+        .args([
+            "--playback",
+            "--raw",
+            "--rate=48000",
+            "--channels=2",
+            "--format=s16le",
+        ])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("pacat");
+    let mut input = child.stdin.take().expect("pacat input");
+    std::thread::spawn(move || {
+        let mut phase = 0f32;
+        let start = std::time::Instant::now();
+        let mut written = 0u64;
+        loop {
+            // 20 ms at a time, kept about 100 ms ahead of real time.
+            let due = start.elapsed().as_millis() as u64 / 20 + 5;
+            if written >= due {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            }
+            let mut chunk = Vec::with_capacity(960 * 4);
+            for _ in 0..960 {
+                let value = ((phase.sin() * 8192.0) as i16).to_le_bytes();
+                chunk.extend_from_slice(&value);
+                chunk.extend_from_slice(&value);
+                phase += 440.0 * std::f32::consts::TAU / 48_000.0;
+                if phase > std::f32::consts::TAU {
+                    phase -= std::f32::consts::TAU;
+                }
+            }
+            if input.write_all(&chunk).is_err() {
+                return;
+            }
+            written += 1;
+        }
+    });
+    ToneChild(child)
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let title = args.next().unwrap_or_else(|| "windowcast test".into());
@@ -252,6 +330,7 @@ fn main() {
         .next()
         .and_then(|hex| u32::from_str_radix(&hex, 16).ok())
         .unwrap_or(0x3366cc);
+    let _tone = (args.next().as_deref() == Some("tone")).then(play_tone);
 
     let conn = Connection::connect_to_env().expect("wayland");
     let (globals, mut queue) = registry_queue_init::<Window>(&conn).expect("globals");
