@@ -25,3 +25,8 @@ opus = "0.3"
 
 [dev-dependencies]
 windowcast-identity = { path = "../identity" }
+windowcast-transport = { path = "../transport" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# setns, for the test that runs host and client in network namespaces.
+libc = "0.2"

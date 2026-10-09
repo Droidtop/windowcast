@@ -57,6 +57,14 @@ jobs:
           cargo test -p windowcast-cli-tools --test adaptive --no-run --message-format=json             | jq -r 'select(.profile.test == true and .target.name == "adaptive") | .executable'             > adaptive-test-path
           sudo unshare -n sh -c "ip link set lo up && WINDOWCAST_TEST_NETEM=1 $(cat adaptive-test-path) --nocapture"
 
+      # A session away from the LAN across two NATs: network namespaces,
+      # Linux routers that masquerade, a STUN server between
+      # (cli-tools/tests/away.rs). Root for the namespaces and NAT rules.
+      - name: Away from the LAN across two NATs
+        run: |
+          cargo test -p windowcast-cli-tools --test away --no-run --message-format=json             | jq -r 'select(.profile.test == true and .target.name == "away") | .executable'             > away-test-path
+          sudo WINDOWCAST_TEST_NAT=1 "$(cat away-test-path)" --nocapture
+
       # Virtual gamepads through uinput, read back from /dev/input. Root for
       # the device nodes; the module may live in the kernel's extra modules.
       - name: Gamepads through uinput
