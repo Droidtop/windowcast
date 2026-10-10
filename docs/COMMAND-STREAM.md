@@ -54,12 +54,12 @@ cells lives in the client library too, so every viewer renders the same.
 
 ```rust
 pub struct Principal { pub peer: PeerId, pub account: Option<Account> }
-pub trait CommandAuthorizer { fn authorize(&self, who: &Principal, open: &Open) -> Result<(), String>; }
+pub trait CommandAuthorizer { fn authorize(&self, who: &Principal, kind: &ChannelKind) -> Result<(), String>; }
 ```
 
 * Today a principal is a paired device (`account: None`) and the default
   authorizer allows any paired device the shell kinds the host enables
-  (`HostControl::set_commands`), as the owner asked: authorized by the
+  (`HostControl::set_command_authorizer` replaces the check), as the owner asked: authorized by the
   existing pairing.
 * #443's account layer (OIDC, LDAP/AD, Kerberos) fills `Principal::account`
   and installs its own `CommandAuthorizer`; that is the whole interface
@@ -71,17 +71,38 @@ pub trait CommandAuthorizer { fn authorize(&self, who: &Principal, open: &Open) 
   can supply certificates or Kerberos tickets through the same `SshAuth`
   enum.
 
+## What is built
+
+* **Protocol** (`protocol/src/command.rs`): `ControlMessage::Command`. Old
+  peers drop it as an undecodable control message, so there is no version
+  bump; a client that gets no answer to an `Open` within 15 seconds says
+  the host may not support commands.
+* **Host** (`host-core/src/command.rs`): `Shell` on a PTY; `Exec` on a PTY
+  when asked, otherwise on pipes with standard output and error merged
+  into one stream; `Launch` detached (null stdio, reaped), answered with
+  `Opened{pid}` and `Exited` at once. The host runs them as the user the
+  agent runs as, in that user's graphical session, so a launched
+  application's windows are the ones `list_windows` shows.
+  `HostControl::commands()` lists what is open. Closing a channel, or the
+  session ending, kills the command.
+* **SSH** (`terminal/src/ssh.rs`): `Shell` is `pty-req` + `shell`; `Exec` is
+  `exec` (with `pty-req` when asked); `Launch` is an `exec` of
+  `nohup ... & echo $!`, so it needs a POSIX shell on the server (it does
+  not work on a Windows OpenSSH server). Host certificates are not
+  supported (the key must be a plain host key).
+* **Client** (`client-core/src/command.rs`): `ClientSession::open_channel`,
+  `open_terminal`, `launch`, `exec`; `Client::ssh_connect` and `SshSession`
+  with the same. The C interface is `ffi_terminal.rs` and `windowcast.h`.
+* **Viewers**: the egui reference app and the Android library and viewer
+  draw the screen snapshot; the emulator is in the library, not the viewers.
+
+Not built yet: file and process kinds, X11/agent/port forwarding, SSH
+certificates and GSSAPI (the account layer's), mouse reporting and text
+selection in the viewers.
+
 ## Limits and flow
 
 Eight channels per session, 16 KiB per data message. Data rides the
 reliable control channel; a flooding command can delay input events behind
 it, which is acceptable for a baseline and the reason a dedicated data
 channel is the follow-up if it shows.
-
-## Build order
-
-1. protocol messages, PTY wrapper; 2. host service (`Shell`, `Exec`,
-`Launch`) with the authorizer; 3. SSH client with pinning and auth;
-4. client library: screen model, `CommandStream` over both transports,
-C interface; 5. reference apps (egui terminal, Android viewer);
-file/process kinds after.

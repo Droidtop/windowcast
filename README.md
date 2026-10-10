@@ -83,6 +83,8 @@ docs/BACKENDS.md).
 
 | Crate | Status |
 |---|---|
+| `pty` | Real, tested: a shell on a pseudo-terminal (ConPTY, openpty); the Windows half is built by CI but not run |
+| `terminal` | Real, tested against an SSH server the tests run: channels, the screen model, the SSH client with pinned host keys |
 | `protocol` | Real, tested (message schema + codec + version check; backend selection rules in `selection`) |
 | `identity` | Real, tested (persistent Ed25519 identity, pinned-peer trust store) |
 | `pairing` | Real, tested (SPAKE2 PAKE + HKDF + HMAC fingerprint authentication) — the *device* credential |
