@@ -159,23 +159,25 @@ fn local_accounts_sign_in_register_and_follow_policy() {
         Some("alice".to_owned())
     );
 
-    // An SSH certificate for alice.
-    session
-        .request_ssh_certificate(
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g test",
-        )
-        .unwrap();
+    // An SSH certificate for alice, for this client's own SSH key, which
+    // then logs in with it (SshAuth::Certificate).
+    let public_key = client.ssh_public_key().unwrap();
+    assert!(public_key.starts_with("ssh-ed25519 "), "{public_key}");
+    assert_eq!(client.ssh_public_key().unwrap(), public_key);
+    session.request_ssh_certificate(&public_key).unwrap();
     loop {
         match session.next_event(WAIT) {
             Some(Event::SshCertificate { certificate, error }) => {
                 let certificate = certificate.unwrap_or_else(|| panic!("{error:?}"));
                 assert!(certificate.starts_with("ssh-ed25519-cert-v01@openssh.com "));
+                assert!(client.ssh_certificate_auth(&certificate).is_ok());
                 break;
             }
             Some(_) => continue,
             None => panic!("no SSH certificate"),
         }
     }
+    assert!(client.ssh_certificate_auth("not a certificate").is_err());
     drop(session);
 
     // Later: the registration resumes with the device key alone, and the
@@ -481,13 +483,40 @@ fn openid_connect_sign_in_against_a_local_dex() {
         .connect_account(&address, &stolen, Some(options.host_id.as_str()))
         .is_err());
 
-    // The device flow, finished "on another device".
-    let device = other.oidc_device(&provider).unwrap();
-    let verify = device
-        .verification_uri_complete
-        .clone()
-        .unwrap_or_else(|| format!("{}?user_code={}", device.verification_uri, device.user_code));
-    let user_code = device.user_code.clone();
+    // The device flow through the C interface, finished "on another
+    // device".
+    use std::ffi::{c_char, CStr, CString};
+    use windowcast_client::ffi::{
+        windowcast_oidc_device_free, windowcast_oidc_device_start, windowcast_oidc_device_wait,
+        WINDOWCAST_TIMEOUT,
+    };
+    let provider_json = CString::new(serde_json::to_string(&provider).unwrap()).unwrap();
+    let mut shown = vec![0 as c_char; 4096];
+    let device = unsafe {
+        windowcast_oidc_device_start(&other, provider_json.as_ptr(), shown.as_mut_ptr(), 4096)
+    };
+    let shown = unsafe { CStr::from_ptr(shown.as_ptr()) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(!device.is_null(), "{shown}");
+    let shown: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    let user_code = shown["user_code"].as_str().unwrap().to_owned();
+    let verify = shown["verification_uri_complete"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            format!(
+                "{}?user_code={user_code}",
+                shown["verification_uri"].as_str().unwrap()
+            )
+        });
+    // Nobody has signed in yet.
+    let mut token = vec![0 as c_char; 16 * 1024];
+    assert_eq!(
+        unsafe { windowcast_oidc_device_wait(device, 0, token.as_mut_ptr(), token.len()) },
+        WINDOWCAST_TIMEOUT
+    );
     let browsing = std::thread::spawn(move || {
         // Dex asks for the code on a form; post it the way the page does.
         browse(&verify);
@@ -503,7 +532,21 @@ fn openid_connect_sign_in_against_a_local_dex() {
             Some(&[("user_code", user_code.as_str())]),
         );
     });
-    let id_token = device.finish().unwrap();
+    let id_token = loop {
+        let n =
+            unsafe { windowcast_oidc_device_wait(device, 1000, token.as_mut_ptr(), token.len()) };
+        if n == WINDOWCAST_TIMEOUT {
+            continue;
+        }
+        let text = unsafe { CStr::from_ptr(token.as_ptr()) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(n > 0, "device sign-in: {n} {text}");
+        assert_eq!(n as usize, text.len());
+        break text;
+    };
+    unsafe { windowcast_oidc_device_free(device) };
     browsing.join().unwrap();
     let session = other
         .connect_account(

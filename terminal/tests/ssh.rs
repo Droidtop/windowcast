@@ -1,15 +1,19 @@
 //! The SSH client against an SSH server this test runs itself (russh's
-//! server, with a real shell on a PTY behind it): password and key login,
-//! host-key pinning, a shell with a resize, a command with its exit code,
-//! and an application launch.
+//! server, with a real shell on a PTY behind it): password, key and
+//! certificate login (a certificate a windowcast host's CA issues for an
+//! account, the server trusting that CA as sshd's `TrustedUserCAKeys`
+//! does), host-key pinning, a shell with a resize, a command with its exit
+//! code, and an application launch.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use russh::keys::{Algorithm, PrivateKey};
+use russh::keys::{Algorithm, Certificate, PrivateKey};
 use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{Channel as SshChannel, ChannelId};
+use windowcast_accounts::ssh::{CertificateAuthority, UserKey};
+use windowcast_accounts::{Account, Method};
 use windowcast_protocol::command::{ChannelKind, Pty, TerminalSize};
 use windowcast_pty::Spawn;
 use windowcast_terminal::{
@@ -24,6 +28,8 @@ type PtyRequest = (String, u32, u32);
 #[derive(Clone)]
 struct TestServer {
     user_key: Arc<russh::keys::PublicKey>,
+    /// The user CA this server trusts, as `TrustedUserCAKeys` names it.
+    user_ca: Arc<russh::keys::ssh_key::Fingerprint>,
     ptys: Arc<Mutex<HashMap<ChannelId, Arc<windowcast_pty::Pty>>>>,
     asked: Arc<Mutex<HashMap<ChannelId, PtyRequest>>>,
 }
@@ -132,6 +138,24 @@ impl server::Handler for TestServer {
         })
     }
 
+    /// As sshd with `TrustedUserCAKeys`: a user certificate signed by the
+    /// trusted CA, valid now, naming the user among its principals.
+    /// (russh has checked the client holds the certified key.)
+    async fn auth_openssh_certificate(
+        &mut self,
+        user: &str,
+        certificate: &Certificate,
+    ) -> Result<Auth, Self::Error> {
+        let trusted = certificate.validate([&*self.user_ca]).is_ok()
+            && certificate.cert_type() == russh::keys::ssh_key::certificate::CertType::User
+            && certificate.valid_principals().iter().any(|p| p == user);
+        Ok(if user == "tester" && trusted {
+            Auth::Accept
+        } else {
+            Auth::reject()
+        })
+    }
+
     async fn channel_open_session(
         &mut self,
         _channel: SshChannel<Msg>,
@@ -216,9 +240,23 @@ struct Running {
     port: u16,
     user_key_pem: String,
     host_fingerprint: String,
+    /// The user CA the server trusts, and the folder its key is in.
+    ca: CertificateAuthority,
+    ca_dir: std::path::PathBuf,
 }
 
 async fn run_server() -> Running {
+    static SERVERS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let ca_dir = std::env::temp_dir().join(format!(
+        "windowcast-ssh-test-{}-{}",
+        std::process::id(),
+        SERVERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&ca_dir).unwrap();
+    let ca = CertificateAuthority::load_or_generate(&ca_dir.join("user-ca")).unwrap();
+    let user_ca = russh::keys::PublicKey::from_openssh(&ca.public_key().unwrap())
+        .unwrap()
+        .fingerprint(russh::keys::HashAlg::Sha256);
     let host_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
     let host_fingerprint = host_key
         .public_key()
@@ -239,6 +277,7 @@ async fn run_server() -> Running {
     let port = listener.local_addr().unwrap().port();
     let mut server = TestServer {
         user_key: Arc::new(user_key.public_key().clone()),
+        user_ca: Arc::new(user_ca),
         ptys: Default::default(),
         asked: Default::default(),
     };
@@ -249,6 +288,14 @@ async fn run_server() -> Running {
         port,
         user_key_pem,
         host_fingerprint,
+        ca,
+        ca_dir,
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.ca_dir);
     }
 }
 
@@ -371,6 +418,58 @@ async fn key_login_works_and_a_wrong_password_does_not() {
         "{:?}",
         wrong.err()
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_certificate_logs_in_where_the_ca_is_trusted() {
+    let server = run_server().await;
+    let store = HostKeyStore::in_memory();
+    let mine = UserKey::load_or_generate(&server.ca_dir.join("client-key")).unwrap();
+    let account = |name: &str| Account {
+        name: name.into(),
+        groups: Vec::new(),
+        method: Method::Oidc,
+        provider: "corp".into(),
+    };
+    let login = |ca: &CertificateAuthority, name: &str| SshAuth::Certificate {
+        pem: mine.private_key().unwrap(),
+        certificate: ca
+            .issue(
+                &mine.public_key().unwrap(),
+                &account(name),
+                Duration::from_secs(600),
+            )
+            .unwrap(),
+    };
+
+    // The server's CA certified "tester": a shell's worth of login.
+    let connection = connect(
+        &target(&server),
+        &login(&server.ca, "tester"),
+        Arc::clone(&store),
+        HostKeyPolicy::TrustOnFirstUse,
+    )
+    .await
+    .unwrap();
+    connection.close().await;
+
+    // A certificate for another account, or from a CA the server does not
+    // trust, is refused.
+    let other_ca = CertificateAuthority::load_or_generate(&server.ca_dir.join("other-ca")).unwrap();
+    for auth in [login(&server.ca, "mallory"), login(&other_ca, "tester")] {
+        let refused = connect(
+            &target(&server),
+            &auth,
+            Arc::clone(&store),
+            HostKeyPolicy::TrustOnFirstUse,
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(SshError::AuthFailed)),
+            "{:?}",
+            refused.err()
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

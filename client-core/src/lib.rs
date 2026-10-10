@@ -83,6 +83,9 @@ pub enum ClientError {
     Refused(String),
     #[error("{0}")]
     Ssh(#[from] windowcast_terminal::SshError),
+    /// This client's SSH key, or a certificate for it.
+    #[error("{0}")]
+    SshKey(#[from] windowcast_accounts::ssh::SshError),
 }
 
 /// How a client signs in to a host with an account (docs/ACCOUNTS.md).
@@ -197,6 +200,9 @@ pub struct Client {
     remote_hosts: Arc<RemotePeers>,
     /// The SSH servers' pinned host keys.
     host_keys: Arc<windowcast_terminal::HostKeyStore>,
+    /// This client's own SSH key, made on first use; hosts certify it for
+    /// the account the client signed in with.
+    ssh_key_path: PathBuf,
 }
 
 impl Client {
@@ -220,6 +226,30 @@ impl Client {
             host_keys: windowcast_terminal::HostKeyStore::open(
                 &data_dir.join("ssh-known-hosts.json"),
             )?,
+            ssh_key_path: data_dir.join("ssh-user-key"),
+        })
+    }
+
+    /// This client's own SSH public key (an OpenSSH line), made on first
+    /// use: the key to ask a host for a certificate for
+    /// ([`ClientSession::request_ssh_certificate`]).
+    pub fn ssh_public_key(&self) -> Result<String, ClientError> {
+        let key = windowcast_accounts::ssh::UserKey::load_or_generate(&self.ssh_key_path)?;
+        Ok(key.public_key()?)
+    }
+
+    /// The SSH login with `certificate`, an OpenSSH user certificate a host
+    /// issued for [`Self::ssh_public_key`] (the `ssh_certificate` event):
+    /// any SSH server that trusts that host's CA admits it as the account
+    /// the certificate names. Fails for a certificate for another key.
+    pub fn ssh_certificate_auth(
+        &self,
+        certificate: &str,
+    ) -> Result<windowcast_terminal::SshAuth, ClientError> {
+        let key = windowcast_accounts::ssh::UserKey::load_or_generate(&self.ssh_key_path)?;
+        Ok(windowcast_terminal::SshAuth::Certificate {
+            certificate: key.check_certificate(certificate)?,
+            pem: key.private_key()?,
         })
     }
 

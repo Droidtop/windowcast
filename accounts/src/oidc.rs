@@ -309,7 +309,8 @@ impl BrowserSignIn {
 
 /// The device authorization flow: show [`Self::user_code`] and
 /// [`Self::verification_uri`] to the user, who finishes on another device;
-/// [`Self::finish`] polls until they have.
+/// [`Self::finish`] polls until they have, or [`Self::wait`] for a while
+/// at a time.
 pub struct DeviceSignIn {
     pub user_code: String,
     pub verification_uri: String,
@@ -317,6 +318,8 @@ pub struct DeviceSignIn {
     pub verification_uri_complete: Option<String>,
     device_code: String,
     interval: Duration,
+    /// When the provider may be asked again.
+    next_poll: Instant,
     expires: Instant,
     token_endpoint: String,
     client_id: String,
@@ -351,12 +354,14 @@ impl DeviceSignIn {
         )?;
         let authorization: DeviceAuthorization =
             serde_json::from_value(response).map_err(|e| OidcError::Malformed(e.to_string()))?;
+        let interval = Duration::from_secs(authorization.interval.unwrap_or(5).max(1));
         Ok(DeviceSignIn {
             user_code: authorization.user_code,
             verification_uri: authorization.verification_uri,
             verification_uri_complete: authorization.verification_uri_complete,
             device_code: authorization.device_code,
-            interval: Duration::from_secs(authorization.interval.unwrap_or(5).max(1)),
+            interval,
+            next_poll: Instant::now() + interval,
             expires: Instant::now() + Duration::from_secs(authorization.expires_in),
             token_endpoint: metadata.token_endpoint,
             client_id: provider.client_id.clone(),
@@ -365,13 +370,32 @@ impl DeviceSignIn {
 
     /// Polls until the user has signed in (the ID token), refused, or the
     /// code expired.
-    pub fn finish(self) -> Result<String, OidcError> {
-        let mut interval = self.interval;
+    pub fn finish(mut self) -> Result<String, OidcError> {
+        loop {
+            if let Some(id_token) = self.wait(Duration::from_secs(60))? {
+                return Ok(id_token);
+            }
+        }
+    }
+
+    /// Polls for up to `within` (at the pace the provider asked for):
+    /// the ID token once the user has signed in, `None` if they have not
+    /// yet (call again), an error if they refused or the code expired.
+    pub fn wait(&mut self, within: Duration) -> Result<Option<String>, OidcError> {
+        let deadline = Instant::now() + within;
         loop {
             if Instant::now() >= self.expires {
                 return Err(OidcError::TimedOut);
             }
-            std::thread::sleep(interval);
+            let now = Instant::now();
+            if self.next_poll > now {
+                if self.next_poll > deadline {
+                    std::thread::sleep(deadline.saturating_duration_since(now));
+                    return Ok(None);
+                }
+                std::thread::sleep(self.next_poll - now);
+            }
+            self.next_poll = Instant::now() + self.interval;
             match post_form(
                 &self.token_endpoint,
                 &[
@@ -380,12 +404,16 @@ impl DeviceSignIn {
                     ("client_id", &self.client_id),
                 ],
             ) {
-                Ok(response) => return id_token_from(response),
+                Ok(response) => return id_token_from(response).map(Some),
                 Err(OidcError::Refused(error)) if error == "authorization_pending" => {}
                 Err(OidcError::Refused(error)) if error == "slow_down" => {
-                    interval += Duration::from_secs(5);
+                    self.interval += Duration::from_secs(5);
+                    self.next_poll = Instant::now() + self.interval;
                 }
                 Err(e) => return Err(e),
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
             }
         }
     }

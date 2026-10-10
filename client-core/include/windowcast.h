@@ -82,7 +82,7 @@ int64_t windowcast_session_set_clipboard(const WindowcastSession *session, const
 
 /* Next session event as JSON, tagged by "type": windows, stream_started,
  * stream_refused, stream_stopped, window_resized, window_focused,
- * clipboard, closed.
+ * clipboard, ssh_certificate, closed.
  * Returns its length, WINDOWCAST_TIMEOUT, or WINDOWCAST_BUFFER_TOO_SMALL
  * with the length needed in *needed (that event is lost). */
 int64_t windowcast_session_next_event(const WindowcastSession *session, uint32_t timeout_ms,
@@ -169,11 +169,38 @@ WindowcastOidcSignIn *windowcast_oidc_browser_start(const WindowcastClient *clie
  * or WINDOWCAST_ERROR with the reason in token. */
 int64_t windowcast_oidc_browser_finish(WindowcastOidcSignIn *sign_in, uint32_t timeout_ms,
                                        char *token, size_t token_cap);
+
+typedef struct WindowcastOidcDeviceSignIn WindowcastOidcDeviceSignIn;
+
+/* Starts an OpenID Connect sign-in the user finishes on another device
+ * (the device authorization flow, RFC 8628) with one of the providers
+ * windowcast_sign_in_options listed (as JSON). Writes what to show the user
+ * into out as JSON: {"user_code", "verification_uri",
+ * "verification_uri_complete"} (the last may be null). Null on failure,
+ * with the reason in out. */
+WindowcastOidcDeviceSignIn *windowcast_oidc_device_start(const WindowcastClient *client,
+                                                         const char *provider, char *out,
+                                                         size_t cap);
+/* Waits up to timeout_ms for the user to finish. Returns the ID token's
+ * length (the token in token, for the "oidc" sign-in), WINDOWCAST_TIMEOUT
+ * (not yet: call again), WINDOWCAST_BUFFER_TOO_SMALL (the token is kept:
+ * call again with more room), or WINDOWCAST_ERROR with the reason in token
+ * (refused, or the code expired). */
+int64_t windowcast_oidc_device_wait(WindowcastOidcDeviceSignIn *sign_in, uint32_t timeout_ms,
+                                    char *token, size_t token_cap);
+/* Frees a device sign-in, finished or not (giving up on it). */
+void windowcast_oidc_device_free(WindowcastOidcDeviceSignIn *sign_in);
+
 /* Asks the host for an SSH user certificate for public_key (an OpenSSH
- * public key line), for the signed-in account; it arrives as an
- * "ssh_certificate" event. */
+ * public key line, usually windowcast_client_ssh_public_key's), for the
+ * signed-in account; it arrives as an "ssh_certificate" event
+ * ({"certificate", "error"}, one of them null). */
 int64_t windowcast_session_request_ssh_certificate(const WindowcastSession *session,
                                                    const char *public_key);
+/* This client's own SSH public key, an OpenSSH line (made on first use and
+ * kept in its data folder). Returns its length or WINDOWCAST_ERROR with the
+ * reason in out. */
+int64_t windowcast_client_ssh_public_key(const WindowcastClient *client, char *out, size_t cap);
 /* ---- The command stream (docs/COMMAND-STREAM.md; ffi_terminal.rs) ----
  * A terminal on a host of a session or on any SSH server, drawn by the
  * client library's screen model, and application launches. */
@@ -182,6 +209,7 @@ typedef struct WindowcastTerminal WindowcastTerminal;
 
 #define WINDOWCAST_SSH_PASSWORD 0
 #define WINDOWCAST_SSH_KEY 1
+#define WINDOWCAST_SSH_CERTIFICATE 2 /* a host's certificate for this client's own key */
 /* What to do with an SSH server whose host key is not pinned yet. A key
  * that changed is always refused. */
 #define WINDOWCAST_HOSTKEY_FIRST_USE 0   /* pin what it presents */
@@ -194,8 +222,10 @@ WindowcastTerminal *windowcast_session_open_terminal(const WindowcastSession *se
                                                      uint16_t cols, uint16_t rows, char *error,
                                                      size_t error_cap);
 
-/* Logs in to an SSH server and opens a shell. secret is the password, or the
- * private key in PEM form (passphrase may be NULL). fingerprint is used with
+/* Logs in to an SSH server and opens a shell. secret is the password, the
+ * private key in PEM form (passphrase may be NULL), or for
+ * WINDOWCAST_SSH_CERTIFICATE the certificate from an "ssh_certificate"
+ * event (for windowcast_client_ssh_public_key). fingerprint is used with
  * WINDOWCAST_HOSTKEY_FINGERPRINT ("SHA256:..."). */
 WindowcastTerminal *windowcast_client_ssh_terminal(
     const WindowcastClient *client, const char *host, uint16_t port, const char *user,

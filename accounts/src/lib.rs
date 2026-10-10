@@ -242,7 +242,11 @@ impl Accounts {
         self.config.policy.decide(account, &self.host_name())
     }
 
-    fn check_password(&self, username: &str, password: &str) -> Result<Account, CheckError> {
+    /// Checks a user name and password against the host's password
+    /// sources, in order. [`Self::check`] does this for a sign-in; an
+    /// endpoint with no windowcast device behind it (an SSH server taking
+    /// passwords) calls it directly, then [`Self::admits`].
+    pub fn check_password(&self, username: &str, password: &str) -> Result<Account, CheckError> {
         if self.config.password.is_empty() {
             return Err(CheckError::NotOffered("password"));
         }

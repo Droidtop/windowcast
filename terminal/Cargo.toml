@@ -24,5 +24,8 @@ base64 = "0.22"
 
 [dev-dependencies]
 windowcast-pty = { path = "../pty" }
+# A windowcast host's SSH user CA and a client's key, for the certificate
+# login test.
+windowcast-accounts = { path = "../accounts" }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros"] }
 rand = { version = "0.10", features = ["thread_rng"] }

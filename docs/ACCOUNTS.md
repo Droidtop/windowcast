@@ -164,24 +164,40 @@ refused.
 
 ## SSH and the command stream
 
-The command stream (Droidtop/tracker#444) runs over SSH. The account layer
-authorises it through a narrow interface, without the SSH crate depending
-on how accounts are checked:
+The command stream (Droidtop/tracker#444, docs/COMMAND-STREAM.md) is
+authorised by the account layer through a narrow interface, without the
+SSH crate depending on how accounts are checked:
 
-- `windowcast_accounts::Account` (name, groups, method, provider) is what
-  fills the command stream's `Principal::account` for a session's peer
-  (`None` for a plain PIN-paired device), and
-  `Policy::decide(Some(&account), host).commands` answers it.
-- An SSH server outside windowcast sessions can check a sign-in itself
-  through `Accounts::check(credential)`: a password (PAM, LDAP, local),
-  or a Kerberos token (GSSAPI).
+- **On a session.** `windowcast_accounts::Account` (name, groups, method,
+  provider) fills the command stream's `Principal::account`: the account
+  the connection signed in with, or the one its device is registered to
+  (`HostControl::account_of`); `None` for a PIN-paired device. While
+  sign-in is on, every session's check is `command::AccountPolicy`: the
+  host's policy for that principal (a PIN-paired device is `method:pin`)
+  answers with its rule's `commands`. `false` refuses every channel
+  (shell, command, launch), `true` admits it, and a rule that does not
+  say leaves it to the host's own check (`set_command_authorizer`; any
+  paired device by default). A principal policy does not admit at all is
+  refused. While sign-in is off, the host's own check is the only one,
+  as before accounts.
 - **SSH user certificates from a sign-in**: a host with an SSH CA key
   configured signs a short-lived OpenSSH user certificate (`ssh-key`) for
   an account-registered client's SSH public key, principals the account
   name, valid for minutes (default 10), on request over the session
-  (`ControlMessage::SshCertificate`). Any sshd that trusts the CA
-  (`TrustedUserCAKeys`) then admits that user, so OIDC, LDAP or Kerberos
-  sign-ins reach plain SSH servers without passwords there.
+  (`ControlMessage::SshCertificateRequest`); not when policy refuses the
+  account commands. Any sshd that trusts the CA (`TrustedUserCAKeys`)
+  then admits that user, so OIDC, LDAP or Kerberos sign-ins reach plain
+  SSH servers without passwords there. The client side: every client has
+  its own SSH key (Ed25519, `ssh-user-key` in its data folder, made on
+  first use, `Client::ssh_public_key`), separate from its device identity
+  so one key is never used for two protocols; it asks for a certificate
+  for that key and logs in with `SshAuth::Certificate`
+  (`Client::ssh_certificate_auth` checks the certificate is for its key).
+- **An SSH endpoint on the host.** windowcast hosts run no SSH server:
+  the command stream rides the session. A server that wants to check
+  windowcast's accounts itself calls `Accounts::check_password` (local,
+  OS, LDAP) or `Accounts::check` (also Kerberos tokens), then
+  `Accounts::admits`.
 
 ## What lives where
 
@@ -195,7 +211,10 @@ on how accounts are checked:
 - `host-core`: registrations, the policy applied to window lists,
   streams, input and commands; config read from the host's data folder.
 - `client-core`: `sign_in_options`, `connect_account`, the OIDC flows,
-  and the C interface for them.
+  the client's SSH key and certificate login, and the C interface for
+  them (the device flow as `windowcast_oidc_device_start`, `_wait`, which
+  returns `WINDOWCAST_TIMEOUT` while the user has not finished so a
+  caller can give up, and `_free`).
 - Reference app: sign-in on the client (username and password, or the
   browser for a provider); accounts, providers and policy in the host's
   config.

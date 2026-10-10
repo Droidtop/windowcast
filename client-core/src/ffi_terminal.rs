@@ -18,6 +18,9 @@ use crate::{Client, ClientError, ClientSession, SshSession};
 
 pub const WINDOWCAST_SSH_PASSWORD: i32 = 0;
 pub const WINDOWCAST_SSH_KEY: i32 = 1;
+/// A certificate a windowcast host issued for this client's own SSH key
+/// (`windowcast_client_ssh_public_key`) after an account sign-in.
+pub const WINDOWCAST_SSH_CERTIFICATE: i32 = 2;
 
 /// A server not pinned yet: pin what it presents.
 pub const WINDOWCAST_HOSTKEY_FIRST_USE: i32 = 0;
@@ -80,9 +83,11 @@ pub unsafe extern "C" fn windowcast_session_open_terminal(
 }
 
 /// Logs in to an SSH server and opens a shell. `auth_kind` is
-/// `WINDOWCAST_SSH_PASSWORD` (`secret` is the password) or
+/// `WINDOWCAST_SSH_PASSWORD` (`secret` is the password),
 /// `WINDOWCAST_SSH_KEY` (`secret` is the private key in PEM form,
-/// `passphrase` its passphrase or null). `host_key_policy` is one of
+/// `passphrase` its passphrase or null) or `WINDOWCAST_SSH_CERTIFICATE`
+/// (`secret` is the certificate from an `ssh_certificate` event, for this
+/// client's own key; `passphrase` unused). `host_key_policy` is one of
 /// `WINDOWCAST_HOSTKEY_*`; `fingerprint` is used with
 /// `WINDOWCAST_HOSTKEY_FINGERPRINT`. A server whose key is not trusted
 /// leaves the key it presented in `seen_fingerprint`. Returns null on
@@ -125,6 +130,13 @@ pub unsafe extern "C" fn windowcast_client_ssh_terminal(
         WINDOWCAST_SSH_KEY => SshAuth::Key {
             pem: secret.to_owned(),
             passphrase: str_arg(passphrase).map(str::to_owned),
+        },
+        WINDOWCAST_SSH_CERTIFICATE => match client.ssh_certificate_auth(secret) {
+            Ok(auth) => auth,
+            Err(e) => {
+                write_text(&e.to_string(), error, error_cap);
+                return std::ptr::null_mut();
+            }
         },
         _ => {
             write_text("unknown login method", error, error_cap);

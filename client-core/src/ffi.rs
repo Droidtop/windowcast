@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use windowcast_protocol::{VideoCodec, WindowId};
 
-use windowcast_accounts::oidc::BrowserSignIn;
+use windowcast_accounts::oidc::{BrowserSignIn, DeviceSignIn};
 use windowcast_protocol::OidcProviderInfo;
 
 use crate::{Client, ClientSession, FramePoll, SignIn};
@@ -658,14 +658,14 @@ pub unsafe extern "C" fn windowcast_oidc_browser_start(
     url: *mut c_char,
     url_cap: usize,
 ) -> *mut BrowserSignIn {
-    let (Some(client), Some(provider)) = (client.as_ref(), str_arg(provider)) else {
+    let Some(client) = client.as_ref() else {
         write_text("invalid arguments", url, url_cap);
         return std::ptr::null_mut();
     };
-    let provider: OidcProviderInfo = match serde_json::from_str(provider) {
+    let provider = match provider_arg(str_arg(provider)) {
         Ok(provider) => provider,
         Err(e) => {
-            write_text(&format!("provider: {e}"), url, url_cap);
+            write_text(&e, url, url_cap);
             return std::ptr::null_mut();
         }
     };
@@ -713,6 +713,160 @@ pub unsafe extern "C" fn windowcast_oidc_browser_finish(
         Ok(_) => WINDOWCAST_BUFFER_TOO_SMALL,
         Err(e) => {
             write_text(&e.to_string(), token, token_cap);
+            WINDOWCAST_ERROR
+        }
+    }
+}
+
+/// A device sign-in as the C interface holds it: the flow, and an ID token
+/// that did not fit the caller's buffer, kept for the next call.
+pub struct OidcDeviceSignIn {
+    sign_in: DeviceSignIn,
+    token: Option<String>,
+}
+
+/// Parses a provider as [`windowcast_sign_in_options`] lists it.
+fn provider_arg(provider: Option<&str>) -> Result<OidcProviderInfo, String> {
+    let provider = provider.ok_or("invalid arguments")?;
+    serde_json::from_str(provider).map_err(|e| format!("provider: {e}"))
+}
+
+/// Starts signing in with an OpenID Connect provider on another device
+/// (the device authorization flow, RFC 8628). `provider` is one of the
+/// providers [`windowcast_sign_in_options`] listed, as JSON. Writes what
+/// to show the user into `out` as JSON (`user_code`, `verification_uri`,
+/// `verification_uri_complete`, the last maybe null) and returns a handle
+/// for [`windowcast_oidc_device_wait`]; null on failure, with the reason
+/// in `out`.
+///
+/// # Safety
+/// `client` must be valid; `provider` NUL-terminated; `out` valid for
+/// `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_oidc_device_start(
+    client: *const Client,
+    provider: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+) -> *mut OidcDeviceSignIn {
+    let Some(client) = client.as_ref() else {
+        write_text("invalid arguments", out, cap);
+        return std::ptr::null_mut();
+    };
+    let provider = match provider_arg(str_arg(provider)) {
+        Ok(provider) => provider,
+        Err(e) => {
+            write_text(&e, out, cap);
+            return std::ptr::null_mut();
+        }
+    };
+    match client.oidc_device(&provider) {
+        Ok(sign_in) => {
+            let shown = serde_json::json!({
+                "user_code": sign_in.user_code,
+                "verification_uri": sign_in.verification_uri,
+                "verification_uri_complete": sign_in.verification_uri_complete,
+            })
+            .to_string();
+            if shown.len() >= cap {
+                write_text("the sign-in's text does not fit", out, cap);
+                return std::ptr::null_mut();
+            }
+            write_text(&shown, out, cap);
+            Box::into_raw(Box::new(OidcDeviceSignIn {
+                sign_in,
+                token: None,
+            }))
+        }
+        Err(e) => {
+            write_text(&e.to_string(), out, cap);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Waits up to `timeout_ms` for the user to finish signing in on the other
+/// device, and writes the ID token into `token` (for the `oidc` sign-in).
+/// Returns the token's length, [`WINDOWCAST_TIMEOUT`] (not yet: call
+/// again), [`WINDOWCAST_BUFFER_TOO_SMALL`] (the token is kept for the next
+/// call), or [`WINDOWCAST_ERROR`] with the reason in `token` (refused,
+/// expired). The handle stays valid until [`windowcast_oidc_device_free`].
+///
+/// # Safety
+/// `sign_in` must come from [`windowcast_oidc_device_start`], not freed,
+/// and not be in use by another thread; `token` valid for `token_cap`
+/// bytes.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_oidc_device_wait(
+    sign_in: *mut OidcDeviceSignIn,
+    timeout_ms: u32,
+    token: *mut c_char,
+    token_cap: usize,
+) -> i64 {
+    let Some(sign_in) = sign_in.as_mut() else {
+        write_text("invalid arguments", token, token_cap);
+        return WINDOWCAST_ERROR;
+    };
+    if sign_in.token.is_none() {
+        match sign_in
+            .sign_in
+            .wait(Duration::from_millis(u64::from(timeout_ms)))
+        {
+            Ok(Some(id_token)) => sign_in.token = Some(id_token),
+            Ok(None) => return WINDOWCAST_TIMEOUT,
+            Err(e) => {
+                write_text(&e.to_string(), token, token_cap);
+                return WINDOWCAST_ERROR;
+            }
+        }
+    }
+    let id_token = sign_in.token.as_deref().unwrap_or_default();
+    if id_token.len() >= token_cap {
+        return WINDOWCAST_BUFFER_TOO_SMALL;
+    }
+    write_text(id_token, token, token_cap);
+    id_token.len() as i64
+}
+
+/// Frees a device sign-in, finished or not.
+///
+/// # Safety
+/// `sign_in` must come from [`windowcast_oidc_device_start`] and not be
+/// used again.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_oidc_device_free(sign_in: *mut OidcDeviceSignIn) {
+    if !sign_in.is_null() {
+        drop(Box::from_raw(sign_in));
+    }
+}
+
+/// Writes this client's own SSH public key (an OpenSSH line, made on first
+/// use) into `out`: the key to ask a host for a certificate for. Returns
+/// its length, or [`WINDOWCAST_ERROR`] with the reason in `out`.
+///
+/// # Safety
+/// `client` must be valid; `out` valid for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_client_ssh_public_key(
+    client: *const Client,
+    out: *mut c_char,
+    cap: usize,
+) -> i64 {
+    let Some(client) = client.as_ref() else {
+        write_text("invalid arguments", out, cap);
+        return WINDOWCAST_ERROR;
+    };
+    match client.ssh_public_key() {
+        Ok(key) if key.len() < cap => {
+            write_text(&key, out, cap);
+            key.len() as i64
+        }
+        Ok(_) => {
+            write_text("the key does not fit", out, cap);
+            WINDOWCAST_ERROR
+        }
+        Err(e) => {
+            write_text(&e.to_string(), out, cap);
             WINDOWCAST_ERROR
         }
     }

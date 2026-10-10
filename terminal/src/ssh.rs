@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use russh::client;
-use russh::keys::{decode_secret_key, HashAlg, PrivateKeyWithHashAlg};
+use russh::keys::{decode_secret_key, Certificate, HashAlg, PrivateKeyWithHashAlg};
 use russh::{ChannelMsg, Disconnect};
 use tokio::sync::mpsc::UnboundedReceiver;
 use windowcast_protocol::command::{ChannelKind, Pty};
@@ -35,8 +35,6 @@ impl SshTarget {
 }
 
 /// How the user proves who they are. The client never keeps a password.
-/// Other methods (certificates, tickets from an account layer) are more
-/// variants.
 #[derive(Clone)]
 pub enum SshAuth {
     Password(String),
@@ -44,6 +42,14 @@ pub enum SshAuth {
     Key {
         pem: String,
         passphrase: Option<String>,
+    },
+    /// A private key (unencrypted, OpenSSH or PKCS#8 PEM) with an OpenSSH
+    /// user certificate for it: what a windowcast host issues to a device
+    /// signed in with an account (docs/ACCOUNTS.md), which any sshd that
+    /// trusts the host's CA (`TrustedUserCAKeys`) accepts.
+    Certificate {
+        pem: String,
+        certificate: String,
     },
 }
 
@@ -190,6 +196,14 @@ pub async fn connect(
                     target.user.clone(),
                     PrivateKeyWithHashAlg::new(Arc::new(key), hash),
                 )
+                .await?
+        }
+        SshAuth::Certificate { pem, certificate } => {
+            let key = decode_secret_key(pem, None).map_err(|e| SshError::Key(e.to_string()))?;
+            let certificate = Certificate::from_openssh(certificate.trim())
+                .map_err(|e| SshError::Key(e.to_string()))?;
+            handle
+                .authenticate_openssh_cert(target.user.clone(), Arc::new(key), certificate)
                 .await?
         }
     };

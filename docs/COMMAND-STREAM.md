@@ -103,8 +103,8 @@ pub trait CommandAuthorizer { fn authorize(&self, who: &Principal, kind: &Channe
   draw the screen snapshot; the emulator is in the library, not the viewers.
 
 Not built yet: file and process kinds, X11/agent/port forwarding, SSH
-certificates and GSSAPI (the account layer's), mouse reporting and text
-selection in the viewers.
+logins with Kerberos tickets (GSSAPI; russh has the client side), mouse
+reporting and text selection in the viewers.
 
 ## Limits and flow
 
