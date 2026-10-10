@@ -114,6 +114,24 @@ with Remote Desktop Services licences. So:
 Whole-desktop RDP stays what a client gets when it asks for the desktop
 (`StreamTarget::Desktop`).
 
+**Window by window, always.** The owner, verbatim: "No, we still want
+separate windows. That's the whole point of windowcast. We should be able
+to selectively stream whichever windows we want". Whatever runs a program
+(the host's own desktop, or a RemoteApp session) and whichever backend
+carries it, each of its top-level windows, dialogs, popups and menus is
+its own entry in the window list, with its owner named, and a client
+chooses and shows each one on its own. A client never gets a whole-desktop
+picture unless it asks for the desktop.
+
+Where that stands: the Windows agent lists only visible top-level windows
+without an owner (no dialogs, popups or menus), and the Linux agent the
+compositor's top-level windows; a RemoteApp connection lists its
+top-level windows and dialogs and draws a menu inside its owner's
+picture. Part (a) makes every owned window, popup and menu an entry of
+its own, with its owner, on Windows hosts and in RemoteApp sessions; on
+Wayland a popup belongs to its top-level window's surface and is captured
+with it.
+
 ### How a launch becomes a RemoteApp
 
 1. The client evaluates its rules on the program as a window would be
