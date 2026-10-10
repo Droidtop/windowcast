@@ -7,11 +7,16 @@
 //! The exchange, client first:
 //!
 //! 1. `Hello` both ways: protocol version, persistent identity (Ed25519
-//!    public key), a fresh 32-byte nonce, and the client's mode (`Pair` or
-//!    `Resume`).
+//!    public key), a fresh 32-byte nonce, and the client's mode (`Pair`,
+//!    `Resume` or `Account`).
 //! 2. `Pair` only: one SPAKE2 message each way, seeded with the PIN the
 //!    host shows. Both sides derive the same key only if both used the same
 //!    PIN; nothing on the wire lets an observer test PIN guesses offline.
+//!    `Account` only (docs/ACCOUNTS.md): the host's `AccountOffer`, signed
+//!    with its identity, carrying a fresh HPKE key; the client, trusting
+//!    that identity already, answers with its credential sealed to the key
+//!    (`AccountProof`), and the host answers `AccountAccepted` or rejects.
+//!    A hash of offer and proof goes into the transcript below.
 //! 3. The client sends its offer, the host its answer. Each is signed with
 //!    the sender's identity over a transcript binding the mode, both
 //!    nonces, both identities and the complete SDP (which carries the DTLS
@@ -29,10 +34,16 @@
 //! messages.
 
 use rand_core::{OsRng, RngCore};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use windowcast_accounts::seal::HostKey;
+use windowcast_accounts::Account;
 use windowcast_identity::{Identity, PeerId, TrustStore};
 use windowcast_pairing::SessionKey;
-use windowcast_protocol::{ConnectMode, SdpKind, SignalMessage, PROTOCOL_VERSION};
+use windowcast_protocol::{
+    AccountCredential, AccountOffer, ConnectMode, OidcProviderInfo, SdpKind, SignInMethod,
+    SignalMessage, PROTOCOL_VERSION,
+};
 
 use crate::{Session, TransportError};
 
@@ -40,10 +51,20 @@ use crate::{Session, TransportError};
 /// `SignalMessage`. An SDP with every candidate is a few kilobytes.
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 
-const TRANSCRIPT_LABEL: &[u8] = b"windowcast-signaling-v1\0";
+const TRANSCRIPT_LABEL: &[u8] = b"windowcast-signaling-v2\0";
+
+/// What the host's account offer is signed over and the credential sealed
+/// with, before the offer's own bytes.
+const ACCOUNT_LABEL: &[u8] = b"windowcast-account-v1\0";
 
 /// Message sent with every rejection, whatever the cause.
 const AUTHENTICATION_FAILED: &str = "authentication failed";
+
+/// Makes the client's account credential once it has the host's offer
+/// (the Kerberos service to ask a ticket for, the providers). An error
+/// stops the sign-in with [`TransportError::Credential`].
+pub type MakeCredential<'a> =
+    &'a (dyn Fn(&AccountOffer) -> Result<AccountCredential, String> + Send + Sync);
 
 /// What the client proves itself with.
 pub enum ClientCredential<'a> {
@@ -51,6 +72,25 @@ pub enum ClientCredential<'a> {
     Pin(&'a str),
     /// Later connections: the host must be pinned in this store.
     Pinned(&'a TrustStore),
+    /// Signing in with an account. The credential goes only to a host
+    /// pinned in `trusted` or the one `accept` names (a key the user
+    /// confirmed); any other stops with [`TransportError::HostNotTrusted`].
+    Account {
+        trusted: &'a TrustStore,
+        accept: Option<PeerId>,
+        credential: MakeCredential<'a>,
+    },
+}
+
+/// The host's account checking, for clients that sign in.
+#[async_trait::async_trait]
+pub trait AccountGate: Send + Sync {
+    /// The sign-in methods, OIDC providers and Kerberos service offered.
+    fn offer(&self) -> (Vec<SignInMethod>, Vec<OidcProviderInfo>, Option<String>);
+    /// Checks the credential the device `client` presented: the account
+    /// it signs in, or `None` to refuse (the gate logs why; the client
+    /// hears only "authentication failed").
+    async fn check(&self, client: PeerId, credential: AccountCredential) -> Option<Account>;
 }
 
 /// What the host accepts.
@@ -58,8 +98,10 @@ pub struct HostCredential<'a> {
     /// The PIN on screen while the host is open to a new pairing; `None`
     /// refuses every pairing attempt.
     pub pin: Option<&'a str>,
-    /// Clients paired earlier, accepted on `Resume`.
+    /// Clients paired or registered earlier, accepted on `Resume`.
     pub trusted: &'a TrustStore,
+    /// Account sign-in; `None` refuses every sign-in.
+    pub accounts: Option<&'a dyn AccountGate>,
 }
 
 /// A connected, authenticated session.
@@ -70,6 +112,12 @@ pub struct Established {
     /// True when this connection paired by PIN: the caller should pin
     /// `peer` in its trust store and save it.
     pub paired: bool,
+    /// Host side: the account the client signed in with on this
+    /// connection, to register its key to.
+    pub account: Option<Account>,
+    /// Client side: true when this connection signed in with an account
+    /// (the host checked it): the caller should pin the host now.
+    pub signed_in: bool,
 }
 
 struct Hello {
@@ -94,11 +142,39 @@ where
     )
     .await
     .map_err(|_| TransportError::Timeout)?
-    .map(|(peer, paired)| Established {
+    .map(|(peer, paired, signed_in)| Established {
         session,
         peer,
         paired,
+        account: None,
+        signed_in,
     })
+}
+
+/// Asks the host at the other end of `stream` what account sign-ins it
+/// takes, and stops there: its identity and its offer, whose signature
+/// is checked. Trust the providers it names only once that identity is
+/// trusted.
+pub async fn sign_in_offer<S>(
+    mut stream: S,
+    identity: &Identity,
+) -> Result<(PeerId, AccountOffer), TransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+        let client = Hello {
+            peer: identity.peer_id(),
+            nonce: fresh_nonce(),
+            mode: ConnectMode::Account,
+        };
+        write_hello(&mut stream, &client).await?;
+        let host = read_hello(&mut stream).await?;
+        let (offer, _) = receive_offer(&mut stream, &client, &host).await?;
+        Ok((host.peer, offer))
+    })
+    .await
+    .map_err(|_| TransportError::Timeout)?
 }
 
 /// Host side, for one incoming signaling stream.
@@ -117,10 +193,12 @@ where
     )
     .await
     .map_err(|_| TransportError::Timeout)?
-    .map(|(peer, paired)| Established {
+    .map(|(peer, paired, account)| Established {
         session,
         peer,
         paired,
+        account,
+        signed_in: false,
     })
 }
 
@@ -133,13 +211,14 @@ async fn connect_inner<S>(
     session: &Session,
     identity: &Identity,
     credential: ClientCredential<'_>,
-) -> Result<(PeerId, bool), TransportError>
+) -> Result<(PeerId, bool, bool), TransportError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mode = match credential {
         ClientCredential::Pin(_) => ConnectMode::Pair,
         ClientCredential::Pinned(_) => ConnectMode::Resume,
+        ClientCredential::Account { .. } => ConnectMode::Account,
     };
     let client = Hello {
         peer: identity.peer_id(),
@@ -154,6 +233,38 @@ where
         }
     }
 
+    let mut binding = [0u8; 32];
+    if let ClientCredential::Account {
+        trusted,
+        accept,
+        credential: make,
+    } = credential
+    {
+        // A credential goes only to a host this client already trusts.
+        if !trusted.is_pinned(&host.peer) && accept != Some(host.peer) {
+            return Err(TransportError::HostNotTrusted(host.peer));
+        }
+        let (offer, (context, signature)) = receive_offer(stream, &client, &host).await?;
+        let credential = make(&offer).map_err(TransportError::Credential)?;
+        let plaintext = windowcast_protocol::encode_credential(&credential)?;
+        let (encapsulated, sealed) =
+            windowcast_accounts::seal::seal(&offer.seal_key, &Sha256::digest(&context), &plaintext)
+                .map_err(|e| TransportError::Credential(e.to_string()))?;
+        binding = account_binding(&context, &signature, &encapsulated, &sealed);
+        write_message(
+            stream,
+            &SignalMessage::AccountProof {
+                encapsulated,
+                sealed,
+            },
+        )
+        .await?;
+        match read_message(stream).await? {
+            SignalMessage::AccountAccepted => {}
+            other => return Err(unexpected(other, "the sign-in's verdict")),
+        }
+    }
+
     let key = match credential {
         ClientCredential::Pin(pin) => {
             let start = windowcast_pairing::start_client(pin);
@@ -164,7 +275,7 @@ where
             };
             Some(windowcast_pairing::finish(start, &peer_message)?)
         }
-        ClientCredential::Pinned(_) => None,
+        ClientCredential::Pinned(_) | ClientCredential::Account { .. } => None,
     };
 
     let offer = session.gathered_local_description(SdpKind::Offer).await?;
@@ -176,15 +287,24 @@ where
         offer,
         &client,
         &host,
+        &binding,
     )
     .await?;
 
-    let answer = receive_description(stream, key.as_ref(), SdpKind::Answer, &client, &host).await?;
+    let answer = receive_description(
+        stream,
+        key.as_ref(),
+        SdpKind::Answer,
+        &client,
+        &host,
+        &binding,
+    )
+    .await?;
     session
         .set_remote_description(SdpKind::Answer, answer)
         .await?;
     session.wait_control_open().await?;
-    Ok((host.peer, key.is_some()))
+    Ok((host.peer, key.is_some(), mode == ConnectMode::Account))
 }
 
 async fn accept_inner<S>(
@@ -192,12 +312,16 @@ async fn accept_inner<S>(
     session: &Session,
     identity: &Identity,
     credential: HostCredential<'_>,
-) -> Result<(PeerId, bool), TransportError>
+) -> Result<(PeerId, bool, Option<Account>), TransportError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let client = read_hello(stream).await?;
     match client.mode {
+        ConnectMode::Account if credential.accounts.is_none() => {
+            reject(stream, "sign-in is not open on this host").await;
+            return Err(TransportError::SignInNotOpen);
+        }
         ConnectMode::Pair if credential.pin.is_none() => {
             reject(stream, "pairing is not open on this host").await;
             return Err(TransportError::PairingNotOpen);
@@ -215,6 +339,55 @@ where
     };
     write_hello(stream, &host).await?;
 
+    let mut binding = [0u8; 32];
+    let mut account = None;
+    if let (ConnectMode::Account, Some(gate)) = (client.mode, credential.accounts) {
+        let seal_key = HostKey::generate();
+        let (methods, providers, kerberos_service) = gate.offer();
+        let offer = AccountOffer {
+            methods,
+            providers,
+            kerberos_service,
+            seal_key: seal_key.public(),
+        };
+        let context = account_context(&client, &host, &offer)?;
+        let signature = identity.sign(&context).to_bytes().to_vec();
+        write_message(
+            stream,
+            &SignalMessage::AccountOffer {
+                offer,
+                signature: signature.clone(),
+            },
+        )
+        .await?;
+        let (encapsulated, sealed) = match read_message(stream).await {
+            Ok(SignalMessage::AccountProof {
+                encapsulated,
+                sealed,
+            }) => (encapsulated, sealed),
+            Ok(other) => return Err(unexpected(other, "an account proof")),
+            // A client that only asked what this host offers.
+            Err(TransportError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Err(TransportError::Closed);
+            }
+            Err(e) => return Err(e),
+        };
+        let presented = seal_key
+            .open(&encapsulated, &sealed, &Sha256::digest(&context))
+            .ok()
+            .and_then(|plaintext| windowcast_protocol::decode_credential(&plaintext).ok());
+        account = match presented {
+            Some(presented) => gate.check(client.peer, presented).await,
+            None => None,
+        };
+        if account.is_none() {
+            reject(stream, AUTHENTICATION_FAILED).await;
+            return Err(TransportError::SignInFailed);
+        }
+        write_message(stream, &SignalMessage::AccountAccepted).await?;
+        binding = account_binding(&context, &signature, &encapsulated, &sealed);
+    }
+
     let key = match (client.mode, credential.pin) {
         (ConnectMode::Pair, Some(pin)) => {
             let peer_message = match read_message(stream).await? {
@@ -228,15 +401,23 @@ where
         _ => None,
     };
 
-    let offer =
-        match receive_description(stream, key.as_ref(), SdpKind::Offer, &client, &host).await {
-            Ok(offer) => offer,
-            Err(TransportError::AuthenticationFailed) => {
-                reject(stream, AUTHENTICATION_FAILED).await;
-                return Err(TransportError::AuthenticationFailed);
-            }
-            Err(e) => return Err(e),
-        };
+    let offer = match receive_description(
+        stream,
+        key.as_ref(),
+        SdpKind::Offer,
+        &client,
+        &host,
+        &binding,
+    )
+    .await
+    {
+        Ok(offer) => offer,
+        Err(TransportError::AuthenticationFailed) => {
+            reject(stream, AUTHENTICATION_FAILED).await;
+            return Err(TransportError::AuthenticationFailed);
+        }
+        Err(e) => return Err(e),
+    };
     session
         .set_remote_description(SdpKind::Offer, offer)
         .await?;
@@ -249,15 +430,76 @@ where
         answer,
         &client,
         &host,
+        &binding,
     )
     .await?;
 
     session.wait_control_open().await?;
-    Ok((client.peer, key.is_some()))
+    Ok((client.peer, key.is_some(), account))
 }
 
-fn transcript(kind: SdpKind, client: &Hello, host: &Hello, sdp: &str) -> Vec<u8> {
-    let mut t = Vec::with_capacity(TRANSCRIPT_LABEL.len() + 2 + 4 * 32 + sdp.len());
+/// What the host's account offer is signed over: a label, both nonces and
+/// identities, and the offer.
+fn account_context(
+    client: &Hello,
+    host: &Hello,
+    offer: &AccountOffer,
+) -> Result<Vec<u8>, TransportError> {
+    let mut context = ACCOUNT_LABEL.to_vec();
+    context.extend_from_slice(&client.nonce);
+    context.extend_from_slice(&host.nonce);
+    context.extend_from_slice(&client.peer.0);
+    context.extend_from_slice(&host.peer.0);
+    context.extend_from_slice(&windowcast_protocol::encode_offer(offer)?);
+    Ok(context)
+}
+
+/// The sign-in as the descriptions' transcript carries it: the offer, its
+/// signature and the sealed proof, hashed.
+fn account_binding(
+    context: &[u8],
+    signature: &[u8],
+    encapsulated: &[u8],
+    sealed: &[u8],
+) -> [u8; 32] {
+    Sha256::new()
+        .chain_update(context)
+        .chain_update(signature)
+        .chain_update(encapsulated)
+        .chain_update(sealed)
+        .finalize()
+        .into()
+}
+
+/// The offer and, for the proof, what it was signed over and the
+/// signature.
+type ReceivedOffer = (AccountOffer, (Vec<u8>, Vec<u8>));
+
+/// Reads the host's account offer and checks its signature.
+async fn receive_offer<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    client: &Hello,
+    host: &Hello,
+) -> Result<ReceivedOffer, TransportError> {
+    let (offer, signature) = match read_message(stream).await? {
+        SignalMessage::AccountOffer { offer, signature } => (offer, signature),
+        other => return Err(unexpected(other, "an account offer")),
+    };
+    let context = account_context(client, host, &offer)?;
+    if !windowcast_identity::verify_bytes(&host.peer, &context, &signature) {
+        return Err(TransportError::AuthenticationFailed);
+    }
+    Ok((offer, (context, signature)))
+}
+
+fn transcript(
+    kind: SdpKind,
+    client: &Hello,
+    host: &Hello,
+    binding: &[u8; 32],
+    sdp: &str,
+) -> Vec<u8> {
+    let mut t = Vec::with_capacity(TRANSCRIPT_LABEL.len() + 2 + 5 * 32 + sdp.len());
     t.extend_from_slice(TRANSCRIPT_LABEL);
     t.push(match kind {
         SdpKind::Offer => 0,
@@ -266,15 +508,18 @@ fn transcript(kind: SdpKind, client: &Hello, host: &Hello, sdp: &str) -> Vec<u8>
     t.push(match client.mode {
         ConnectMode::Pair => 0,
         ConnectMode::Resume => 1,
+        ConnectMode::Account => 2,
     });
     t.extend_from_slice(&client.nonce);
     t.extend_from_slice(&host.nonce);
     t.extend_from_slice(&client.peer.0);
     t.extend_from_slice(&host.peer.0);
+    t.extend_from_slice(binding);
     t.extend_from_slice(sdp.as_bytes());
     t
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_description<S>(
     stream: &mut S,
     identity: &Identity,
@@ -283,11 +528,12 @@ async fn send_description<S>(
     sdp: String,
     client: &Hello,
     host: &Hello,
+    binding: &[u8; 32],
 ) -> Result<(), TransportError>
 where
     S: AsyncWrite + Unpin,
 {
-    let t = transcript(kind, client, host, &sdp);
+    let t = transcript(kind, client, host, binding, &sdp);
     let message = SignalMessage::Description {
         kind,
         signature: identity.sign(&t).to_bytes().to_vec(),
@@ -306,6 +552,7 @@ async fn receive_description<S>(
     kind: SdpKind,
     client: &Hello,
     host: &Hello,
+    binding: &[u8; 32],
 ) -> Result<String, TransportError>
 where
     S: AsyncRead + Unpin,
@@ -326,7 +573,7 @@ where
         SdpKind::Offer => &client.peer,
         SdpKind::Answer => &host.peer,
     };
-    let t = transcript(kind, client, host, &sdp);
+    let t = transcript(kind, client, host, binding, &sdp);
     if let Some(key) = key {
         let tag = pin_tag.ok_or(TransportError::AuthenticationFailed)?;
         windowcast_pairing::verify_fingerprint(key, &t, &tag)

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "protocol",
     "identity",
+    "accounts",
     "pairing",
     "gamestream",
     "rdp",

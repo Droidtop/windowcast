@@ -406,6 +406,15 @@ pub enum ControlMessage {
     /// of waiting for the connection to time out.
     Goodbye,
 
+    /// The client asks for an OpenSSH user certificate for its SSH key
+    /// (an OpenSSH public key line), for an account it signed in with
+    /// (docs/ACCOUNTS.md, "SSH and the command stream").
+    SshCertificateRequest {
+        public_key: String,
+    },
+    /// The certificate (an OpenSSH certificate line), or why there is none.
+    SshCertificateResponse(Result<String, String>),
+
     /// This side's discovery ID, for finding it away from the LAN later
     /// (`windowcast-transport`'s `remote`). Each side sends its own when a
     /// session starts; the other keeps it with the pinned identity.
@@ -422,11 +431,58 @@ pub enum SdpKind {
 
 /// Which credential a connecting client presents during signaling. See
 /// docs/SECURITY.md: `Pair` runs the PIN-seeded PAKE once and pins both
-/// identities; `Resume` relies on identities pinned by an earlier pairing.
+/// identities; `Resume` relies on identities pinned by an earlier pairing
+/// or registered by an earlier sign-in; `Account` signs in with an account
+/// (docs/ACCOUNTS.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectMode {
     Pair,
     Resume,
+    Account,
+}
+
+/// A kind of account sign-in a host takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignInMethod {
+    /// A user name and password the host checks (its own accounts, the
+    /// OS's, or a directory's).
+    Password,
+    /// An ID token from one of the host's OpenID Connect providers.
+    Oidc,
+    /// A Kerberos ticket for the host's service principal.
+    Kerberos,
+}
+
+/// An OpenID Connect provider a host accepts, as clients need it to sign
+/// in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OidcProviderInfo {
+    pub name: String,
+    pub issuer: String,
+    /// windowcast's client id at the provider (a public client).
+    pub client_id: String,
+    /// Scopes to ask for besides `openid`.
+    pub scopes: Vec<String>,
+}
+
+/// What a host offers a client that came to sign in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountOffer {
+    pub methods: Vec<SignInMethod>,
+    pub providers: Vec<OidcProviderInfo>,
+    /// The Kerberos service principal to ask a ticket for.
+    pub kerberos_service: Option<String>,
+    /// The host's HPKE public key for this sign-in (X25519).
+    pub seal_key: Vec<u8>,
+}
+
+/// A client's account credential. Only ever sent sealed to the host
+/// ([`SignalMessage::AccountProof`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AccountCredential {
+    Password { username: String, password: String },
+    Oidc { provider: String, id_token: String },
+    Kerberos { token: Vec<u8> },
 }
 
 /// Messages on the signaling channel: whatever carries the very first
@@ -448,6 +504,20 @@ pub enum SignalMessage {
     },
     /// One SPAKE2 message (pairing only).
     Pake(Vec<u8>),
+    /// Signing in with an account: the host's offer, signed by its
+    /// identity over the transcript so far.
+    AccountOffer {
+        offer: AccountOffer,
+        signature: Vec<u8>,
+    },
+    /// The client's [`AccountCredential`], sealed to the offer's key.
+    AccountProof {
+        encapsulated: Vec<u8>,
+        sealed: Vec<u8>,
+    },
+    /// The host took the sign-in (a refusal is a [`SignalMessage::Reject`]),
+    /// so the client learns the verdict before it gathers its offer.
+    AccountAccepted,
     Description {
         kind: SdpKind,
         sdp: String,
@@ -461,6 +531,20 @@ pub enum SignalMessage {
     /// which check failed beyond "authentication failed", so it is no
     /// oracle for a PIN guesser.
     Reject(String),
+}
+
+/// The bytes an [`AccountOffer`]'s signature covers, and a credential's
+/// before it is sealed.
+pub fn encode_offer(offer: &AccountOffer) -> Result<Vec<u8>, ProtocolError> {
+    Ok(bincode::serialize(offer)?)
+}
+
+pub fn encode_credential(credential: &AccountCredential) -> Result<Vec<u8>, ProtocolError> {
+    Ok(bincode::serialize(credential)?)
+}
+
+pub fn decode_credential(bytes: &[u8]) -> Result<AccountCredential, ProtocolError> {
+    Ok(bincode::deserialize(bytes)?)
 }
 
 pub fn encode_signal(message: &SignalMessage) -> Result<Vec<u8>, ProtocolError> {
@@ -639,6 +723,48 @@ mod tests {
             decode_signal(&encode_signal(&old).unwrap()),
             Err(ProtocolError::VersionMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn account_messages_round_trip() {
+        let offer = SignalMessage::AccountOffer {
+            offer: AccountOffer {
+                methods: vec![SignInMethod::Password, SignInMethod::Oidc],
+                providers: vec![OidcProviderInfo {
+                    name: "corp".into(),
+                    issuer: "https://id.example.org".into(),
+                    client_id: "windowcast".into(),
+                    scopes: vec!["groups".into()],
+                }],
+                kerberos_service: Some("host/h.example.org".into()),
+                seal_key: vec![5; 32],
+            },
+            signature: vec![6; 64],
+        };
+        assert_eq!(
+            decode_signal(&encode_signal(&offer).unwrap()).unwrap(),
+            offer
+        );
+        let proof = SignalMessage::AccountProof {
+            encapsulated: vec![1; 32],
+            sealed: vec![2; 40],
+        };
+        assert_eq!(
+            decode_signal(&encode_signal(&proof).unwrap()).unwrap(),
+            proof
+        );
+        let credential = AccountCredential::Oidc {
+            provider: "corp".into(),
+            id_token: "a.b.c".into(),
+        };
+        assert_eq!(
+            decode_credential(&encode_credential(&credential).unwrap()).unwrap(),
+            credential
+        );
+        let request = ControlMessage::SshCertificateRequest {
+            public_key: "ssh-ed25519 AAAA".into(),
+        };
+        assert_eq!(decode(&encode(&request).unwrap()).unwrap(), request);
     }
 
     #[test]

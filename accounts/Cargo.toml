@@ -1,0 +1,43 @@
+[package]
+name = "windowcast-accounts"
+description = "Account sign-in beside device pairing: local, OS, LDAP, OIDC and Kerberos accounts, registrations, policy, SSH certificates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+windowcast-identity = { path = "../identity" }
+windowcast-protocol = { path = "../protocol" }
+serde.workspace = true
+serde_json = "1"
+rand_core.workspace = true
+thiserror.workspace = true
+# Local accounts' password hashes (Argon2id).
+argon2 = "0.5"
+# Sealing a credential to the host (RFC 9180).
+hpke = { version = "0.12", default-features = false, features = ["alloc", "x25519"] }
+# OpenID Connect: ID token checks against the provider's keys, and the
+# flows' requests.
+jsonwebtoken = "9"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+url = "2"
+sha2 = "0.10"
+base64 = "0.22"
+# SSH user certificates from a sign-in.
+ssh-key = { version = "0.6", features = ["ed25519"] }
+ldap3 = { version = "0.12", default-features = false, features = ["sync", "tls-rustls-ring"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+# Kerberos: GSS-API on Unix (needs the krb5 headers), SSPI on Windows.
+cross-krb5 = { version = "0.4", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security"] }
+
+[features]
+ldap = ["dep:ldap3", "dep:rustls"]
+kerberos = ["dep:cross-krb5"]
+# The host OS's accounts through PAM on Linux (links libpam).
+pam = []

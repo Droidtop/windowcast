@@ -50,7 +50,9 @@ use windowcast_protocol::{ControlMessage, SdpKind, StreamTarget, VideoCodec, Win
 
 pub use audio::{AudioPacket, AudioTrack, RemoteAudio};
 pub use media::{is_keyframe, Reception, RemoteWindow, WindowFrame, WindowTrack};
-pub use signaling::{accept, connect, ClientCredential, Established, HostCredential};
+pub use signaling::{
+    accept, connect, sign_in_offer, AccountGate, ClientCredential, Established, HostCredential,
+};
 
 /// Label of the control data channel. Pre-negotiated with this id on both
 /// sides (see module docs).
@@ -90,6 +92,19 @@ pub enum TransportError {
     AuthenticationFailed,
     #[error("the peer's identity is not pinned; pair with it first")]
     UnknownPeer,
+    /// Signing in: the host's key is not one this client trusts with a
+    /// credential. Show its fingerprint to the user; connect again with it
+    /// accepted if they confirm it.
+    #[error("the host's identity {0} is not trusted yet")]
+    HostNotTrusted(windowcast_identity::PeerId),
+    /// Signing in: the client could not make its credential.
+    #[error("could not sign in: {0}")]
+    Credential(String),
+    #[error("this host does not take account sign-ins")]
+    SignInNotOpen,
+    /// Host side: the presented account credential was refused.
+    #[error("the account sign-in was refused")]
+    SignInFailed,
     #[error("this host is not accepting new pairings")]
     PairingNotOpen,
     #[error("pairing key exchange failed: {0}")]

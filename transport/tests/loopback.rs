@@ -8,11 +8,16 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::io::DuplexStream;
 use tokio::net::{TcpListener, TcpStream};
-use windowcast_identity::{Identity, TrustStore};
-use windowcast_protocol::{ControlMessage, SdpKind, SignalMessage, VideoCodec, WindowId};
+use windowcast_accounts::{Account, Method};
+use windowcast_identity::{Identity, PeerId, TrustStore};
+use windowcast_protocol::{
+    AccountCredential, AccountOffer, ControlMessage, OidcProviderInfo, SdpKind, SignInMethod,
+    SignalMessage, VideoCodec, WindowId,
+};
 use windowcast_transport::signaling::{read_message, write_message};
 use windowcast_transport::{
-    accept, connect, ClientCredential, Established, HostCredential, Session, TransportError,
+    accept, connect, sign_in_offer, AccountGate, ClientCredential, Established, HostCredential,
+    Session, TransportError,
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(40);
@@ -22,6 +27,43 @@ struct Peers {
     client_identity: Identity,
     host_trust: TrustStore,
     client_trust: TrustStore,
+    gate: Option<TestGate>,
+}
+
+/// A host that takes one user name and password.
+struct TestGate;
+
+#[async_trait::async_trait]
+impl AccountGate for TestGate {
+    fn offer(&self) -> (Vec<SignInMethod>, Vec<OidcProviderInfo>, Option<String>) {
+        (vec![SignInMethod::Password], Vec::new(), None)
+    }
+
+    async fn check(&self, _client: PeerId, credential: AccountCredential) -> Option<Account> {
+        match credential {
+            AccountCredential::Password { username, password }
+                if username == "alice" && password == "alice-password" =>
+            {
+                Some(Account {
+                    name: username,
+                    groups: vec!["staff".into()],
+                    method: Method::Password,
+                    provider: "test".into(),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+fn password(password: &'static str) -> impl Fn(&AccountOffer) -> Result<AccountCredential, String> {
+    move |offer: &AccountOffer| {
+        assert_eq!(offer.methods, vec![SignInMethod::Password]);
+        Ok(AccountCredential::Password {
+            username: "alice".into(),
+            password: password.into(),
+        })
+    }
 }
 
 impl Peers {
@@ -31,6 +73,7 @@ impl Peers {
             client_identity: Identity::generate(),
             host_trust: TrustStore::default(),
             client_trust: TrustStore::default(),
+            gate: None,
         }
     }
 
@@ -59,6 +102,7 @@ impl Peers {
                 HostCredential {
                     pin: host_pin,
                     trusted: &self.host_trust,
+                    accounts: self.gate.as_ref().map(|g| g as &dyn AccountGate),
                 },
             )
             .await
@@ -170,6 +214,127 @@ async fn resume_works_between_pinned_peers_only() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn signing_in_with_an_account_connects_a_trusted_host_only() {
+    let mut peers = Peers::new();
+    peers.gate = Some(TestGate);
+    let host_id = peers.host_identity.peer_id();
+    let right = password("alice-password");
+
+    // The client has never seen this host: it stops before sending
+    // anything.
+    let (host, client) = peers
+        .run(
+            None,
+            ClientCredential::Account {
+                trusted: &peers.client_trust,
+                accept: None,
+                credential: &right,
+            },
+        )
+        .await;
+    assert!(matches!(client, Err(TransportError::HostNotTrusted(id)) if id == host_id));
+    assert!(host.is_err());
+
+    // The user confirmed the host's key.
+    let (host, client) = peers
+        .run(
+            None,
+            ClientCredential::Account {
+                trusted: &peers.client_trust,
+                accept: Some(host_id),
+                credential: &right,
+            },
+        )
+        .await;
+    let (host, client) = (host.expect("host side"), client.expect("client side"));
+    assert!(client.signed_in && !client.paired);
+    assert_eq!(host.peer, peers.client_identity.peer_id());
+    assert_eq!(
+        host.account.as_ref().map(|a| a.name.as_str()),
+        Some("alice")
+    );
+    client
+        .session
+        .send_control(&ControlMessage::Ping)
+        .await
+        .unwrap();
+    assert_eq!(
+        host.session.recv_control().await.unwrap(),
+        ControlMessage::Ping
+    );
+
+    // A wrong password: the generic refusal.
+    let wrong = password("wrong");
+    let (host, client) = peers
+        .run(
+            None,
+            ClientCredential::Account {
+                trusted: &peers.client_trust,
+                accept: Some(host_id),
+                credential: &wrong,
+            },
+        )
+        .await;
+    assert!(matches!(host, Err(TransportError::SignInFailed)));
+    assert!(matches!(client, Err(TransportError::Rejected(_))));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_without_accounts_refuses_a_sign_in() {
+    let mut peers = Peers::new();
+    peers.client_trust.pin(peers.host_identity.peer_id());
+    let right = password("alice-password");
+    let (host, client) = peers
+        .run(
+            None,
+            ClientCredential::Account {
+                trusted: &peers.client_trust,
+                accept: None,
+                credential: &right,
+            },
+        )
+        .await;
+    assert!(matches!(host, Err(TransportError::SignInNotOpen)));
+    assert!(matches!(client, Err(TransportError::Rejected(_))));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_can_ask_what_sign_ins_a_host_takes() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let host_identity = Identity::generate();
+    let host_id = host_identity.peer_id();
+    let trusted = TrustStore::default();
+    let host = async {
+        let (stream, _) = listener.accept().await.unwrap();
+        accept(
+            stream,
+            Session::new().await.unwrap(),
+            &host_identity,
+            HostCredential {
+                pin: None,
+                trusted: &trusted,
+                accounts: Some(&TestGate),
+            },
+        )
+        .await
+    };
+    let client = async {
+        // Asks, and hangs up when the stream drops.
+        let stream = TcpStream::connect(address).await.unwrap();
+        sign_in_offer(stream, &Identity::generate()).await
+    };
+    let (host, client) = tokio::time::timeout(TEST_TIMEOUT, async { tokio::join!(host, client) })
+        .await
+        .expect("exchange hung");
+    let (peer, offer) = client.expect("offer");
+    assert_eq!(peer, host_id);
+    assert_eq!(offer.methods, vec![SignInMethod::Password]);
+    assert_eq!(offer.seal_key.len(), 32);
+    assert!(matches!(host, Err(TransportError::Closed)));
+}
+
 /// Forwards signaling frames from `from` to `to`, letting `tamper` rewrite
 /// each one: someone in the middle of the signaling path.
 async fn relay(
@@ -243,6 +408,7 @@ async fn a_signaling_relay_that_swaps_the_fingerprint_is_caught() {
         Session::new().await.unwrap(),
         &peers.host_identity,
         HostCredential {
+            accounts: None,
             pin: Some("482913"),
             trusted: &peers.host_trust,
         },

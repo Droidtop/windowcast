@@ -8,6 +8,8 @@ license.workspace = true
 windowcast-protocol = { path = "../protocol" }
 windowcast-identity = { path = "../identity" }
 windowcast-pairing = { path = "../pairing" }
+windowcast-accounts = { path = "../accounts" }
+sha2 = "0.10"
 webrtc = "0.21"
 rtc = "0.21"
 async-trait = "0.1"

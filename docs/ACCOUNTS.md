@@ -104,7 +104,7 @@ identity provider of its choosing.
   that knows the user decides.
 - **OpenID Connect** (`oidc`): the client signs in with the provider in
   the user's browser (authorization code with PKCE, redirected to a
-  loopback port, RFC 8252), or with the device-code flow (RFC 8628) where
+  loopback port as `http://localhost:<port>`, RFC 8252), or with the device-code flow (RFC 8628) where
   there is no browser. The client asks for the `openid` scope with a
   **nonce derived from its device key** (SHA-256 of a label, the key and a
   salt it sends along), and presents the ID token. The host fetches the
@@ -119,13 +119,16 @@ identity provider of its choosing.
 - **SAML** goes through an OIDC broker (Keycloak, Dex, Authentik, Azure
   AD/Entra all front SAML IdPs with OIDC). windowcast speaks only OIDC;
   there is no SAML code.
-- **Kerberos / SPNEGO** (`kerberos`): `cross-krb5`, which is GSS-API
-  (MIT or Heimdal) on Unix and SSPI on Windows, with SPNEGO negotiate
-  tokens. The client uses the user's existing tickets (a domain login on
-  Windows, `kinit` elsewhere) for the host's service principal (default
-  `host/<hostname>`), with the transcript hash as channel bindings; the
-  host accepts with its keytab (or the machine account on Windows). That
-  is single sign-on: no password typed.
+- **Kerberos** (`kerberos`): `cross-krb5`, which is GSS-API (MIT or
+  Heimdal) on Unix and SSPI's Kerberos package on Windows. The client
+  uses the user's existing tickets (a domain login on Windows, `kinit`
+  elsewhere) for the service principal the host names, and sends the
+  Kerberos GSS token sealed like any credential; the host accepts with its
+  keytab (or the machine account on Windows). That is single sign-on: no
+  password typed. The tokens are plain Kerberos rather than SPNEGO:
+  SPNEGO, what HTTP's Negotiate wraps them in, adds only a fallback to
+  NTLM, which windowcast does not take, and cross-krb5's Unix side speaks
+  Kerberos only. Groups come from LDAP when the host has it configured.
 
 ## Policy
 
