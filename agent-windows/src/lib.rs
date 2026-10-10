@@ -13,6 +13,8 @@ pub mod capture;
 #[cfg(windows)]
 pub mod clipboard;
 #[cfg(windows)]
+pub mod cursor;
+#[cfg(windows)]
 pub mod encoder;
 #[cfg(windows)]
 pub mod gamepad;

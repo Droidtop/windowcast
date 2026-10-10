@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped on any incompatible change to the message shapes below. A peer
 /// that receives a mismatched version should refuse the session rather
 /// than guess at how to interpret an unknown wire format.
-pub const PROTOCOL_VERSION: u16 = 11;
+pub const PROTOCOL_VERSION: u16 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
@@ -56,6 +56,17 @@ pub enum WindowKind {
     Popup,
     /// A menu.
     Menu,
+}
+
+/// One pointer shape: RGBA, rows from the top, and the point that is the
+/// pointer's position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CursorImage {
+    pub id: u64,
+    pub width: u32,
+    pub height: u32,
+    pub hotspot: (u32, u32),
+    pub rgba: Vec<u8>,
 }
 
 /// What kind of content a window shows, as far as choosing a backend goes.
@@ -448,6 +459,21 @@ pub enum ControlMessage {
     },
     /// Which streamed window has keyboard focus on the host now.
     WindowFocused(WindowId),
+
+    /// The host's pointer over a streamed window (docs/BACKENDS.md, "The
+    /// session owns the window"): where it is in the window (fractions of
+    /// its picture, as input positions are), whether it shows, and its
+    /// shape, a `CursorShape` sent before. The host captures windows
+    /// without the pointer; the client draws it, the same on every carrier.
+    Cursor {
+        window: WindowId,
+        x: f32,
+        y: f32,
+        visible: bool,
+        shape: u64,
+    },
+    /// A pointer shape, sent once per session before a `Cursor` names it.
+    CursorShape(CursorImage),
 
     /// The sender is closing the session. Handled inside
     /// `windowcast-transport`: the receiver's session ends at once instead

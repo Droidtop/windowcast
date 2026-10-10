@@ -186,6 +186,12 @@ impl WindowSource for WithContent {
     fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
         self.inner.input(event, focus)
     }
+    fn cursor(&self) -> Option<windowcast_host::CursorState> {
+        self.inner.cursor()
+    }
+    fn cursor_image(&self, shape: u64) -> Option<windowcast_protocol::CursorImage> {
+        self.inner.cursor_image(shape)
+    }
 
     fn open_audio(
         &self,

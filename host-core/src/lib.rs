@@ -55,6 +55,14 @@ const PAIRING_LOCKOUT: Duration = Duration::from_secs(60);
 const MAX_SIGN_IN_FAILURES: u32 = 5;
 const SIGN_IN_LOCKOUT: Duration = Duration::from_secs(60);
 
+/// The host's pointer at one moment ([`WindowSource::cursor`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorState {
+    pub position: (i32, i32),
+    pub visible: bool,
+    pub shape: u64,
+}
+
 /// One encoded access unit from a [`FrameSource`].
 pub struct EncodedFrame {
     /// Annex-B for H.264/H.265, low-overhead OBUs for AV1.
@@ -138,6 +146,19 @@ pub trait WindowSource: Send + Sync + 'static {
     /// The clipboard's text and a counter that changes whenever the
     /// clipboard does; `None` when this host does not share its clipboard.
     fn clipboard(&self) -> Option<(u64, String)> {
+        None
+    }
+
+    /// The pointer now: where it is on the host's desktop (the pixels
+    /// window positions use), whether it shows, and its shape's id. `None`
+    /// when this host does not hand out its pointer (its captures then
+    /// draw it).
+    fn cursor(&self) -> Option<CursorState> {
+        None
+    }
+
+    /// The pointer shape `shape` names ([`Self::cursor`]).
+    fn cursor_image(&self, _shape: u64) -> Option<windowcast_protocol::CursorImage> {
         None
     }
 
@@ -965,6 +986,14 @@ impl Host {
             decision.clone(),
             Arc::clone(&listed),
         )));
+        // The windows this session streams, for following the pointer.
+        let streamed = Arc::new(std::sync::Mutex::new(Vec::<WindowId>::new()));
+        let _cursor = follow_cursor(
+            Arc::clone(&self.source),
+            Arc::clone(&session),
+            Arc::clone(&listed),
+            Arc::clone(&streamed),
+        );
         if let Some(discovery_id) = control.discovery_id.clone() {
             session
                 .send_control(&ControlMessage::Rendezvous { discovery_id })
@@ -1020,6 +1049,12 @@ impl Host {
                     };
                     let response = match started {
                         Ok(started) => {
+                            {
+                                let mut streamed = streamed.lock().expect("streamed");
+                                if !streamed.contains(&window) {
+                                    streamed.push(window);
+                                }
+                            }
                             let entry = streams.entry(window).or_default();
                             if entry.audio.is_none() {
                                 entry.audio =
@@ -1054,6 +1089,7 @@ impl Host {
                         .await?;
                 }
                 ControlMessage::StreamStopRequest(StreamTarget::Window(window)) => {
+                    streamed.lock().expect("streamed").retain(|w| *w != window);
                     if let Some(ended) = streams.remove(&window) {
                         end_stream(&session, window, ended).await?;
                     }
@@ -1069,6 +1105,7 @@ impl Host {
                         }
                     }
                     if entry.carriers.is_empty() {
+                        streamed.lock().expect("streamed").retain(|w| *w != window);
                         let ended = streams.remove(&window).expect("listed");
                         end_stream(&session, window, ended).await?;
                     }
@@ -1364,6 +1401,123 @@ const CLIPBOARD_POLL: Duration = Duration::from_millis(500);
 
 /// Sends the host's clipboard text to the client whenever it changes,
 /// except when the change is the client's own text coming back.
+/// How often the pointer is looked at while a window streams.
+const CURSOR_POLL: Duration = Duration::from_millis(16);
+
+/// Stops a session's pointer thread when dropped.
+struct StopFlag(Arc<AtomicBool>);
+
+impl Drop for StopFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Follows the host's pointer over the windows this session streams and
+/// sends it (`Cursor`, and each shape once as `CursorShape`), so the
+/// client draws it the same on every carrier. A thread of its own: the
+/// pointer is looked at about 60 times a second.
+fn follow_cursor(
+    source: Arc<dyn WindowSource>,
+    session: Arc<Session>,
+    listed: Arc<tokio::sync::Mutex<Option<Vec<WindowInfo>>>>,
+    streamed: Arc<std::sync::Mutex<Vec<WindowId>>>,
+) -> StopFlag {
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    let runtime = tokio::runtime::Handle::current();
+    std::thread::spawn(move || {
+        let mut sent_shapes = std::collections::HashSet::new();
+        let mut last: Option<ControlMessage> = None;
+        while !flag.load(Ordering::SeqCst) {
+            std::thread::sleep(CURSOR_POLL);
+            let streaming = streamed.lock().expect("streamed").clone();
+            if streaming.is_empty() {
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+            let Some(cursor) = source.cursor() else {
+                // This host draws its pointer into its captures.
+                return;
+            };
+            let windows = listed.blocking_lock().clone().unwrap_or_default();
+            let message = cursor_over(&cursor, &windows, &streaming).or_else(|| {
+                // Off every streamed window: hidden over the last one.
+                match &last {
+                    Some(ControlMessage::Cursor {
+                        window,
+                        x,
+                        y,
+                        shape,
+                        ..
+                    }) => Some(ControlMessage::Cursor {
+                        window: *window,
+                        x: *x,
+                        y: *y,
+                        visible: false,
+                        shape: *shape,
+                    }),
+                    _ => None,
+                }
+            });
+            let Some(message) = message else {
+                continue;
+            };
+            if last.as_ref() == Some(&message) {
+                continue;
+            }
+            if let ControlMessage::Cursor {
+                visible: true,
+                shape,
+                ..
+            } = &message
+            {
+                if sent_shapes.insert(*shape) {
+                    if let Some(image) = source.cursor_image(*shape) {
+                        let shape_message = ControlMessage::CursorShape(image);
+                        if runtime
+                            .block_on(session.send_control(&shape_message))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+            if runtime.block_on(session.send_control(&message)).is_err() {
+                return;
+            }
+            last = Some(message);
+        }
+    });
+    StopFlag(stop)
+}
+
+/// The pointer as a `Cursor` over the topmost streamed window it is on,
+/// when it is on one whose position the host knows.
+fn cursor_over(
+    cursor: &CursorState,
+    windows: &[WindowInfo],
+    streaming: &[WindowId],
+) -> Option<ControlMessage> {
+    let (cx, cy) = cursor.position;
+    windows
+        .iter()
+        .filter(|w| streaming.contains(&w.id) && w.width > 0 && w.height > 0)
+        .find_map(|w| {
+            let (px, py) = w.position?;
+            let x = (cx - px) as f32 / w.width as f32;
+            let y = (cy - py) as f32 / w.height as f32;
+            ((0.0..1.0).contains(&x) && (0.0..1.0).contains(&y)).then_some(ControlMessage::Cursor {
+                window: w.id,
+                x: (x * 4096.0).round() / 4096.0,
+                y: (y * 4096.0).round() / 4096.0,
+                visible: cursor.visible,
+                shape: cursor.shape,
+            })
+        })
+}
+
 /// How often a session's window list is looked at for changes.
 const WINDOWS_POLL: Duration = Duration::from_millis(400);
 

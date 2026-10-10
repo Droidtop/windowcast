@@ -133,6 +133,14 @@ impl WindowSource for WindowsSource {
         windows_list::list()
     }
 
+    fn cursor(&self) -> Option<windowcast_host::CursorState> {
+        crate::cursor::now()
+    }
+
+    fn cursor_image(&self, shape: u64) -> Option<windowcast_protocol::CursorImage> {
+        crate::cursor::image(shape)
+    }
+
     fn encoders(&self) -> Vec<VideoCodec> {
         self.current.read().expect("options").codecs.clone()
     }

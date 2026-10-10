@@ -272,6 +272,12 @@ impl WindowSource for WithRdp {
     fn clipboard(&self) -> Option<(u64, String)> {
         self.inner.clipboard()
     }
+    fn cursor(&self) -> Option<windowcast_host::CursorState> {
+        self.inner.cursor()
+    }
+    fn cursor_image(&self, shape: u64) -> Option<windowcast_protocol::CursorImage> {
+        self.inner.cursor_image(shape)
+    }
     fn set_clipboard(&self, text: &str) {
         self.inner.set_clipboard(text)
     }

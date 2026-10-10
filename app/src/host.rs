@@ -98,6 +98,12 @@ impl WindowSource for Gated {
             self.agent.input(event, focus);
         }
     }
+    fn cursor(&self) -> Option<windowcast_host::CursorState> {
+        self.agent.cursor()
+    }
+    fn cursor_image(&self, shape: u64) -> Option<windowcast_protocol::CursorImage> {
+        self.agent.cursor_image(shape)
+    }
 
     fn gamepads(&self) -> Option<Result<Box<dyn windowcast_host::gamepad::GamepadSink>, String>> {
         Some(self.agent.gamepads()?.map(|sink| {

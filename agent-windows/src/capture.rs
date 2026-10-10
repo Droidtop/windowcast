@@ -164,6 +164,10 @@ impl Capture {
         // Windows 11 can drop the yellow capture border; older Windows
         // has no such call and keeps it.
         let _ = session.SetIsBorderRequired(false);
+        // The pointer is the session's: the client draws it (crate::cursor),
+        // so captures leave it out. Windows before 10 2004 has no such call
+        // and draws it.
+        let _ = session.SetIsCursorCaptureEnabled(false);
         session.StartCapture()?;
         Ok(Capture {
             device,

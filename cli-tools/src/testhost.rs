@@ -42,6 +42,12 @@ impl WindowSource for MeasuringMicrophone {
     fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
         self.0.input(event, focus)
     }
+    fn cursor(&self) -> Option<windowcast_host::CursorState> {
+        self.0.cursor()
+    }
+    fn cursor_image(&self, shape: u64) -> Option<windowcast_protocol::CursorImage> {
+        self.0.cursor_image(shape)
+    }
     fn microphone(&self) -> Option<Result<Box<dyn MicrophoneSink>, String>> {
         println!("microphone: a client started sending");
         Some(Ok(Box::new(Level {
