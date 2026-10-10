@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.22.0] - 2026-10-10
 
 ### Added
 - The command stream (docs/COMMAND-STREAM.md): numbered channels between a client and a host for a shell on a pseudo-terminal (ConPTY on Windows, openpty elsewhere), one command, or an application launch whose windows then appear in the window list. They ride the session's control channel, are checked by `CommandAuthorizer` (a paired device may open them by default; `HostControl::set_command_authorizer` is where the account layer plugs in), and end with the session.
