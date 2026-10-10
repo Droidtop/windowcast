@@ -15,14 +15,18 @@ use std::sync::RwLock;
 use windowcast_host::command::{Principal, RemoteAppLogin, RemoteApps};
 use windowcast_protocol::HandoffTarget;
 
-/// Whether launches may become RemoteApps.
+/// Whether launches may become RemoteApps. Off unless the host's owner
+/// turns it on: a RemoteApp runs in a Remote Desktop session of its own,
+/// which Windows licenses (one session on Windows 10 and 11, two on a
+/// server without Remote Desktop Services licences), and a launch is
+/// otherwise in the user's own session, on the host's desktop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Availability {
     /// On for Windows Server with a session free, off for Windows 10 and
     /// 11, where a Remote Desktop login takes over the console.
-    #[default]
     Auto,
     On,
+    #[default]
     Off,
 }
 
@@ -595,6 +599,12 @@ mod tests {
             session_free,
             any_program: true,
         }
+    }
+
+    #[test]
+    fn remoteapp_launches_are_off_until_the_owner_turns_them_on() {
+        assert_eq!(Setting::default().availability, Availability::Off);
+        assert_eq!(Setting::default().login, Login::SignedInUser);
     }
 
     #[test]

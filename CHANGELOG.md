@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Launches run in the user's own session on the host's desktop by default, on every system: Windows RemoteApp launches (a session of their own, which Windows licenses) are now opt-in, off on every Windows edition until the host's owner turns them on (docs/BACKENDS.md, "RemoteApp"; Droidtop/tracker#111). The Windows app saves the setting under a new name, so the "automatic" that 0.24.0 saved by default is not read back.
+
 ## [0.24.0] - 2026-10-10
 
 ### Added

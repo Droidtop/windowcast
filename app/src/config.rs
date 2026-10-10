@@ -85,7 +85,11 @@ pub struct HostSettings {
     /// Hand a window to RDP when a client asks for it (sharp text).
     pub rdp: bool,
     /// Launches the client's rules give RDP, as RemoteApps of this
-    /// computer's Remote Desktop (docs/BACKENDS.md, "RemoteApp").
+    /// computer's Remote Desktop (docs/BACKENDS.md, "RemoteApp"). Saved
+    /// under a name of its own since 0.24.1: 0.24.0 wrote its default
+    /// ("auto") into every saved configuration, which is not a choice the
+    /// owner made, so it is not read back.
+    #[serde(rename = "remote_app_launches")]
     pub remote_apps: RemoteAppSettings,
     /// Account sign-in (docs/ACCOUNTS.md): password sources, OIDC
     /// providers, LDAP, Kerberos, policy. Absent: only PIN-paired devices
@@ -115,15 +119,16 @@ impl Default for HostSettings {
     }
 }
 
-/// Whether launches may become RemoteApps (`windowcast_rdp::remoteapp_host`).
+/// Whether launches may become RemoteApps (`windowcast_rdp::remoteapp_host`):
+/// off unless chosen, so launches run on the host's own desktop.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteAppAvailability {
     /// On for Windows Server with a session free; off for Windows 10 and
     /// 11, where Remote Desktop takes over the screen.
-    #[default]
     Auto,
     On,
+    #[default]
     Off,
 }
 

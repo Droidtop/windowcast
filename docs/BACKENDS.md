@@ -85,26 +85,34 @@ setting gates RDP input as it does session input).
 
 ## RemoteApp: programs and windows over RDP (Windows hosts)
 
-Decided 2026-10-10 (Droidtop/tracker#111). Two RDP paths serve single
-windows, and whole-desktop RDP stays what a client gets when it asks for
-the desktop (`StreamTarget::Desktop`):
+Decided 2026-10-10 (Droidtop/tracker#111), and changed the same day at
+the owner's word: "I don't even really necessarily want a different
+session on Windows, since that's often locked behind licensing". A
+RemoteApp of Windows' own Remote Desktop always runs in a session of its
+own, and Windows licenses sessions: Windows 10 and 11 allow one (a Remote
+Desktop login takes over the console), and a server more than two only
+with Remote Desktop Services licences. So:
 
-- **(b) Launched programs as RemoteApps.** When a client launches a
-  program on a Windows host (the command stream's `Launch`) and its rules
-  give that program RDP, the program runs as a RemoteApp of Windows' own
-  Remote Desktop: the client logs in to the host's Remote Desktop itself,
-  asks for the program (the `rail` channel), and each window Windows
-  describes in its window orders becomes a window in the client's
-  windowcast window list, drawn from the RemoteApp desktop's picture, with
-  input mapped to it. The program runs in a Remote Desktop session of its
-  own, not on the host's screen. Built first.
-- **(a) Existing windows over windowcast's own RDP server.** A window
-  already open on the host, given RDP by the rules, is served by
-  windowcast's own RDP server (`WithRdp`, "Handing a window to RDP"
-  above): its captured picture is the RDP desktop. Windows' RemoteApp
-  cannot do this: it always starts a new copy of a program in a new
-  session. That server will also speak `rail`, so RemoteApp clients such
-  as mstsc and FreeRDP show the window seamlessly. Built after (b).
+- **(a) The main RDP path: windows on the host's own desktop over
+  windowcast's own RDP server.** A launched program runs in the user's
+  existing session on the host's desktop, on every system, like any other
+  window; a window the rules give RDP, launched or already open, is served
+  by windowcast's own one-window RDP server (`WithRdp`, "Handing a window
+  to RDP" above): its captured picture is the RDP desktop. That server
+  will also speak `rail`, so RemoteApp clients such as mstsc and FreeRDP
+  show the window seamlessly.
+- **(b) Windows RemoteApps, opt-in.** A Windows host's owner may turn on
+  RemoteApp launches: a launched program the client's rules give RDP then
+  runs as a RemoteApp of Windows' own Remote Desktop, in a Remote Desktop
+  session of its own and not on the host's screen. The client logs in to
+  the host's Remote Desktop itself, asks for the program (the `rail`
+  channel), and each window Windows describes in its window orders
+  becomes a window in the client's window list, drawn from the RemoteApp
+  desktop's picture, with input mapped to it. Off by default on every
+  Windows edition.
+
+Whole-desktop RDP stays what a client gets when it asks for the desktop
+(`StreamTarget::Desktop`).
 
 ### How a launch becomes a RemoteApp
 
@@ -112,10 +120,11 @@ the desktop (`StreamTarget::Desktop`):
    (`app_id` from the program's file name, content from
    `selection::classify`). If they give `Rdp`, the client shows pictures,
    and the host is on the same network, the `Launch` asks for a RemoteApp.
-2. The host serves it as a RemoteApp when its RemoteApp setting allows it
-   (below) and Remote Desktop is on; otherwise it starts the program in
-   its own session as a plain launch, and the program's windows stream as
-   usual, (a) included.
+2. The host serves it as a RemoteApp only when its owner turned RemoteApp
+   launches on (below) and Remote Desktop is on; otherwise, and by
+   default, it starts the program in the user's own session as a plain
+   launch, and the program's windows stream as usual, over (a) when the
+   rules give them RDP.
 3. The host answers with a `HandoffTarget` for its Remote Desktop: the
    address, port 3389 (or the configured port), the Windows user to log
    in as, a password only for a host-made account, and the SHA-256 of
@@ -147,14 +156,17 @@ the desktop (`StreamTarget::Desktop`):
 
 ### When it is on
 
+Off by default on every Windows edition. The host's setting has three
+values: off; on; and automatic, which is on for a Windows Server with a
+session free (the Remote Desktop Session Host role is installed, or fewer
+than the two sessions a server without it allows are in use) and off on
+Windows 10 and 11.
+
 - Windows 10 and 11 (client editions) allow one session: a Remote Desktop
-  login takes over the console and locks the local screen. RemoteApp
-  launches are off there by default; turning them on in the host's
-  settings shows a plain warning saying exactly that.
-- Windows Server: on by default when a session is free: the Remote
-  Desktop Session Host role is installed, or fewer than the two sessions
-  a server without it allows are in use. Otherwise the launch runs in the
-  host's own session.
+  login takes over the console and locks the local screen. Turning
+  RemoteApp launches on there shows a plain warning saying exactly that.
+- Windows Server: more than two sessions need the Session Host role and
+  Remote Desktop Services licences.
 - Remote Desktop must be on, and Windows must let the program run as a
   RemoteApp (an allow-list entry, or the allow list switched off); the
   host's settings say what is missing.
