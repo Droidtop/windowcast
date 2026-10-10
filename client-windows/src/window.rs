@@ -385,7 +385,16 @@ fn stream_pictures(
     let window = state.window;
     let mut second = Instant::now();
     let (mut shown_then, mut bytes_then) = (0u64, 0u64);
-    let mut last: Option<windowcast_client::RgbaPicture> = None;
+    // A window that does not change sends nothing: start from the newest
+    // picture there is.
+    let mut last = session.latest_picture(window);
+    if let Some(picture) = &last {
+        state.picture = (picture.width, picture.height);
+        presenter.present_rgba(picture.width, picture.height, &picture.data)?;
+        let mut stats = shared.stats.lock().expect("stats");
+        stats.frames_shown += 1;
+        stats.size = Some(state.picture);
+    }
     loop {
         let mut message = MSG::default();
         while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {

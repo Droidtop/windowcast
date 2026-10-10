@@ -61,6 +61,9 @@ pub struct RgbaPicture {
 /// A connected RDP session.
 pub struct RdpStream {
     pictures: std::sync::Mutex<Receiver<RgbaPicture>>,
+    /// The newest picture, whoever took it: a host sends nothing while the
+    /// window does not change, so a view that starts late begins here.
+    latest: Arc<std::sync::Mutex<Option<RgbaPicture>>>,
     input: Sender<InputEvent>,
     stop: Arc<AtomicBool>,
     /// Set once the session has ended (the host closed it, or it failed).
@@ -72,6 +75,11 @@ pub struct RdpStream {
 }
 
 impl RdpStream {
+    /// The newest picture so far, taken or not.
+    pub fn latest_picture(&self) -> Option<RgbaPicture> {
+        self.latest.lock().expect("latest").clone()
+    }
+
     /// The host's picture after its next change, waiting up to `timeout`.
     pub fn next_picture(&self, timeout: Duration) -> Result<RgbaPicture, mpsc::RecvTimeoutError> {
         self.pictures
@@ -246,14 +254,19 @@ pub fn connect(config: &ClientConfig) -> Result<RdpStream, RdpError> {
     let size = (result.desktop_size.width, result.desktop_size.height);
     let remote_app = config.remote_app.is_some();
     let (pictures_tx, pictures) = mpsc::sync_channel(2);
+    let latest = Arc::new(std::sync::Mutex::new(None));
     let (input, input_rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let ended = Arc::new(AtomicBool::new(false));
     // Short reads from here on, so input is sent between updates.
     control.set_read_timeout(Some(Duration::from_millis(10)))?;
     {
-        let (stop, ended) = (Arc::clone(&stop), Arc::clone(&ended));
+        let (stop, ended, latest) = (Arc::clone(&stop), Arc::clone(&ended), Arc::clone(&latest));
         std::thread::spawn(move || {
+            let pictures_tx = Pictures {
+                tx: pictures_tx,
+                latest,
+            };
             if let Err(e) = run(result, framed, pictures_tx, input_rx, &stop, remote_app) {
                 eprintln!("rdp: the session ended: {e}");
             }
@@ -262,6 +275,7 @@ pub fn connect(config: &ClientConfig) -> Result<RdpStream, RdpError> {
     }
     Ok(RdpStream {
         pictures: std::sync::Mutex::new(pictures),
+        latest,
         input,
         stop,
         ended,
@@ -273,7 +287,7 @@ pub fn connect(config: &ClientConfig) -> Result<RdpStream, RdpError> {
 fn run(
     result: ConnectionResult,
     mut framed: Framed<Tls>,
-    pictures: SyncSender<RgbaPicture>,
+    pictures: Pictures,
     input: Receiver<InputEvent>,
     stop: &AtomicBool,
     remote_app: bool,
@@ -379,7 +393,7 @@ fn handle(
     framed: &mut Framed<Tls>,
     outputs: Vec<ActiveStageOutput>,
     image: &DecodedImage,
-    pictures: &SyncSender<RgbaPicture>,
+    pictures: &Pictures,
     area: Option<Area>,
 ) -> Result<bool, RdpError> {
     let mut changed = false;
@@ -405,10 +419,23 @@ fn handle(
         }
     }
     if let (true, Some(area)) = (changed, area) {
-        // A consumer that is behind gets the newest picture next time.
-        let _ = pictures.try_send(area.cut(image));
+        pictures.send(area.cut(image));
     }
     Ok(true)
+}
+
+/// Where pictures go: the queue a consumer takes from (one that is behind
+/// gets the newest next time), and the newest kept.
+struct Pictures {
+    tx: SyncSender<RgbaPicture>,
+    latest: Arc<std::sync::Mutex<Option<RgbaPicture>>>,
+}
+
+impl Pictures {
+    fn send(&self, picture: RgbaPicture) {
+        *self.latest.lock().expect("latest") = Some(picture.clone());
+        let _ = self.tx.try_send(picture);
+    }
 }
 
 /// The part of the desktop the client shows.

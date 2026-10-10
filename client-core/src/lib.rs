@@ -633,6 +633,14 @@ impl ClientSession {
         self.send(ControlMessage::Input(event))
     }
 
+    /// The newest picture of a window streamed over RDP, whether or not
+    /// [`Self::next_picture`] handed it out: where a view that opens late
+    /// starts, since a window that does not change sends nothing.
+    pub fn latest_picture(&self, window: WindowId) -> Option<RgbaPicture> {
+        let rdp = self.shared.rdp.lock().expect("rdp").get(&window).cloned()?;
+        rdp.latest_picture()
+    }
+
     /// The next picture of a window streamed over RDP (whole, RGBA),
     /// waiting up to `timeout`. A picture comes whenever the window
     /// changes; a client behind gets the newest.

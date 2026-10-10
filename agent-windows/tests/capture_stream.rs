@@ -392,9 +392,10 @@ fn a_window_is_streamed_over_rdp() {
             windowcast_client_windows::Placement::default(),
             Arc::clone(&shared),
         );
-        // A static window sends a picture a second.
+        // The window does not change: the view starts from the newest
+        // picture.
         let deadline = std::time::Instant::now() + WAIT;
-        while shared.stats.lock().unwrap().frames_shown < 2 {
+        while shared.stats.lock().unwrap().frames_shown < 1 {
             let stats = shared.stats.lock().unwrap();
             assert!(stats.error.is_none(), "stream window: {:?}", stats.error);
             assert!(
