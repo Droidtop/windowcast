@@ -13,6 +13,7 @@ internal object Native {
     const val ENDED = -1L
     const val BUFFER_TOO_SMALL = -2L
     const val ERROR = -3L
+    const val PASSWORD_NEEDED = -4L
 
     @JvmStatic external fun clientNew(dataDir: String): Long
     @JvmStatic external fun clientFree(client: Long)
@@ -86,8 +87,11 @@ internal object Native {
     @JvmStatic external fun terminalTakeClipboard(terminal: Long): String?
     /** [TIMEOUT] while the shell runs, [ENDED] once it ended (code[0] is its exit code, -1 for none). */
     @JvmStatic external fun terminalEnded(terminal: Long, code: IntArray): Long
-    /** The process id (0 if unknown), or [ERROR] with the reason in lastError. */
-    @JvmStatic external fun launch(session: Long, argvJson: String): Long
+    /**
+     * The process id (0 if unknown), [PASSWORD_NEEDED] with the Windows user in lastError (a
+     * RemoteApp), or [ERROR] with the reason in lastError.
+     */
+    @JvmStatic external fun launch(session: Long, argvJson: String, password: String?): Long
 
     // Account sign-in (windowcast.h). Failures leave the reason in lastError.
     /** The host's sign-in options as JSON, or null. */

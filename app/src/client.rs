@@ -231,10 +231,10 @@ impl ClientRole {
     }
 
     /// Starts an application on the connected host, on a thread of its own.
-    pub fn launch_in_background(self: &Arc<Self>, command_line: String) {
+    pub fn launch_in_background(self: &Arc<Self>, command_line: String, password: Option<String>) {
         let role = Arc::clone(self);
         std::thread::spawn(move || match role.session() {
-            Ok(session) => role.terminals.launch(&session, &command_line),
+            Ok(session) => role.terminals.launch(&session, &command_line, password),
             Err(e) => role.state.lock().expect("state").error = Some(e),
         });
     }

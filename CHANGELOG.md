@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- RemoteApp launches through a session (docs/BACKENDS.md, "RemoteApp"): a program the client's rules give RDP, launched on a Windows host, runs as a RemoteApp of that host's own Remote Desktop. The client logs in itself (the host hands over the login and Remote Desktop's certificate to pin) and each window Windows reports joins the session's window list (ids with `REMOTE_APP_WINDOW` set), with its own picture and input. `ChannelKind::Launch` gains `remote_app` and the host may answer `CommandMessage::RemoteApp`; protocol version 8.
+- A host setting for it: automatic (on for Windows Server with a session free, off on Windows 10 and 11, where Remote Desktop takes over the screen; turning it on there shows that warning), on or off; signing in as the user who signed in (their Windows password, kept by the client in memory only for the session, or asked for: `ClientError::PasswordNeeded`, `launch_with_password`, C: `WINDOWCAST_PASSWORD_NEEDED`, `windowcast_session_launch_with_password`) or as a user the host makes per account, with a random password it keeps under DPAPI (`windowcast_rdp::remoteapp_host`). The Windows app and the Android viewer ask for the password when needed.
+- `RdpStream::windows`, `picture_after`, `input_to` and `exec_result`, and `RgbaPicture::cut`: a RemoteApp connection gives the session's whole desktop and the windows on it (with their menus) instead of cutting out one window.
+
 ### Fixed
 - The viewer reports the release it belongs to: its versionName is the workspace version and its versionCode major * 10000 + minor * 100 + patch, instead of 0.6.0 and 2 (Droidtop/tracker#456).
 

@@ -216,6 +216,9 @@ pub struct HostSnapshot {
     pub accounts: Option<HostAccounts>,
     /// Away from the LAN: off, or what the rendezvous knows.
     pub away: Option<windowcast_host::remote::RemoteStatus>,
+    /// RemoteApp launches here: what Remote Desktop allows, or why that
+    /// could not be read (not Windows).
+    pub remote_apps: Option<Result<windowcast_rdp::remoteapp_host::Status, String>>,
 }
 
 /// Counters at the last rate sample of one stream.
@@ -233,6 +236,8 @@ pub struct HostRole {
     source: Arc<Gated>,
     /// What sessions are served: the agent's windows, also over RDP.
     served: Arc<windowcast_rdp::host::WithRdp>,
+    /// Launches as RemoteApps of this computer's Remote Desktop.
+    remote_apps: Arc<windowcast_rdp::remoteapp_host::WindowsRemoteApps>,
     store: Arc<Store>,
     pub listen: String,
     /// Each encoder option and the codecs it has on this machine.
@@ -286,6 +291,11 @@ impl HostRole {
                 .map_err(|e| e.to_string())?,
         );
         served.set_enabled(settings.rdp);
+        let remote_apps = Arc::new(windowcast_rdp::remoteapp_host::WindowsRemoteApps::new(
+            config.data_dir.clone(),
+            settings.remote_apps.setting(),
+        ));
+        control.set_remote_apps(Some(Arc::clone(&remote_apps) as _));
         runtime.spawn(windowcast_host::serve_with(
             listener,
             Arc::clone(&control),
@@ -296,6 +306,7 @@ impl HostRole {
             control,
             source,
             served,
+            remote_apps,
             store,
             listen,
             encoders,
@@ -392,6 +403,7 @@ impl HostRole {
                 .expect("away")
                 .is_some()
                 .then(|| self.away_status.lock().expect("away status").clone()),
+            remote_apps: Some(windowcast_rdp::remoteapp_host::WindowsRemoteApps::status()),
         }
     }
 
@@ -507,6 +519,7 @@ impl HostRole {
             .microphone
             .store(settings.microphone, Ordering::SeqCst);
         self.served.set_enabled(settings.rdp);
+        self.remote_apps.set(settings.remote_apps.setting());
         self.set_away(settings.away, settings.away_port);
         self.store.update(|config| config.host = settings);
         Ok(())

@@ -325,6 +325,8 @@ pub struct HostControl {
     streams: std::sync::Mutex<HashMap<u64, StreamStatus>>,
     commands: command::StatusMap,
     command_authorizer: std::sync::RwLock<Arc<dyn command::CommandAuthorizer>>,
+    /// Serves launches as RemoteApps; `None` starts every launch here.
+    remote_apps: std::sync::RwLock<Option<Arc<dyn command::RemoteApps>>>,
     serial: AtomicU64,
     command_serial: Arc<AtomicU64>,
     /// The clients' discovery IDs, for reaching them away from the LAN.
@@ -434,6 +436,7 @@ impl HostControl {
             streams: Default::default(),
             commands: Default::default(),
             command_authorizer: std::sync::RwLock::new(Arc::new(command::PairedDevices)),
+            remote_apps: std::sync::RwLock::new(None),
             serial: AtomicU64::new(1),
             command_serial: Arc::new(AtomicU64::new(1)),
             remote_peers: RemotePeers::load(&config.data_dir.join("remote-peers.json")),
@@ -647,6 +650,13 @@ impl HostControl {
     /// ([`command::AccountPolicy`]).
     pub fn set_command_authorizer(&self, authorizer: Arc<dyn command::CommandAuthorizer>) {
         *self.command_authorizer.write().expect("authorizer") = authorizer;
+    }
+
+    /// Serves launches that ask for it as RemoteApps of this host's Remote
+    /// Desktop from now on (`None`: every launch starts in the host's own
+    /// session). Sessions starting later use it.
+    pub fn set_remote_apps(&self, remote_apps: Option<Arc<dyn command::RemoteApps>>) {
+        *self.remote_apps.write().expect("remote apps") = remote_apps;
     }
 
     /// The check a session starting now gives its command channels: the
@@ -915,6 +925,7 @@ impl Host {
                 account: account.clone(),
             },
             control.session_authorizer(),
+            control.remote_apps.read().expect("remote apps").clone(),
             Arc::clone(&control.commands),
             Arc::clone(&control.command_serial),
         );

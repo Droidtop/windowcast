@@ -61,6 +61,55 @@ impl HostIdentity {
     }
 }
 
+/// The SHA-256 of the certificate this computer's Remote Desktop presents
+/// on `port`, for a client the host hands a RemoteApp login to pin. Asks
+/// for TLS in an X.224 Connection Request, as a client would, and stops
+/// after the TLS handshake.
+pub fn remote_desktop_certificate(port: u16) -> Result<[u8; 32], RdpError> {
+    use std::io::{Read, Write};
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut tcp =
+        std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(5))?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    // TPKT, X.224 CR, and RDP_NEG_REQ for PROTOCOL_SSL | PROTOCOL_HYBRID.
+    tcp.write_all(&[
+        0x03, 0x00, 0x00, 0x13, 0x0e, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0x00,
+        0x03, 0x00, 0x00, 0x00,
+    ])?;
+    let mut header = [0u8; 4];
+    tcp.read_exact(&mut header)?;
+    let length = usize::from(u16::from_be_bytes([header[2], header[3]]));
+    let mut body = vec![0u8; length.saturating_sub(4)];
+    tcp.read_exact(&mut body)?;
+    // X.224 CC (7 bytes), then RDP_NEG_RSP (type 2) or RDP_NEG_FAILURE.
+    if body.get(7) != Some(&0x02) {
+        return Err(RdpError::Tls(
+            "Remote Desktop did not offer TLS (it may only take the old RDP security)".into(),
+        ));
+    }
+    let provider = crate::crypto_provider();
+    let config = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| RdpError::Tls(e.to_string()))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(Pinned {
+            pinned: None,
+            provider,
+        }))
+        .with_no_client_auth();
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("a valid name");
+    let mut connection = rustls::ClientConnection::new(Arc::new(config), name)
+        .map_err(|e| RdpError::Tls(e.to_string()))?;
+    while connection.is_handshaking() {
+        connection.complete_io(&mut tcp)?;
+    }
+    let cert = connection
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .ok_or_else(|| RdpError::Tls("Remote Desktop sent no certificate".into()))?;
+    Ok(fingerprint(cert))
+}
+
 pub fn fingerprint(cert_der: &[u8]) -> [u8; 32] {
     Sha256::digest(cert_der).into()
 }

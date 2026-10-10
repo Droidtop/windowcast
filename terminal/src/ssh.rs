@@ -267,7 +267,7 @@ impl SshConnection {
                 }
                 channel.exec(true, command_line(argv)).await?;
             }
-            ChannelKind::Launch { argv } => {
+            ChannelKind::Launch { argv, .. } => {
                 if argv.is_empty() {
                     return Err(SshError::Command("no application".into()));
                 }

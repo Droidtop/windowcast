@@ -40,6 +40,8 @@ pub struct SshProgress {
     /// decides whether to trust it.
     pub untrusted: Option<(String, String)>,
     pub launched: Option<String>,
+    /// A RemoteApp launch needs this Windows user's password.
+    pub password_for: Option<String>,
 }
 
 #[derive(Default)]
@@ -92,23 +94,31 @@ impl Terminals {
     }
 
     /// Starts an application on the connected host (blocking). The words
-    /// of `command_line` are the program and its arguments.
-    pub fn launch(&self, session: &ClientSession, command_line: &str) {
+    /// of `command_line` are the program and its arguments; `password` is
+    /// the Windows password the user typed for a RemoteApp, when the last
+    /// try asked for one.
+    pub fn launch(&self, session: &ClientSession, command_line: &str, password: Option<String>) {
         let argv: Vec<String> = command_line.split_whitespace().map(str::to_owned).collect();
         let result = if argv.is_empty() {
-            Err("type a program to start".to_owned())
+            Err(ClientError::Refused("type a program to start".to_owned()))
         } else {
             session
-                .launch(argv)
+                .launch_with_password(argv, password.as_deref())
                 .map(|pid| match pid {
                     Some(pid) => format!("started (process {pid}); its windows are in the list"),
                     None => "started; its windows are in the list".to_owned(),
                 })
-                .map_err(|e| e.to_string())
         };
-        self.set_progress(|p| match result {
-            Ok(done) => (p.error, p.launched) = (None, Some(done)),
-            Err(e) => (p.error, p.launched) = (Some(e), None),
+        self.set_progress(|p| {
+            p.password_for = None;
+            match result {
+                Ok(done) => (p.error, p.launched) = (None, Some(done)),
+                Err(ClientError::PasswordNeeded(user)) => {
+                    (p.error, p.launched) = (None, None);
+                    p.password_for = Some(user);
+                }
+                Err(e) => (p.error, p.launched) = (Some(e.to_string()), None),
+            }
         });
     }
 

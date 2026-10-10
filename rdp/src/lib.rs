@@ -15,6 +15,8 @@ pub mod client;
 #[cfg(feature = "host")]
 pub mod host;
 pub mod remoteapp;
+#[cfg(feature = "host")]
+pub mod remoteapp_host;
 pub mod tls;
 
 #[cfg(feature = "host")]

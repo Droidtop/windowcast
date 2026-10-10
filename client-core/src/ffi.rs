@@ -22,6 +22,9 @@ pub const WINDOWCAST_TIMEOUT: i64 = 0;
 pub const WINDOWCAST_ENDED: i64 = -1;
 pub const WINDOWCAST_BUFFER_TOO_SMALL: i64 = -2;
 pub const WINDOWCAST_ERROR: i64 = -3;
+/// A RemoteApp launch needs the user's Windows password; the user name is
+/// in the error text.
+pub const WINDOWCAST_PASSWORD_NEEDED: i64 = -4;
 
 pub const WINDOWCAST_CODEC_H264: u32 = 0;
 pub const WINDOWCAST_CODEC_H265: u32 = 1;

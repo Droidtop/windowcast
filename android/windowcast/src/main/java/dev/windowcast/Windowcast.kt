@@ -81,6 +81,10 @@ sealed interface Event {
 }
 
 /** One client identity, kept in [dataDir] (app-private storage). */
+/** A RemoteApp launch needs the Windows password of [user]: ask, and launch again with it. */
+class PasswordNeededException(val user: String) :
+    IOException("Remote Desktop needs the Windows password of $user")
+
 class WindowcastClient(dataDir: File) : Closeable {
     private var handle: Long = Native.clientNew(dataDir.absolutePath)
 
@@ -234,11 +238,17 @@ class WindowcastSession internal constructor(handle: Long) : Closeable {
 
     /**
      * Starts an application on the host: [argv] is the program and its arguments. Its windows
-     * arrive in the window list. Returns the process id (0 if the host does not know it).
+     * arrive in the window list. Returns the process id (0 if the host does not know it, and for
+     * a program the host runs as a RemoteApp, whose windows join the list as it opens them).
+     * A RemoteApp may need the user's Windows password: [PasswordNeededException] names the
+     * user, and launching again with [password] uses it.
      */
-    fun launch(argv: List<String>): Long {
-        val pid = withHandle(Native.ERROR) { Native.launch(it, org.json.JSONArray(argv).toString()) }
-        if (pid == Native.ERROR) throw IOException(if (isOpen) Native.lastError() else "the session is closed")
+    fun launch(argv: List<String>, password: String? = null): Long {
+        val pid = withHandle(Native.ERROR) {
+            Native.launch(it, org.json.JSONArray(argv).toString(), password)
+        }
+        if (pid == Native.PASSWORD_NEEDED) throw PasswordNeededException(Native.lastError())
+        if (pid < 0) throw IOException(if (isOpen) Native.lastError() else "the session is closed")
         return pid
     }
 

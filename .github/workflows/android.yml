@@ -145,10 +145,26 @@ jobs:
           # sessions a Windows Server without the Session Host role allows:
           # a third login is asked, inside the session, which one to end,
           # and a RemoteApp client never sees that question.
+          # Each test's session is logged off before the next logs in.
+          function Close-RdpSessions {
+            foreach ($line in (qwinsta)) {
+              if ($line -match '^\s*(rdp-tcp#\d+\s+)?\S+\s+(\d+)\s+(Active|Disc)' -and $line -notmatch 'console' -and [int]$Matches[2] -ne 0) {
+                logoff $Matches[2]
+              }
+            }
+          }
           cargo test -p windowcast-rdp --test windows_rdp -- --nocapture --exact our_client_runs_notepad_as_a_remoteapp
           $remoteapp = $LASTEXITCODE
+          Close-RdpSessions
+          # Notepad as a RemoteApp through a windowcast session, under a user
+          # the host makes (this runner is an administrator).
+          $env:WINDOWCAST_TEST_REMOTEAPP = "1"
+          cargo test -p windowcast-cli-tools --test remoteapp -- --nocapture
+          $session_remoteapp = $LASTEXITCODE
+          Close-RdpSessions
           cargo test -p windowcast-rdp --no-fail-fast -- --nocapture --skip our_client_runs_notepad_as_a_remoteapp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($session_remoteapp -ne 0) { exit $session_remoteapp }
           exit $remoteapp
 
       - name: Remote Desktop's own logs, when the RDP tests failed

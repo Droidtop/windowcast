@@ -30,6 +30,26 @@ pub struct Principal {
     pub account: Option<Account>,
 }
 
+/// What a host hands a client for a RemoteApp launch: its Remote
+/// Desktop's login (docs/BACKENDS.md, "RemoteApp").
+#[derive(Debug, Clone)]
+pub struct RemoteAppLogin {
+    pub target: windowcast_protocol::HandoffTarget,
+    /// The password is the one the client signed in with.
+    pub sign_in_password: bool,
+}
+
+/// Serves launches as RemoteApps of the host's Remote Desktop (Windows
+/// hosts; `windowcast_rdp::remoteapp_host`). Called off the session's task:
+/// it may take a moment.
+pub trait RemoteApps: Send + Sync + 'static {
+    /// The login for running `argv` as a RemoteApp for `who`; `None` when
+    /// this host does not serve it as one now (the launch then runs in the
+    /// host's own session), an `Err` with the reason for the user when it
+    /// should but cannot.
+    fn launch(&self, who: &Principal, argv: &[String]) -> Option<Result<RemoteAppLogin, String>>;
+}
+
 /// The one check every channel passes. An `Err` is the reason shown to the
 /// user.
 pub trait CommandAuthorizer: Send + Sync + 'static {
@@ -182,6 +202,7 @@ pub(crate) struct Channels {
     session: Arc<Session>,
     principal: Principal,
     authorizer: Arc<dyn CommandAuthorizer>,
+    remote_apps: Option<Arc<dyn RemoteApps>>,
     status: StatusMap,
     serial: Arc<AtomicU64>,
     open: HashMap<ChannelId, Channel>,
@@ -192,6 +213,7 @@ impl Channels {
         session: Arc<Session>,
         principal: Principal,
         authorizer: Arc<dyn CommandAuthorizer>,
+        remote_apps: Option<Arc<dyn RemoteApps>>,
         status: StatusMap,
         serial: Arc<AtomicU64>,
     ) -> Self {
@@ -199,6 +221,7 @@ impl Channels {
             session,
             principal,
             authorizer,
+            remote_apps,
             status,
             serial,
             open: HashMap::new(),
@@ -208,6 +231,21 @@ impl Channels {
     pub(crate) async fn handle(&mut self, message: CommandMessage) -> Result<(), TransportError> {
         match message {
             CommandMessage::Open { id, kind } => {
+                if let Some(answer) = self.remote_app(&kind).await {
+                    match answer {
+                        Ok(login) => {
+                            self.send(CommandMessage::RemoteApp {
+                                id,
+                                target: login.target,
+                                sign_in_password: login.sign_in_password,
+                            })
+                            .await?;
+                            self.send(CommandMessage::Exited { id, code: None }).await?;
+                        }
+                        Err(reason) => self.send(CommandMessage::Refused { id, reason }).await?,
+                    }
+                    return Ok(());
+                }
                 let launch = matches!(kind, ChannelKind::Launch { .. });
                 match self.start(id, kind).await {
                     Ok(pid) => {
@@ -251,6 +289,27 @@ impl Channels {
         Ok(())
     }
 
+    /// A launch that asked for a RemoteApp, when this host serves it as
+    /// one: the login, or why not. `None` for everything else, which opens
+    /// as usual.
+    async fn remote_app(&self, kind: &ChannelKind) -> Option<Result<RemoteAppLogin, String>> {
+        let ChannelKind::Launch {
+            argv,
+            remote_app: true,
+        } = kind
+        else {
+            return None;
+        };
+        let provider = Arc::clone(self.remote_apps.as_ref()?);
+        if let Err(reason) = self.authorizer.authorize(&self.principal, kind) {
+            return Some(Err(reason));
+        }
+        let (who, argv) = (self.principal.clone(), argv.clone());
+        tokio::task::spawn_blocking(move || provider.launch(&who, &argv))
+            .await
+            .unwrap_or_else(|e| Some(Err(e.to_string())))
+    }
+
     async fn send(&self, message: CommandMessage) -> Result<(), TransportError> {
         self.session
             .send_control(&ControlMessage::Command(message))
@@ -271,11 +330,11 @@ impl Channels {
         self.authorizer.authorize(&self.principal, &kind)?;
         let what = match &kind {
             ChannelKind::Shell(_) => "shell".to_owned(),
-            ChannelKind::Exec { argv, .. } | ChannelKind::Launch { argv } => {
+            ChannelKind::Exec { argv, .. } | ChannelKind::Launch { argv, .. } => {
                 argv.first().cloned().unwrap_or_default()
             }
         };
-        if let ChannelKind::Launch { argv } = &kind {
+        if let ChannelKind::Launch { argv, .. } = &kind {
             return launch(argv);
         }
         let (process, readers, pid) = tokio::task::spawn_blocking(move || spawn(&kind))

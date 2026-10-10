@@ -17,6 +17,7 @@ host = [
     "dep:async-trait",
     "dep:tokio-rustls",
     "dep:rcgen",
+    "dep:windows",
 ]
 
 [dependencies]
@@ -45,7 +46,22 @@ sha2 = "0.10"
 tracing.workspace = true
 rand_core.workspace = true
 
+# RemoteApp launches on Windows hosts: Remote Desktop's settings and
+# sessions, the host-made users and DPAPI for their passwords.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_NetManagement",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Registry",
+    "Win32_System_WindowsProgramming",
+] }
+
 [dev-dependencies]
+windowcast-identity = { path = "../identity" }
+windowcast-accounts = { path = "../accounts" }
 windowcast-cli-tools = { path = "../cli-tools" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

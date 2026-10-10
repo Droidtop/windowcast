@@ -104,20 +104,29 @@ fn our_client_runs_notepad_as_a_remoteapp() {
         }),
     })
     .unwrap();
-    // Pictures come once the server has described Notepad's window, and
-    // are that window: smaller than the desktop.
+    // The server describes Notepad's window, and its part of the
+    // session's picture is that window: smaller than the desktop.
     let deadline = Instant::now() + Duration::from_secs(90);
-    let picture = loop {
+    let window = loop {
         assert!(Instant::now() < deadline, "no RemoteApp window appeared");
         assert!(
             !stream.ended.load(std::sync::atomic::Ordering::SeqCst),
             "the session ended"
         );
-        if let Ok(picture) = stream.next_picture(Duration::from_millis(500)) {
-            break picture;
+        if let Some(window) = stream.windows().1.into_iter().next() {
+            break window;
         }
+        std::thread::sleep(Duration::from_millis(200));
     };
-    println!("RemoteApp window: {}x{}", picture.width, picture.height);
+    let (_, desktop) = stream
+        .picture_after(0, Duration::from_secs(30))
+        .expect("a picture of the session");
+    let picture = desktop.cut(window.rect);
+    assert_eq!(stream.exec_result(), Some(0), "the program did not start");
+    println!(
+        "RemoteApp window {:?}: {}x{}",
+        window.title, picture.width, picture.height
+    );
     assert!(picture.width >= 100 && picture.height >= 100);
     assert!(
         (picture.width, picture.height) != (1280, 720),

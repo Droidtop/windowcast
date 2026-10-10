@@ -7600,9 +7600,12 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+ "windowcast-accounts",
  "windowcast-cli-tools",
  "windowcast-host",
+ "windowcast-identity",
  "windowcast-protocol",
+ "windows 0.62.2",
  "x509-parser 0.16.0",
 ]
 

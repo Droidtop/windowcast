@@ -16,7 +16,7 @@ ways until it ends. Everything the stream does is a channel kind:
 |---|---|---|---|
 | `Shell` | runs the user's shell on a pseudo-terminal (ConPTY on Windows, openpty elsewhere) | terminal bytes, both ways; `Resize` | the shell's exit |
 | `Exec` | runs one command (argv), with a pseudo-terminal when asked | stdin in, output out | the command's exit code |
-| `Launch` | starts an application detached from the stream | nothing, or its first output | `Exited` at once with the process id; the window it makes appears in the session's window list (`ListWindows`), where the usual selection rules pick its backend |
+| `Launch` | starts an application detached from the stream | nothing, or its first output | `Exited` at once with the process id; the window it makes appears in the session's window list (`ListWindows`), where the usual selection rules pick its backend. On a Windows host, a program the client's rules give RDP may run as a RemoteApp of the host's Remote Desktop instead (`remote_app`, answered by `RemoteApp` with the login; docs/BACKENDS.md, "RemoteApp") |
 | later kinds | file and process operations | typed requests in `Data` | answered or refused |
 
 The shell, application launch and every other command share the same

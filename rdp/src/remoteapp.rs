@@ -676,14 +676,90 @@ impl Windows {
         }
     }
 
-    /// The program's main window: the first unowned window shown with a
-    /// size, else none yet.
-    pub fn main(&self) -> Option<&RemoteWindow> {
-        self.order
+    /// The windows a client lists, in the order they appeared: every
+    /// shown window with a size that is unowned (or owned by a window not
+    /// described) or has a title, such as a program's main window and its
+    /// dialogs. Shown windows without a title owned by one of them (menus,
+    /// tooltips, drop-downs) widen their owner's rectangle instead, so they
+    /// show in its picture.
+    pub fn listed(&self) -> Vec<ListedWindow> {
+        let shown = |w: &RemoteWindow| w.show != 0 && w.size.0 > 0 && w.size.1 > 0;
+        let is_root = |w: &RemoteWindow| {
+            shown(w) && (!w.title.is_empty() || !self.windows.contains_key(&w.owner))
+        };
+        let mut listed: Vec<ListedWindow> = self
+            .order
             .iter()
             .filter_map(|id| self.windows.get(id))
-            .find(|w| w.owner == 0 && w.show != 0 && w.size.0 > 0 && w.size.1 > 0)
+            .filter(|w| is_root(w))
+            .map(|w| ListedWindow {
+                id: w.id,
+                title: w.title.clone(),
+                rect: Rect::of(w),
+            })
+            .collect();
+        for popup in self.windows.values().filter(|w| shown(w) && !is_root(w)) {
+            // Its nearest listed owner, following the owner chain.
+            let mut owner = popup.owner;
+            for _ in 0..8 {
+                if let Some(root) = listed.iter_mut().find(|l| l.id == owner) {
+                    root.rect = root.rect.union(Rect::of(popup));
+                    break;
+                }
+                match self.windows.get(&owner) {
+                    Some(next) => owner = next.owner,
+                    None => break,
+                }
+            }
+        }
+        listed
     }
+}
+
+/// A rectangle on the RemoteApp session's desktop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Rect {
+    fn of(window: &RemoteWindow) -> Rect {
+        Rect {
+            x: window.offset.0,
+            y: window.offset.1,
+            width: window.size.0,
+            height: window.size.1,
+        }
+    }
+
+    fn union(self, other: Rect) -> Rect {
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        let right = (i64::from(self.x) + i64::from(self.width))
+            .max(i64::from(other.x) + i64::from(other.width));
+        let bottom = (i64::from(self.y) + i64::from(self.height))
+            .max(i64::from(other.y) + i64::from(other.height));
+        Rect {
+            x,
+            y,
+            width: (right - i64::from(x)) as u32,
+            height: (bottom - i64::from(y)) as u32,
+        }
+    }
+}
+
+/// One window of a RemoteApp session as a client lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedWindow {
+    /// The server's window id.
+    pub id: u32,
+    pub title: String,
+    /// The window, with the menus and popups it owns, on the session's
+    /// desktop.
+    pub rect: Rect,
 }
 
 #[cfg(test)]
@@ -741,6 +817,67 @@ mod tests {
     }
 
     #[test]
+    fn a_window_is_listed_with_its_menus_and_its_dialog_on_its_own() {
+        let window = |id, owner, title: &str, offset, size| RemoteWindow {
+            id,
+            owner,
+            title: title.into(),
+            style: 0,
+            show: 5,
+            offset,
+            size,
+        };
+        let mut windows = Windows::default();
+        for w in [
+            window(1, 0, "Notepad", (100, 100), (400, 300)),
+            // A menu below it, wider than it.
+            window(2, 1, "", (90, 380), (500, 100)),
+            // A dialog it owns.
+            window(3, 1, "Save as", (150, 150), (200, 100)),
+            // A shell helper with no size, and a hidden window.
+            window(4, 0, "", (0, 0), (0, 0)),
+            RemoteWindow {
+                show: 0,
+                ..window(5, 0, "Program Manager", (0, 0), (1280, 720))
+            },
+        ] {
+            windows.apply(WindowOrder::Window {
+                new: true,
+                fields: FIELD_OWNER | FIELD_TITLE | FIELD_SHOW | FIELD_WNDOFFSET | FIELD_WNDSIZE,
+                window: w,
+            });
+        }
+        let listed = windows.listed();
+        assert_eq!(
+            listed,
+            vec![
+                ListedWindow {
+                    id: 1,
+                    title: "Notepad".into(),
+                    rect: Rect {
+                        x: 90,
+                        y: 100,
+                        width: 500,
+                        height: 380
+                    },
+                },
+                ListedWindow {
+                    id: 3,
+                    title: "Save as".into(),
+                    rect: Rect {
+                        x: 150,
+                        y: 150,
+                        width: 200,
+                        height: 100
+                    },
+                },
+            ]
+        );
+        windows.apply(WindowOrder::Deleted(3));
+        assert_eq!(windows.listed().len(), 1);
+    }
+
+    #[test]
     fn the_desktop_order_says_when_the_desktop_is_ready() {
         // An Actively Monitored Desktop order with ARC_COMPLETED and an
         // active window (the order's own fields follow and are skipped).
@@ -769,12 +906,20 @@ mod tests {
         assert_eq!(orders.len(), 2, "{orders:?}");
         let mut windows = Windows::default();
         windows.apply(orders[0].clone());
-        let main = windows.main().unwrap().clone();
-        assert_eq!(main.title, "Untitled - Notepad");
-        assert_eq!(main.offset, (100, 50));
-        assert_eq!(main.size, (640, 480));
+        let listed = windows.listed();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].title, "Untitled - Notepad");
+        assert_eq!(
+            listed[0].rect,
+            Rect {
+                x: 100,
+                y: 50,
+                width: 640,
+                height: 480
+            }
+        );
         windows.apply(orders[1].clone());
-        assert!(windows.main().is_none());
+        assert!(windows.listed().is_empty());
     }
 
     #[test]

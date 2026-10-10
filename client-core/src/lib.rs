@@ -16,12 +16,14 @@
 mod command;
 pub mod ffi;
 pub mod ffi_terminal;
+mod remote_app;
 
 pub use command::SshSession;
+pub use remote_app::REMOTE_APP_WINDOW;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -86,6 +88,10 @@ pub enum ClientError {
     /// This client's SSH key, or a certificate for it.
     #[error("{0}")]
     SshKey(#[from] windowcast_accounts::ssh::SshError),
+    /// A RemoteApp launch needs the Windows password of this user: ask the
+    /// user and launch again with it ([`ClientSession::launch_with_password`]).
+    #[error("Remote Desktop needs the Windows password of {0}")]
+    PasswordNeeded(String),
 }
 
 /// How a client signs in to a host with an account (docs/ACCOUNTS.md).
@@ -406,7 +412,13 @@ impl Client {
             trust.pin(established.peer);
             trust.save(&self.trust_path)?;
         }
-        Ok(self.started(established, host_ip))
+        let session = self.started(established, host_ip);
+        // A Windows host's RemoteApps log in as this user with this
+        // password (docs/BACKENDS.md, "RemoteApp"); kept only in memory.
+        if let SignIn::Password { password, .. } = sign_in {
+            *session.shared.sign_in_password.lock().expect("password") = Some(password.clone());
+        }
+        Ok(session)
     }
 
     /// Starts signing in with an OpenID Connect provider in the user's
@@ -651,9 +663,24 @@ struct Shared {
     held_pictures: Mutex<HashMap<WindowId, RgbaPicture>>,
     /// The command stream's channels (shells, commands, launches).
     channels: Arc<command::Routes>,
+    /// Where events go, for those that start on this side (RemoteApps).
+    event_tx: Mutex<mpsc::Sender<Event>>,
+    /// RemoteApp connections, and the next one's key.
+    remote_apps: Mutex<Vec<remote_app::Conn>>,
+    remote_keys: AtomicU32,
+    /// RemoteApp windows being shown, with the number of the last picture
+    /// each was given.
+    remote_viewing: Mutex<HashMap<WindowId, u64>>,
+    /// The password this client signed in with, for RemoteApps logging in
+    /// as the same Windows user. In memory only.
+    sign_in_password: Mutex<Option<String>>,
 }
 
 impl Shared {
+    fn emit(&self, event: Event) {
+        let _ = self.event_tx.lock().expect("events").send(event);
+    }
+
     fn slot(&self, window: WindowId) -> Arc<WindowSlot> {
         Arc::clone(
             self.slots
@@ -759,6 +786,11 @@ impl ClientSession {
             focus: Mutex::default(),
             held_pictures: Mutex::default(),
             channels: Arc::default(),
+            event_tx: Mutex::new(event_tx.clone()),
+            remote_apps: Mutex::default(),
+            remote_keys: AtomicU32::new(1),
+            remote_viewing: Mutex::default(),
+            sign_in_password: Mutex::default(),
         });
         let windows = Arc::new(Mutex::new(Vec::new()));
 
@@ -815,6 +847,10 @@ impl ClientSession {
     /// the answer arrives as [`Event::StreamStarted`] or
     /// [`Event::StreamRefused`], and frames through [`Self::next_frame`].
     pub fn start_window(&self, window: WindowId, codecs: &[VideoCodec]) -> Result<(), ClientError> {
+        if remote_app::split(window).is_some() {
+            self.start_remote_window(window);
+            return Ok(());
+        }
         let backend = {
             let windows = self.windows.lock().expect("windows");
             let rules = self.rules.lock().expect("rules");
@@ -890,6 +926,10 @@ impl ClientSession {
             InputEvent::Gamepad { .. } | InputEvent::GamepadGone { .. }
         );
         if over_rdp {
+            if let Some(w) = window.filter(|w| remote_app::split(*w).is_some()) {
+                self.remote_input(w, event);
+                return Ok(());
+            }
             if let Some(rdp) =
                 window.and_then(|w| self.shared.rdp.lock().expect("rdp").get(&w).cloned())
             {
@@ -904,6 +944,9 @@ impl ClientSession {
     /// [`Self::next_picture`] handed it out: where a view that opens late
     /// starts, since a window that does not change sends nothing.
     pub fn latest_picture(&self, window: WindowId) -> Option<RgbaPicture> {
+        if remote_app::split(window).is_some() {
+            return self.remote_latest_picture(window);
+        }
         let rdp = self.shared.rdp.lock().expect("rdp").get(&window).cloned()?;
         rdp.latest_picture()
     }
@@ -912,9 +955,6 @@ impl ClientSession {
     /// waiting up to `timeout`. A picture comes whenever the window
     /// changes; a client behind gets the newest.
     pub fn next_picture(&self, window: WindowId, timeout: Duration) -> PicturePoll {
-        let Some(rdp) = self.shared.rdp.lock().expect("rdp").get(&window).cloned() else {
-            return PicturePoll::Ended;
-        };
         if let Some(picture) = self
             .shared
             .held_pictures
@@ -924,6 +964,12 @@ impl ClientSession {
         {
             return PicturePoll::Picture(picture);
         }
+        if remote_app::split(window).is_some() {
+            return self.remote_next_picture(window, timeout);
+        }
+        let Some(rdp) = self.shared.rdp.lock().expect("rdp").get(&window).cloned() else {
+            return PicturePoll::Ended;
+        };
         match rdp.next_picture(timeout) {
             Ok(picture) => PicturePoll::Picture(picture),
             Err(RecvTimeoutError::Timeout) => PicturePoll::Timeout,
@@ -946,6 +992,10 @@ impl ClientSession {
     }
 
     pub fn stop_window(&self, window: WindowId) -> Result<(), ClientError> {
+        if remote_app::split(window).is_some() {
+            self.stop_remote_window(window);
+            return Ok(());
+        }
         self.shared.rdp.lock().expect("rdp").remove(&window);
         self.send(ControlMessage::StreamStopRequest(StreamTarget::Window(
             window,
@@ -1226,6 +1276,8 @@ async fn pump_events(
             }
             ControlMessage::ListWindowsResponse(list) => {
                 *windows.lock().expect("windows") = list.clone();
+                let mut list = list;
+                list.extend(remote_app::infos(&shared));
                 Event::Windows { windows: list }
             }
             ControlMessage::StreamStartResponse {

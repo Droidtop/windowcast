@@ -361,14 +361,19 @@ Java_dev_windowcast_Native_terminalEnded(JNIEnv *env, jclass cls, jlong terminal
     return result;
 }
 
-/* Starts an application on the host. Returns its process id (0 if unknown) or
+/* Starts an application on the host, with the Windows password the user typed
+ * for a RemoteApp or null. Returns its process id (0 if unknown),
+ * WINDOWCAST_PASSWORD_NEEDED with the Windows user in lastError, or
  * WINDOWCAST_ERROR with the reason in lastError. */
 JNIEXPORT jlong JNICALL
-Java_dev_windowcast_Native_launch(JNIEnv *env, jclass cls, jlong session, jstring argv_json) {
+Java_dev_windowcast_Native_launch(JNIEnv *env, jclass cls, jlong session, jstring argv_json,
+                                  jstring password) {
     const char *chars = (*env)->GetStringUTFChars(env, argv_json, NULL);
+    const char *secret = password ? (*env)->GetStringUTFChars(env, password, NULL) : NULL;
     last_error[0] = 0;
-    int64_t result = windowcast_session_launch(SESSION(session), chars, last_error,
-                                               sizeof last_error);
+    int64_t result = windowcast_session_launch_with_password(SESSION(session), chars, secret,
+                                                             last_error, sizeof last_error);
+    if (secret) (*env)->ReleaseStringUTFChars(env, password, secret);
     (*env)->ReleaseStringUTFChars(env, argv_json, chars);
     return result;
 }

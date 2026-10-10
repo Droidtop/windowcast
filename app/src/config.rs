@@ -84,6 +84,9 @@ pub struct HostSettings {
     pub away_port: u16,
     /// Hand a window to RDP when a client asks for it (sharp text).
     pub rdp: bool,
+    /// Launches the client's rules give RDP, as RemoteApps of this
+    /// computer's Remote Desktop (docs/BACKENDS.md, "RemoteApp").
+    pub remote_apps: RemoteAppSettings,
     /// Account sign-in (docs/ACCOUNTS.md): password sources, OIDC
     /// providers, LDAP, Kerberos, policy. Absent: only PIN-paired devices
     /// connect.
@@ -106,7 +109,55 @@ impl Default for HostSettings {
             away: false,
             away_port: windowcast_transport::remote::DEFAULT_PORT,
             rdp: true,
+            remote_apps: RemoteAppSettings::default(),
             accounts: None,
+        }
+    }
+}
+
+/// Whether launches may become RemoteApps (`windowcast_rdp::remoteapp_host`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteAppAvailability {
+    /// On for Windows Server with a session free; off for Windows 10 and
+    /// 11, where Remote Desktop takes over the screen.
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+/// Which Windows user a RemoteApp logs in as.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteAppLogin {
+    /// The user the client signed in as, with their own password.
+    #[default]
+    SignedInUser,
+    /// A Windows user this host makes per account, with a password it keeps.
+    HostAccount,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteAppSettings {
+    pub availability: RemoteAppAvailability,
+    pub login: RemoteAppLogin,
+}
+
+impl RemoteAppSettings {
+    pub fn setting(self) -> windowcast_rdp::remoteapp_host::Setting {
+        use windowcast_rdp::remoteapp_host::{Availability, Login, Setting};
+        Setting {
+            availability: match self.availability {
+                RemoteAppAvailability::Auto => Availability::Auto,
+                RemoteAppAvailability::On => Availability::On,
+                RemoteAppAvailability::Off => Availability::Off,
+            },
+            login: match self.login {
+                RemoteAppLogin::SignedInUser => Login::SignedInUser,
+                RemoteAppLogin::HostAccount => Login::HostAccount,
+            },
         }
     }
 }

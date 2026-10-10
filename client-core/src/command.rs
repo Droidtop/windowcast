@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use tokio::runtime::Runtime;
 use windowcast_protocol::command::{ChannelId, ChannelKind, CommandMessage, Pty, TerminalSize};
-use windowcast_protocol::ControlMessage;
+use windowcast_protocol::{ControlMessage, HandoffTarget};
 use windowcast_terminal::{
     Channel, ChannelEvent, Command, HostKeyPolicy, SshAuth, SshConnection, SshTarget, Terminal,
 };
@@ -23,9 +23,20 @@ const OPEN_WITHIN: Duration = Duration::from_secs(15);
 /// The `TERM` the screen model understands.
 pub const TERM: &str = "xterm-256color";
 
+/// A host's answer to an open.
+enum Opened {
+    /// Open, with the process id when the host knows it.
+    Pid(Option<u32>),
+    /// A launch the host serves as a RemoteApp: its Remote Desktop login.
+    RemoteApp {
+        target: HandoffTarget,
+        sign_in_password: bool,
+    },
+}
+
 struct Route {
-    /// Waiting for `Opened` or `Refused`.
-    opened: Option<mpsc::Sender<Result<Option<u32>, String>>>,
+    /// Waiting for `Opened`, `RemoteApp` or `Refused`.
+    opened: Option<mpsc::Sender<Result<Opened, String>>>,
     events: mpsc::Sender<ChannelEvent>,
 }
 
@@ -43,7 +54,19 @@ impl Routes {
         match message {
             CommandMessage::Opened { id, pid } => {
                 if let Some(opened) = map.get_mut(&id).and_then(|r| r.opened.take()) {
-                    let _ = opened.send(Ok(pid));
+                    let _ = opened.send(Ok(Opened::Pid(pid)));
+                }
+            }
+            CommandMessage::RemoteApp {
+                id,
+                target,
+                sign_in_password,
+            } => {
+                if let Some(opened) = map.get_mut(&id).and_then(|r| r.opened.take()) {
+                    let _ = opened.send(Ok(Opened::RemoteApp {
+                        target,
+                        sign_in_password,
+                    }));
                 }
             }
             CommandMessage::Refused { id, reason } => {
@@ -88,6 +111,10 @@ impl ClientSession {
     /// answers. The host may refuse (it does not allow commands, or the
     /// user is not allowed): the reason is in the error.
     pub fn open_channel(&self, kind: ChannelKind) -> Result<Channel, ClientError> {
+        Ok(self.open(kind)?.0)
+    }
+
+    fn open(&self, kind: ChannelKind) -> Result<(Channel, Opened), ClientError> {
         let routes = Arc::clone(&self.shared.channels);
         let id = ChannelId(routes.next.fetch_add(1, Ordering::SeqCst));
         let (channel, end) = Channel::pair(None);
@@ -107,8 +134,8 @@ impl ClientSession {
             routes.forget(id);
             return Err(e.into());
         }
-        let pid = match opened_rx.recv_timeout(OPEN_WITHIN) {
-            Ok(Ok(pid)) => pid,
+        let opened = match opened_rx.recv_timeout(OPEN_WITHIN) {
+            Ok(Ok(opened)) => opened,
             Ok(Err(reason)) => return Err(ClientError::Refused(reason)),
             Err(_) => {
                 routes.forget(id);
@@ -117,7 +144,9 @@ impl ClientSession {
                 ));
             }
         };
-        channel.set_pid(pid);
+        if let Opened::Pid(pid) = opened {
+            channel.set_pid(pid);
+        }
 
         // From here the channel's commands go to the host as messages.
         let session = Arc::clone(&self.session);
@@ -142,7 +171,7 @@ impl ClientSession {
             }
             routes.forget(id);
         });
-        Ok(channel)
+        Ok((channel, opened))
     }
 
     /// A shell on the host, drawn on a screen of `size`.
@@ -156,8 +185,40 @@ impl ClientSession {
 
     /// Starts an application on the host. Its windows show up in the
     /// window list. Returns its process id when the host knows it.
+    ///
+    /// When the rules give the program RDP and the host serves RemoteApps
+    /// (docs/BACKENDS.md, "RemoteApp"), it runs as a RemoteApp instead:
+    /// this returns once Windows started it (`None` for the process id),
+    /// and its windows join the list with [`crate::REMOTE_APP_WINDOW`] in
+    /// their ids. That may need the user's Windows password:
+    /// [`ClientError::PasswordNeeded`] says so, and
+    /// [`Self::launch_with_password`] tries again with it.
     pub fn launch(&self, argv: Vec<String>) -> Result<Option<u32>, ClientError> {
-        Ok(self.open_channel(ChannelKind::Launch { argv })?.pid())
+        self.launch_with_password(argv, None)
+    }
+
+    /// [`Self::launch`], with the Windows password the user typed for a
+    /// RemoteApp.
+    pub fn launch_with_password(
+        &self,
+        argv: Vec<String>,
+        password: Option<&str>,
+    ) -> Result<Option<u32>, ClientError> {
+        let remote_app = self.wants_remote_app(&argv);
+        let (channel, opened) = self.open(ChannelKind::Launch {
+            argv: argv.clone(),
+            remote_app,
+        })?;
+        match opened {
+            Opened::Pid(_) => Ok(channel.pid()),
+            Opened::RemoteApp {
+                target,
+                sign_in_password,
+            } => {
+                self.start_remote_app(&argv, target, sign_in_password, password)?;
+                Ok(None)
+            }
+        }
     }
 
     /// Runs a command on the host and waits for it: its output (standard
@@ -238,7 +299,12 @@ impl SshSession {
     }
 
     pub fn launch(&self, argv: Vec<String>) -> Result<Option<u32>, ClientError> {
-        Ok(self.open_channel(ChannelKind::Launch { argv })?.pid())
+        Ok(self
+            .open_channel(ChannelKind::Launch {
+                argv,
+                remote_app: false,
+            })?
+            .pid())
     }
 
     pub fn exec(

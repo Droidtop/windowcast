@@ -79,7 +79,15 @@ fn main() {
             );
             let started = Instant::now();
             let mut pictures = 0u64;
+            let mut windows = 0;
             while started.elapsed() < Duration::from_secs(seconds) {
+                let (number, listed) = stream.windows();
+                if number != windows {
+                    windows = number;
+                    for window in &listed {
+                        println!("window {} {:?}: {:?}", window.id, window.title, window.rect);
+                    }
+                }
                 if let Ok(picture) = stream.next_picture(Duration::from_millis(200)) {
                     if pictures == 0 {
                         println!("first picture: {}x{}", picture.width, picture.height);

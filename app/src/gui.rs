@@ -39,6 +39,7 @@ pub fn run(roles: Roles, host: Role<HostRole>, client: Role<ClientRole>) -> Resu
         clipboard: String::new(),
         ssh: SshRequest::default(),
         launch_line: String::new(),
+        windows_password: String::new(),
         show_client: true,
         error: None,
     };
@@ -60,6 +61,8 @@ struct App {
     clipboard: String,
     ssh: SshRequest,
     launch_line: String,
+    /// The Windows password a RemoteApp launch asked for; cleared once used.
+    windows_password: String,
     /// The client window, when both roles run (closing it hides it).
     show_client: bool,
     error: Option<String>,
@@ -203,11 +206,27 @@ impl App {
                         .hint_text("program and arguments"),
                 );
                 if ui.button("Start").clicked() && !self.launch_line.trim().is_empty() {
-                    client.launch_in_background(self.launch_line.trim().to_owned());
+                    client.launch_in_background(self.launch_line.trim().to_owned(), None);
                 }
             });
         });
         let progress = client.terminals().progress();
+        if let Some(user) = &progress.password_for {
+            // A RemoteApp of the host's Remote Desktop, which needs the
+            // user's own Windows password.
+            ui.horizontal(|ui| {
+                ui.label(format!("Windows password for {user}"));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.windows_password)
+                        .password(true)
+                        .desired_width(160.0),
+                );
+                if ui.button("Start").clicked() && !self.windows_password.is_empty() {
+                    let password = std::mem::take(&mut self.windows_password);
+                    client.launch_in_background(self.launch_line.trim().to_owned(), Some(password));
+                }
+            });
+        }
         if let Some(done) = &progress.launched {
             ui.label(RichText::new(done).weak());
         }
@@ -333,6 +352,7 @@ impl App {
                 );
                 ui.checkbox(&mut settings.rdp, "Offer windows over RDP");
             });
+            remote_apps_ui(ui, &snapshot, &mut settings.remote_apps);
             ui.horizontal(|ui| {
                 ui.checkbox(
                     &mut settings.away,
@@ -1032,4 +1052,78 @@ fn limit(ui: &mut egui::Ui, value: &mut Option<u32>, unit: &str, max: u32) -> bo
         *value = (number > 0).then_some(number);
     }
     changed
+}
+
+/// The RemoteApp setting (docs/BACKENDS.md, "RemoteApp"): launches the
+/// client's rules give RDP run as RemoteApps of this computer's Remote
+/// Desktop, with the warning Windows 10 and 11 need.
+fn remote_apps_ui(
+    ui: &mut egui::Ui,
+    snapshot: &crate::host::HostSnapshot,
+    settings: &mut crate::config::RemoteAppSettings,
+) {
+    use crate::config::{RemoteAppAvailability as A, RemoteAppLogin as L};
+    let status = match &snapshot.remote_apps {
+        Some(Ok(status)) => status,
+        // Not Windows: nothing to offer.
+        _ => return,
+    };
+    ui.horizontal(|ui| {
+        ui.label("Launches as RemoteApps");
+        egui::ComboBox::from_id_salt("remote_apps")
+            .selected_text(match settings.availability {
+                A::Auto => "automatic",
+                A::On => "on",
+                A::Off => "off",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut settings.availability, A::Auto, "automatic");
+                ui.selectable_value(&mut settings.availability, A::On, "on");
+                ui.selectable_value(&mut settings.availability, A::Off, "off");
+            });
+        ui.label("signing in as");
+        egui::ComboBox::from_id_salt("remote_app_login")
+            .selected_text(match settings.login {
+                L::SignedInUser => "the user who signed in",
+                L::HostAccount => "a user this host makes",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut settings.login,
+                    L::SignedInUser,
+                    "the user who signed in",
+                );
+                ui.selectable_value(
+                    &mut settings.login,
+                    L::HostAccount,
+                    "a user this host makes",
+                );
+            });
+    });
+    let on = match settings.availability {
+        A::Auto => status.auto(),
+        A::On => true,
+        A::Off => false,
+    };
+    let text = match (settings.availability, status.warning()) {
+        (A::Off, _) => None,
+        (A::On, Some(warning)) => {
+            Some(RichText::new(warning).color(egui::Color32::from_rgb(220, 120, 40)))
+        }
+        (A::Auto, Some(warning)) => Some(RichText::new(format!("Off for now: {warning}")).weak()),
+        (_, None) => {
+            Some(RichText::new("On: programs clients start run through Remote Desktop.").weak())
+        }
+    };
+    if let Some(text) = text {
+        ui.label(text);
+    }
+    if on && !status.any_program {
+        ui.label(
+            RichText::new(
+                "Windows runs only programs on its RemoteApp list here; others fail to start.",
+            )
+            .weak(),
+        );
+    }
 }

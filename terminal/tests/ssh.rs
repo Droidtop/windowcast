@@ -581,6 +581,7 @@ async fn a_command_reports_its_output_and_exit_code_and_an_application_launches(
     let launched = connection
         .open(&ChannelKind::Launch {
             argv: vec!["touch".into(), marker.to_string_lossy().into_owned()],
+            remote_app: false,
         })
         .await
         .unwrap();

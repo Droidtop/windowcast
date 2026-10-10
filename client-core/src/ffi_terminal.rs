@@ -403,6 +403,9 @@ pub unsafe extern "C" fn windowcast_terminal_ended(
 /// array of strings (the program and its arguments). The windows it makes
 /// arrive in the window list. Returns the process id (0 when the host does
 /// not know it) or `WINDOWCAST_ERROR`, with the host's reason in `error`.
+/// A launch the host runs as a RemoteApp may return
+/// `WINDOWCAST_PASSWORD_NEEDED` with the Windows user name in `error`:
+/// ask the user and call [`windowcast_session_launch_with_password`].
 ///
 /// # Safety
 /// `session` valid; `argv_json` NUL-terminated; `error` null or valid for
@@ -411,6 +414,22 @@ pub unsafe extern "C" fn windowcast_terminal_ended(
 pub unsafe extern "C" fn windowcast_session_launch(
     session: *const ClientSession,
     argv_json: *const c_char,
+    error: *mut c_char,
+    error_cap: usize,
+) -> i64 {
+    windowcast_session_launch_with_password(session, argv_json, std::ptr::null(), error, error_cap)
+}
+
+/// [`windowcast_session_launch`] with the Windows password the user typed
+/// for a RemoteApp (`password` may be null).
+///
+/// # Safety
+/// As [`windowcast_session_launch`]; `password` null or NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_launch_with_password(
+    session: *const ClientSession,
+    argv_json: *const c_char,
+    password: *const c_char,
     error: *mut c_char,
     error_cap: usize,
 ) -> i64 {
@@ -426,8 +445,12 @@ pub unsafe extern "C" fn windowcast_session_launch(
         );
         return WINDOWCAST_ERROR;
     };
-    match session.launch(argv) {
+    match session.launch_with_password(argv, str_arg(password)) {
         Ok(pid) => i64::from(pid.unwrap_or(0)),
+        Err(crate::ClientError::PasswordNeeded(user)) => {
+            write_text(&user, error, error_cap);
+            crate::ffi::WINDOWCAST_PASSWORD_NEEDED
+        }
         Err(e) => {
             write_text(&e.to_string(), error, error_cap);
             WINDOWCAST_ERROR

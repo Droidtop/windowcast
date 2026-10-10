@@ -25,6 +25,9 @@ typedef struct WindowcastSession WindowcastSession;
 #define WINDOWCAST_ENDED (-1)
 #define WINDOWCAST_BUFFER_TOO_SMALL (-2)
 #define WINDOWCAST_ERROR (-3)
+/* A RemoteApp launch needs the user's Windows password; the user name is in
+ * the error text. */
+#define WINDOWCAST_PASSWORD_NEEDED (-4)
 
 /* Video codecs. */
 #define WINDOWCAST_CODEC_H264 0u
@@ -274,9 +277,19 @@ int64_t windowcast_terminal_ended(const WindowcastTerminal *terminal, int32_t *c
 
 /* Starts an application on the host. argv_json is a JSON array of strings.
  * Its windows arrive in the window list. Returns the process id (0 if the
- * host does not know it) or WINDOWCAST_ERROR with the reason in error. */
+ * host does not know it) or WINDOWCAST_ERROR with the reason in error. A
+ * program the host runs as a RemoteApp (docs/BACKENDS.md) returns 0 once it
+ * started, and its windows' ids have the top bit set; it may return
+ * WINDOWCAST_PASSWORD_NEEDED with the Windows user name in error, for
+ * windowcast_session_launch_with_password. */
 int64_t windowcast_session_launch(const WindowcastSession *session, const char *argv_json,
                                   char *error, size_t error_cap);
+
+/* windowcast_session_launch with the Windows password the user typed for a
+ * RemoteApp (password may be NULL). */
+int64_t windowcast_session_launch_with_password(const WindowcastSession *session,
+                                                const char *argv_json, const char *password,
+                                                char *error, size_t error_cap);
 
 #ifdef __cplusplus
 }

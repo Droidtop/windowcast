@@ -646,26 +646,48 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Starts an application on the connected host; its windows arrive in the list. */
-    private fun launchOnHost(line: String) {
+    /**
+     * Starts an application on the connected host; its windows arrive in the list. A program the
+     * host runs as a RemoteApp may need the user's Windows password: it is asked for and the
+     * launch tried again with it ([password]), and kept nowhere.
+     */
+    private fun launchOnHost(line: String, password: String? = null) {
         val s = session ?: run { status.text = "Connect to a host first"; return }
         val argv = line.trim().split(" ").filter { it.isNotEmpty() }
         if (argv.isEmpty()) {
             status.text = "Type a program to start"
             return
         }
+        status.text = "Starting ${argv[0]}..."
         worker.execute {
             try {
-                val pid = s.launch(argv)
+                val pid = s.launch(argv, password)
                 s.requestWindows()
                 main.post {
                     status.text = "Started ${argv[0]}" + if (pid > 0) " (process $pid)" else ""
                     refreshWindowsSoon()
                 }
+            } catch (e: dev.windowcast.PasswordNeededException) {
+                main.post { askWindowsPassword(line, e.user) }
             } catch (e: Exception) {
                 main.post { status.text = "Could not start it: ${e.message}" }
             }
         }
+    }
+
+    /** Asks for [user]'s Windows password for a RemoteApp launch of [line]. */
+    private fun askWindowsPassword(line: String, user: String) {
+        val field = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            hint = "Windows password"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Windows password for $user")
+            .setMessage("The host runs this program through its Remote Desktop, which needs it.")
+            .setView(field)
+            .setPositiveButton("Start") { _, _ -> launchOnHost(line, field.text.toString()) }
+            .setNegativeButton("Cancel") { _, _ -> status.text = "Not started" }
+            .show()
     }
 
     /** The new window is not mapped when the launch returns: ask for the list again a few times. */

@@ -25,8 +25,8 @@ use ironrdp_session::{ActiveStageBuilder, ActiveStageOutput};
 use windowcast_protocol::{InputEvent, PointerButton};
 
 use crate::remoteapp::{
-    slow_path_window_orders, window_orders, RailChannel, RailStatus, RailTap, RemoteApp,
-    RemoteWindow, WindowOrder, Windows,
+    slow_path_window_orders, window_orders, ListedWindow, RailChannel, RailStatus, RailTap, Rect,
+    RemoteApp, WindowOrder, Windows,
 };
 use crate::tls::{self, Pinned};
 use crate::RdpError;
@@ -45,9 +45,10 @@ pub struct ClientConfig {
     /// The host certificate's SHA-256 to insist on; `None` takes any and
     /// reports it in [`RdpStream::fingerprint`].
     pub pinned: Option<[u8; 32]>,
-    /// Run this program on the host and show only its window (RemoteApp)
-    /// instead of the desktop. `size` is then the desktop the program's
-    /// window lives on.
+    /// Run this program on the host as a RemoteApp instead of showing the
+    /// desktop. Pictures are then the session's whole desktop (`size`),
+    /// on which [`RdpStream::windows`] says where the program's windows
+    /// are.
     pub remote_app: Option<RemoteApp>,
 }
 
@@ -59,13 +60,46 @@ pub struct RgbaPicture {
     pub data: Vec<u8>,
 }
 
+impl RgbaPicture {
+    /// The part of this picture under `rect`, kept inside it.
+    pub fn cut(&self, rect: Rect) -> RgbaPicture {
+        let x = rect.x.clamp(0, self.width.saturating_sub(1) as i32) as u32;
+        let y = rect.y.clamp(0, self.height.saturating_sub(1) as i32) as u32;
+        let width = rect.width.min(self.width - x).max(1);
+        let height = rect.height.min(self.height - y).max(1);
+        let stride = self.width as usize * 4;
+        let row = width as usize * 4;
+        let mut data = Vec::with_capacity(row * height as usize);
+        for line in 0..height as usize {
+            let start = (y as usize + line) * stride + x as usize * 4;
+            data.extend_from_slice(&self.data[start..start + row]);
+        }
+        RgbaPicture {
+            width,
+            height,
+            data,
+        }
+    }
+}
+
+/// The newest picture with its number, for views that each wait for the
+/// next one without taking it from the others.
+#[derive(Default)]
+struct Latest {
+    picture: std::sync::Mutex<(u64, Option<RgbaPicture>)>,
+    changed: std::sync::Condvar,
+}
+
 /// A connected RDP session.
 pub struct RdpStream {
     pictures: std::sync::Mutex<Receiver<RgbaPicture>>,
     /// The newest picture, whoever took it: a host sends nothing while the
     /// window does not change, so a view that starts late begins here.
-    latest: Arc<std::sync::Mutex<Option<RgbaPicture>>>,
-    input: Sender<InputEvent>,
+    latest: Arc<Latest>,
+    /// A RemoteApp session's listed windows, numbered by change.
+    windows: Arc<std::sync::Mutex<(u64, Vec<ListedWindow>)>>,
+    rail: Option<Arc<std::sync::Mutex<RailStatus>>>,
+    input: Sender<(Option<u32>, InputEvent)>,
     stop: Arc<AtomicBool>,
     /// Set once the session has ended (the host closed it, or it failed).
     pub ended: Arc<AtomicBool>,
@@ -78,7 +112,36 @@ pub struct RdpStream {
 impl RdpStream {
     /// The newest picture so far, taken or not.
     pub fn latest_picture(&self) -> Option<RgbaPicture> {
-        self.latest.lock().expect("latest").clone()
+        self.latest.picture.lock().expect("latest").1.clone()
+    }
+
+    /// The first picture numbered above `after` (0 for any), with its
+    /// number, waiting up to `timeout`. Unlike [`Self::next_picture`] it
+    /// takes nothing away, so several views can each follow the pictures.
+    pub fn picture_after(&self, after: u64, timeout: Duration) -> Option<(u64, RgbaPicture)> {
+        let guard = self.latest.picture.lock().expect("latest");
+        let (guard, _) = self
+            .latest
+            .changed
+            .wait_timeout_while(guard, timeout, |(n, p)| *n <= after || p.is_none())
+            .expect("latest");
+        match &*guard {
+            (n, Some(picture)) if *n > after => Some((*n, picture.clone())),
+            _ => None,
+        }
+    }
+
+    /// A RemoteApp session's windows as a client lists them
+    /// ([`Windows::listed`]), numbered: the number grows with each change.
+    pub fn windows(&self) -> (u64, Vec<ListedWindow>) {
+        self.windows.lock().expect("windows").clone()
+    }
+
+    /// The host's answer to the RemoteApp's program: 0 when it started.
+    pub fn exec_result(&self) -> Option<u16> {
+        self.rail
+            .as_ref()
+            .and_then(|rail| rail.lock().expect("rail").exec_result)
     }
 
     /// The host's picture after its next change, waiting up to `timeout`.
@@ -93,7 +156,13 @@ impl RdpStream {
     /// windowcast's are; the window an event names is ignored (the
     /// desktop is the one picture).
     pub fn input(&self, event: InputEvent) -> bool {
-        self.input.send(event).is_ok()
+        self.input.send((None, event)).is_ok()
+    }
+
+    /// Sends input to one of a RemoteApp session's windows: pointer
+    /// positions are fractions of that window's listed rectangle.
+    pub fn input_to(&self, window: u32, event: InputEvent) -> bool {
+        self.input.send((Some(window), event)).is_ok()
     }
 
     pub fn stop(&self) {
@@ -255,7 +324,9 @@ pub fn connect(config: &ClientConfig) -> Result<RdpStream, RdpError> {
     let size = (result.desktop_size.width, result.desktop_size.height);
     let remote_app = config.remote_app.is_some();
     let (pictures_tx, pictures) = mpsc::sync_channel(2);
-    let latest = Arc::new(std::sync::Mutex::new(None));
+    let latest = Arc::new(Latest::default());
+    let windows = Arc::new(std::sync::Mutex::new((0, Vec::new())));
+    let rail = remote_app.then_some(rail);
     let (input, input_rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let ended = Arc::new(AtomicBool::new(false));
@@ -263,13 +334,13 @@ pub fn connect(config: &ClientConfig) -> Result<RdpStream, RdpError> {
     control.set_read_timeout(Some(Duration::from_millis(10)))?;
     {
         let (stop, ended, latest) = (Arc::clone(&stop), Arc::clone(&ended), Arc::clone(&latest));
+        let (windows, rail) = (Arc::clone(&windows), rail.clone());
         std::thread::spawn(move || {
             let pictures_tx = Pictures {
                 tx: pictures_tx,
                 latest,
             };
-            let rail = remote_app.then_some(rail);
-            if let Err(e) = run(result, framed, pictures_tx, input_rx, &stop, rail) {
+            if let Err(e) = run(result, framed, pictures_tx, input_rx, &stop, rail, &windows) {
                 eprintln!("rdp: the session ended: {e}");
             }
             ended.store(true, Ordering::SeqCst);
@@ -278,6 +349,8 @@ pub fn connect(config: &ClientConfig) -> Result<RdpStream, RdpError> {
     Ok(RdpStream {
         pictures: std::sync::Mutex::new(pictures),
         latest,
+        windows,
+        rail,
         input,
         stop,
         ended,
@@ -290,14 +363,15 @@ fn run(
     result: ConnectionResult,
     mut framed: Framed<Tls>,
     pictures: Pictures,
-    input: Receiver<InputEvent>,
+    input: Receiver<(Option<u32>, InputEvent)>,
     stop: &AtomicBool,
     rail: Option<Arc<std::sync::Mutex<RailStatus>>>,
+    listed: &std::sync::Mutex<(u64, Vec<ListedWindow>)>,
 ) -> Result<(), RdpError> {
     let remote_app = rail.is_some();
     let size = result.desktop_size;
-    // What the client sees: the desktop, or for RemoteApp the program's
-    // window, once the server has described it.
+    // Pictures are always the whole desktop; a RemoteApp session's windows
+    // are rectangles on it.
     let desktop = Area {
         x: 0,
         y: 0,
@@ -305,7 +379,6 @@ fn run(
         height: size.height,
     };
     let mut windows = Windows::default();
-    let mut area = (!remote_app).then_some(desktop);
     let mut image = DecodedImage::new(PixelFormat::RgbA32, size.width, size.height);
     let mut stage = ActiveStageBuilder {
         static_channels: result.static_channels,
@@ -324,7 +397,17 @@ fn run(
     while !stop.load(Ordering::SeqCst) {
         // Input first, so a busy host does not hold it up.
         let mut operations = Vec::new();
-        while let Ok(event) = input.try_recv() {
+        while let Ok((window, event)) = input.try_recv() {
+            let area = match window {
+                None => Some(desktop),
+                Some(id) => listed
+                    .lock()
+                    .expect("windows")
+                    .1
+                    .iter()
+                    .find(|w| w.id == id)
+                    .map(|w| Area::of(w.rect, desktop)),
+            };
             if let Some(area) = area {
                 operations.extend(operations_for(&event, area));
             }
@@ -334,7 +417,7 @@ fn run(
             let outputs = stage
                 .process_fastpath_input(&mut image, &events)
                 .map_err(session)?;
-            if !handle(&mut framed, outputs, &image, &pictures, area)? {
+            if !handle(&mut framed, outputs, &image, &pictures, desktop)? {
                 return Ok(());
             }
         }
@@ -372,7 +455,12 @@ fn run(
                 moved = true;
             }
             if moved {
-                area = windows.main().map(|w| Area::of(w, desktop));
+                let now = windows.listed();
+                let mut kept = listed.lock().expect("windows");
+                if kept.1 != now {
+                    kept.0 += 1;
+                    kept.1 = now;
+                }
             }
         }
         let mut outputs = if slow_orders.is_some() {
@@ -405,7 +493,7 @@ fn run(
                 },
             ));
         }
-        if !handle(&mut framed, outputs, &image, &pictures, area)? {
+        if !handle(&mut framed, outputs, &image, &pictures, desktop)? {
             return Ok(());
         }
         // What the rail channel has to say.
@@ -452,7 +540,7 @@ fn handle(
     outputs: Vec<ActiveStageOutput>,
     image: &DecodedImage,
     pictures: &Pictures,
-    area: Option<Area>,
+    area: Area,
 ) -> Result<bool, RdpError> {
     let mut changed = false;
     for output in outputs {
@@ -476,7 +564,7 @@ fn handle(
             _ => {}
         }
     }
-    if let (true, Some(area)) = (changed, area) {
+    if changed {
         pictures.send(area.cut(image));
     }
     Ok(true)
@@ -486,12 +574,17 @@ fn handle(
 /// gets the newest next time), and the newest kept.
 struct Pictures {
     tx: SyncSender<RgbaPicture>,
-    latest: Arc<std::sync::Mutex<Option<RgbaPicture>>>,
+    latest: Arc<Latest>,
 }
 
 impl Pictures {
     fn send(&self, picture: RgbaPicture) {
-        *self.latest.lock().expect("latest") = Some(picture.clone());
+        {
+            let mut latest = self.latest.picture.lock().expect("latest");
+            latest.0 += 1;
+            latest.1 = Some(picture.clone());
+        }
+        self.latest.changed.notify_all();
         let _ = self.tx.try_send(picture);
     }
 }
@@ -507,11 +600,11 @@ struct Area {
 
 impl Area {
     /// A remote window's rectangle, kept inside the desktop.
-    fn of(window: &RemoteWindow, desktop: Area) -> Area {
-        let x = window.offset.0.clamp(0, i32::from(desktop.width) - 1) as u16;
-        let y = window.offset.1.clamp(0, i32::from(desktop.height) - 1) as u16;
-        let width = (window.size.0.min(u32::from(desktop.width - x)) as u16).max(1);
-        let height = (window.size.1.min(u32::from(desktop.height - y)) as u16).max(1);
+    fn of(rect: Rect, desktop: Area) -> Area {
+        let x = rect.x.clamp(0, i32::from(desktop.width) - 1) as u16;
+        let y = rect.y.clamp(0, i32::from(desktop.height) - 1) as u16;
+        let width = (rect.width.min(u32::from(desktop.width - x)) as u16).max(1);
+        let height = (rect.height.min(u32::from(desktop.height - y)) as u16).max(1);
         Area {
             x,
             y,

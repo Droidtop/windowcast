@@ -83,6 +83,82 @@ The RDP desktop is the window, so any RDP client given that login sees
 only that window, and the host's own input rules apply (the app's input
 setting gates RDP input as it does session input).
 
+## RemoteApp: programs and windows over RDP (Windows hosts)
+
+Decided 2026-10-10 (Droidtop/tracker#111). Two RDP paths serve single
+windows, and whole-desktop RDP stays what a client gets when it asks for
+the desktop (`StreamTarget::Desktop`):
+
+- **(b) Launched programs as RemoteApps.** When a client launches a
+  program on a Windows host (the command stream's `Launch`) and its rules
+  give that program RDP, the program runs as a RemoteApp of Windows' own
+  Remote Desktop: the client logs in to the host's Remote Desktop itself,
+  asks for the program (the `rail` channel), and each window Windows
+  describes in its window orders becomes a window in the client's
+  windowcast window list, drawn from the RemoteApp desktop's picture, with
+  input mapped to it. The program runs in a Remote Desktop session of its
+  own, not on the host's screen. Built first.
+- **(a) Existing windows over windowcast's own RDP server.** A window
+  already open on the host, given RDP by the rules, is served by
+  windowcast's own RDP server (`WithRdp`, "Handing a window to RDP"
+  above): its captured picture is the RDP desktop. Windows' RemoteApp
+  cannot do this: it always starts a new copy of a program in a new
+  session. That server will also speak `rail`, so RemoteApp clients such
+  as mstsc and FreeRDP show the window seamlessly. Built after (b).
+
+### How a launch becomes a RemoteApp
+
+1. The client evaluates its rules on the program as a window would be
+   (`app_id` from the program's file name, content from
+   `selection::classify`). If they give `Rdp`, the client shows pictures,
+   and the host is on the same network, the `Launch` asks for a RemoteApp.
+2. The host serves it as a RemoteApp when its RemoteApp setting allows it
+   (below) and Remote Desktop is on; otherwise it starts the program in
+   its own session as a plain launch, and the program's windows stream as
+   usual, (a) included.
+3. The host answers with a `HandoffTarget` for its Remote Desktop: the
+   address, port 3389 (or the configured port), the Windows user to log
+   in as, a password only for a host-made account, and the SHA-256 of
+   Remote Desktop's certificate, which the host reads by connecting to
+   itself, so the client pins it.
+4. The client logs in with TLS and NLA and runs the program; the windows
+   it reports join the window list. When the program's last window
+   closes, the client ends the RDP connection.
+
+### Logging in: one host setting
+
+- **As the signed-in user (default).** A client that signed in with the
+  host's own Windows account (the `os` account source: PAM or
+  LogonUserW) reuses that password: the client keeps it in memory for
+  the session only and never stores it, and the host hands over only the
+  user name. A client that signed in another way (PIN pairing, OIDC,
+  LDAP, a windowcast account) is asked for the Windows password when it
+  launches (`ClientError::PasswordNeeded`, which the app turns into a
+  prompt); a PIN-paired device logs in as the user the host runs as.
+  Kerberos with the user's ticket on a domain-joined host is planned and
+  not built.
+- **Host-made account.** The host creates one local Windows user per
+  windowcast account (and one per PIN-paired device), with a random
+  password the host keeps protected by DPAPI, adds it to "Remote Desktop
+  Users", and hands that login over. Launches then need no Windows
+  password from the user; it suits Windows Server and hosts many people
+  use. Creating users needs the host to run with administrator rights;
+  without them the host says so and refuses the RemoteApp.
+
+### When it is on
+
+- Windows 10 and 11 (client editions) allow one session: a Remote Desktop
+  login takes over the console and locks the local screen. RemoteApp
+  launches are off there by default; turning them on in the host's
+  settings shows a plain warning saying exactly that.
+- Windows Server: on by default when a session is free: the Remote
+  Desktop Session Host role is installed, or fewer than the two sessions
+  a server without it allows are in use. Otherwise the launch runs in the
+  host's own session.
+- Remote Desktop must be on, and Windows must let the program run as a
+  RemoteApp (an allow-list entry, or the allow list switched off); the
+  host's settings say what is missing.
+
 ## Choosing a backend
 
 `windowcast_protocol::selection` holds the rules, so both ends agree:
