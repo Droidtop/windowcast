@@ -1,0 +1,9 @@
+[package]
+name = "windowcast-pty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# A shell on a pseudo-terminal: ConPTY on Windows, openpty everywhere else.
+[dependencies]
+portable-pty = "0.9"

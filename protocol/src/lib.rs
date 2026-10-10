@@ -4,6 +4,7 @@
 //! backends it doesn't need.
 
 pub mod keys;
+pub mod command;
 pub mod selection;
 
 use serde::{Deserialize, Serialize};
@@ -421,6 +422,11 @@ pub enum ControlMessage {
     Rendezvous {
         discovery_id: String,
     },
+
+    /// The command stream (docs/COMMAND-STREAM.md): shells, commands and
+    /// application launches on the host. Authorized by the host separately
+    /// from streaming windows, because a shell is far more than a picture.
+    Command(command::CommandMessage),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

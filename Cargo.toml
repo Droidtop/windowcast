@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "protocol",
+    "pty",
     "identity",
     "accounts",
     "pairing",
