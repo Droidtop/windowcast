@@ -665,6 +665,8 @@ class MainActivity : Activity() {
 
     private fun startDecoding(event: Event.StreamStarted) {
         carrier = event.backend
+        // The switch items depend on the stream: build the menu again (#460).
+        invalidateOptionsMenu()
         val window = watching ?: return
         val s = session ?: return
         form.visibility = View.GONE
@@ -955,6 +957,7 @@ class MainActivity : Activity() {
         cancelSwitch()
         val pending = Switch(event.generation, event.backend)
         switching = pending
+        invalidateOptionsMenu()
         val view = spare
         view.visibility = View.VISIBLE
         val begin = { holder: SurfaceHolder ->
@@ -1010,6 +1013,7 @@ class MainActivity : Activity() {
         val window = watching ?: return
         switching = null
         carrier = pending.backend
+        invalidateOptionsMenu()
         val old = decoder
         decoder = pending.renderer
         old?.let { d -> worker.execute { d.stop() } }
@@ -1026,6 +1030,7 @@ class MainActivity : Activity() {
         switching = null
         pending.renderer?.let { r -> worker.execute { r.stop() } }
         spare.visibility = View.GONE
+        invalidateOptionsMenu()
     }
 
     private fun stopDecoding() {
@@ -1050,6 +1055,7 @@ class MainActivity : Activity() {
         form.visibility = View.VISIBLE
         // The stream's title (window name and counters) goes with the stream.
         title = APP_TITLE
+        invalidateOptionsMenu()
     }
 
     @Deprecated("Activity back handling")
