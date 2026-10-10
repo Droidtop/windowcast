@@ -31,7 +31,11 @@ import dev.windowcast.WindowcastSession
 import dev.windowcast.Gamepads
 import dev.windowcast.Input
 import dev.windowcast.Keys
+import dev.windowcast.HostKeyPolicy
 import dev.windowcast.Microphone
+import dev.windowcast.TerminalSession
+import dev.windowcast.TerminalView
+import dev.windowcast.UntrustedHostKey
 import android.Manifest
 import android.content.pm.PackageManager
 import android.content.ClipData
@@ -61,6 +65,16 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var list: ListView
     private lateinit var surface: SurfaceView
+    private lateinit var terminalView: TerminalView
+    private lateinit var launchLine: EditText
+    private lateinit var sshUser: EditText
+    private lateinit var sshHost: EditText
+    private lateinit var sshPort: EditText
+    private lateinit var sshPassword: EditText
+    private lateinit var sshButton: Button
+    private var terminalSession: TerminalSession? = null
+    /** The fingerprint of an SSH server the user was shown and has not trusted yet. */
+    private var pendingFingerprint: String? = null
     private lateinit var form: LinearLayout
     private lateinit var sendMicrophone: CheckBox
     @Volatile private var microphone: Microphone? = null
@@ -104,6 +118,40 @@ class MainActivity : Activity() {
                 } else startMicrophone()
             }
         }
+        launchLine = EditText(this).apply {
+            hint = "Start on the host: program and arguments"
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
+        val shell = Button(this).apply {
+            text = "Open a shell on the host"
+            setOnClickListener { openHostTerminal() }
+        }
+        val launch = Button(this).apply {
+            text = "Start on the host"
+            setOnClickListener { launchOnHost(launchLine.text.toString()) }
+        }
+        sshUser = EditText(this).apply { hint = "SSH user"; inputType = InputType.TYPE_CLASS_TEXT }
+        sshHost = EditText(this).apply {
+            hint = "SSH server"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        }
+        sshPort = EditText(this).apply { hint = "port (22)"; inputType = InputType.TYPE_CLASS_NUMBER }
+        sshPassword = EditText(this).apply {
+            hint = "password"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        sshButton = Button(this).apply {
+            text = "Log in over SSH"
+            setOnClickListener { sshLogin() }
+        }
+        terminalView = TerminalView(this).apply {
+            visibility = View.GONE
+            onEnded = { code -> status.text = "The shell ended (exit code $code). Press Back to close it." }
+            onClipboard = { text ->
+                fromHost = text
+                clipboard.setPrimaryClip(ClipData.newPlainText("windowcast", text))
+            }
+        }
         list = ListView(this).apply {
             setOnItemClickListener { _, _, position, _ -> watch(windows[position]) }
         }
@@ -115,6 +163,14 @@ class MainActivity : Activity() {
             addView(connect, MATCH_PARENT, WRAP_CONTENT)
             addView(sendMicrophone, MATCH_PARENT, WRAP_CONTENT)
             addView(status, MATCH_PARENT, WRAP_CONTENT)
+            addView(shell, MATCH_PARENT, WRAP_CONTENT)
+            addView(launchLine, MATCH_PARENT, WRAP_CONTENT)
+            addView(launch, MATCH_PARENT, WRAP_CONTENT)
+            addView(sshUser, MATCH_PARENT, WRAP_CONTENT)
+            addView(sshHost, MATCH_PARENT, WRAP_CONTENT)
+            addView(sshPort, MATCH_PARENT, WRAP_CONTENT)
+            addView(sshPassword, MATCH_PARENT, WRAP_CONTENT)
+            addView(sshButton, MATCH_PARENT, WRAP_CONTENT)
             addView(list, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         }
         surface = SurfaceView(this).apply {
@@ -130,6 +186,7 @@ class MainActivity : Activity() {
         setContentView(FrameLayout(this).apply {
             addView(form, MATCH_PARENT, MATCH_PARENT)
             addView(surface, MATCH_PARENT, MATCH_PARENT)
+            addView(terminalView, MATCH_PARENT, MATCH_PARENT)
         })
 
         client = WindowcastClient(File(filesDir, "windowcast"))
@@ -269,6 +326,98 @@ class MainActivity : Activity() {
         }
     }
 
+    /** A shell on the connected host. */
+    private fun openHostTerminal() {
+        val s = session ?: run { status.text = "Connect to a host first"; return }
+        val (cols, rows) = terminalView.cellsFor(form.width, form.height)
+        status.text = "Opening a shell…"
+        worker.execute {
+            try {
+                val t = s.openTerminal(cols, rows)
+                main.post { showTerminal(t) }
+            } catch (e: Exception) {
+                main.post { status.text = "No shell: ${e.message}" }
+            }
+        }
+    }
+
+    /** Starts an application on the connected host; its windows arrive in the list. */
+    private fun launchOnHost(line: String) {
+        val s = session ?: run { status.text = "Connect to a host first"; return }
+        val argv = line.trim().split(" ").filter { it.isNotEmpty() }
+        if (argv.isEmpty()) {
+            status.text = "Type a program to start"
+            return
+        }
+        worker.execute {
+            try {
+                val pid = s.launch(argv)
+                s.requestWindows()
+                main.post { status.text = "Started ${argv[0]}" + if (pid > 0) " (process $pid)" else "" }
+            } catch (e: Exception) {
+                main.post { status.text = "Could not start it: ${e.message}" }
+            }
+        }
+    }
+
+    /**
+     * Logs in to an SSH server. A server not seen before is not trusted silently: its key is
+     * shown, and pressing the button again trusts that key.
+     */
+    private fun sshLogin() {
+        val c = client ?: return
+        val host = sshHost.text.toString().trim()
+        val user = sshUser.text.toString().trim()
+        val port = sshPort.text.toString().trim().toIntOrNull() ?: 22
+        val password = sshPassword.text.toString()
+        if (host.isEmpty() || user.isEmpty()) {
+            status.text = "An SSH server and a user are needed"
+            return
+        }
+        val trust = pendingFingerprint
+        val (cols, rows) = terminalView.cellsFor(form.width, form.height)
+        status.text = "Logging in to $host…"
+        worker.execute {
+            try {
+                val t = c.sshTerminal(
+                    host, port, user, password,
+                    policy = if (trust != null) HostKeyPolicy.FINGERPRINT else HostKeyPolicy.PINNED,
+                    fingerprint = trust, cols = cols, rows = rows,
+                )
+                main.post {
+                    pendingFingerprint = null
+                    sshButton.text = "Log in over SSH"
+                    showTerminal(t)
+                }
+            } catch (e: UntrustedHostKey) {
+                main.post {
+                    pendingFingerprint = e.fingerprint
+                    sshButton.text = "Trust this key and log in"
+                    status.text = "$host is not known yet. Its key is ${e.fingerprint}. Press the button to trust it."
+                }
+            } catch (e: Exception) {
+                main.post { status.text = "Could not log in: ${e.message}" }
+            }
+        }
+    }
+
+    private fun showTerminal(t: TerminalSession) {
+        terminalSession?.let { old -> worker.execute { old.close() } }
+        terminalSession = t
+        form.visibility = View.GONE
+        terminalView.visibility = View.VISIBLE
+        terminalView.attach(t)
+    }
+
+    private fun closeTerminal() {
+        terminalView.detach()
+        terminalView.visibility = View.GONE
+        form.visibility = View.VISIBLE
+        val t = terminalSession
+        terminalSession = null
+        if (t != null) worker.execute { t.close() }
+    }
+
     private fun streaming(): Boolean = surface.visibility == View.VISIBLE && watching != null
 
     private fun send(input: Input) {
@@ -294,6 +443,9 @@ class MainActivity : Activity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (terminalView.visibility == View.VISIBLE && event.keyCode != KeyEvent.KEYCODE_BACK && terminalView.handleKey(event)) {
+            return true
+        }
         if (!streaming() || event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
         if (gamepads.onKey(event)) return true
         val down = event.action == KeyEvent.ACTION_DOWN
@@ -327,6 +479,10 @@ class MainActivity : Activity() {
 
     @Deprecated("Activity back handling")
     override fun onBackPressed() {
+        if (terminalView.visibility == View.VISIBLE) {
+            closeTerminal()
+            return
+        }
         val window = watching
         val s = session
         if (surface.visibility == View.VISIBLE && window != null && s != null) {
@@ -340,6 +496,8 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         inputWorker.shutdown()
         listening = false
+        terminalView.detach()
+        terminalSession?.close()
         decoder?.stop()
         audio?.stop()
         stopMicrophone()

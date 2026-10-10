@@ -56,4 +56,36 @@ internal object Native {
         buffer: ByteBuffer,
         info: IntArray,
     ): Long
+
+    // The command stream: terminals and launches (windowcast.h).
+    @JvmStatic external fun openTerminal(session: Long, cols: Int, rows: Int): Long
+    /** authKind: 0 password, 1 key (PEM); policy: [HostKeyPolicy.id]. 0 on failure, see lastError and lastFingerprint. */
+    @JvmStatic external fun sshTerminal(
+        client: Long,
+        host: String,
+        port: Int,
+        user: String,
+        authKind: Int,
+        secret: String,
+        passphrase: String?,
+        policy: Int,
+        fingerprint: String?,
+        cols: Int,
+        rows: Int,
+    ): Long
+    @JvmStatic external fun lastFingerprint(): String
+    @JvmStatic external fun terminalFree(terminal: Long)
+    @JvmStatic external fun terminalSendText(terminal: Long, text: String): Long
+    @JvmStatic external fun terminalSendKey(terminal: Long, name: String): Long
+    @JvmStatic external fun terminalSendControl(terminal: Long, codePoint: Int): Long
+    @JvmStatic external fun terminalPaste(terminal: Long, text: String): Long
+    @JvmStatic external fun terminalResize(terminal: Long, cols: Int, rows: Int): Long
+    @JvmStatic external fun terminalScroll(terminal: Long, lines: Int): Long
+    @JvmStatic external fun terminalWait(terminal: Long, seen: Long, timeoutMs: Int): Long
+    @JvmStatic external fun terminalSnapshot(terminal: Long): String?
+    @JvmStatic external fun terminalTakeClipboard(terminal: Long): String?
+    /** [TIMEOUT] while the shell runs, [ENDED] once it ended (code[0] is its exit code, -1 for none). */
+    @JvmStatic external fun terminalEnded(terminal: Long, code: IntArray): Long
+    /** The process id (0 if unknown), or [ERROR] with the reason in lastError. */
+    @JvmStatic external fun launch(session: Long, argvJson: String): Long
 }

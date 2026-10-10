@@ -211,4 +211,160 @@ Java_dev_windowcast_Native_nextPicture(JNIEnv *env, jclass cls, jlong session, j
     jint values[2] = {(jint)width, (jint)height};
     (*env)->SetIntArrayRegion(env, size, 0, 2, values);
     return len;
+/* ---- The command stream: terminals and launches (windowcast.h). ---- */
+
+#define TERMINAL(h) ((WindowcastTerminal *)(intptr_t)(h))
+#define FINGERPRINT_CAP 128
+
+static __thread char last_fingerprint[FINGERPRINT_CAP];
+
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_openTerminal(JNIEnv *env, jclass cls, jlong session, jint cols,
+                                        jint rows) {
+    last_error[0] = 0;
+    return (jlong)(intptr_t)windowcast_session_open_terminal(SESSION(session), (uint16_t)cols,
+                                                            (uint16_t)rows, last_error,
+                                                            sizeof last_error);
+}
+
+/* The server key an untrusted SSH server presented, from the last
+ * sshTerminal call. */
+JNIEXPORT jstring JNICALL
+Java_dev_windowcast_Native_lastFingerprint(JNIEnv *env, jclass cls) {
+    return (*env)->NewStringUTF(env, last_fingerprint);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_sshTerminal(JNIEnv *env, jclass cls, jlong client, jstring host,
+                                       jint port, jstring user, jint auth_kind, jstring secret,
+                                       jstring passphrase, jint policy, jstring fingerprint,
+                                       jint cols, jint rows) {
+    const char *host_c = (*env)->GetStringUTFChars(env, host, NULL);
+    const char *user_c = (*env)->GetStringUTFChars(env, user, NULL);
+    const char *secret_c = (*env)->GetStringUTFChars(env, secret, NULL);
+    const char *pass_c = passphrase ? (*env)->GetStringUTFChars(env, passphrase, NULL) : NULL;
+    const char *print_c = fingerprint ? (*env)->GetStringUTFChars(env, fingerprint, NULL) : NULL;
+    last_error[0] = 0;
+    last_fingerprint[0] = 0;
+    WindowcastTerminal *terminal = windowcast_client_ssh_terminal(
+        CLIENT(client), host_c, (uint16_t)port, user_c, auth_kind, secret_c, pass_c, policy,
+        print_c, (uint16_t)cols, (uint16_t)rows, last_error, sizeof last_error, last_fingerprint,
+        sizeof last_fingerprint);
+    if (print_c) (*env)->ReleaseStringUTFChars(env, fingerprint, print_c);
+    if (pass_c) (*env)->ReleaseStringUTFChars(env, passphrase, pass_c);
+    (*env)->ReleaseStringUTFChars(env, secret, secret_c);
+    (*env)->ReleaseStringUTFChars(env, user, user_c);
+    (*env)->ReleaseStringUTFChars(env, host, host_c);
+    return (jlong)(intptr_t)terminal;
+}
+
+JNIEXPORT void JNICALL
+Java_dev_windowcast_Native_terminalFree(JNIEnv *env, jclass cls, jlong terminal) {
+    windowcast_terminal_free(TERMINAL(terminal));
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_terminalSendText(JNIEnv *env, jclass cls, jlong terminal,
+                                            jstring text) {
+    const char *chars = (*env)->GetStringUTFChars(env, text, NULL);
+    int64_t result = windowcast_terminal_send_text(TERMINAL(terminal), chars);
+    (*env)->ReleaseStringUTFChars(env, text, chars);
+    return result;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_terminalSendKey(JNIEnv *env, jclass cls, jlong terminal,
+                                           jstring name) {
+    const char *chars = (*env)->GetStringUTFChars(env, name, NULL);
+    int64_t result = windowcast_terminal_send_key(TERMINAL(terminal), chars);
+    (*env)->ReleaseStringUTFChars(env, name, chars);
+    return result;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_terminalSendControl(JNIEnv *env, jclass cls, jlong terminal,
+                                               jint code_point) {
+    return windowcast_terminal_send_control(TERMINAL(terminal), (uint32_t)code_point);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_terminalPaste(JNIEnv *env, jclass cls, jlong terminal, jstring text) {
+    const char *chars = (*env)->GetStringUTFChars(env, text, NULL);
+    int64_t result = windowcast_terminal_paste(TERMINAL(terminal), chars);
+    (*env)->ReleaseStringUTFChars(env, text, chars);
+    return result;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_terminalResize(JNIEnv *env, jclass cls, jlong terminal, jint cols,
+                                          jint rows) {
+    return windowcast_terminal_resize(TERMINAL(terminal), (uint16_t)cols, (uint16_t)rows);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_terminalScroll(JNIEnv *env, jclass cls, jlong terminal, jint lines) {
+    return windowcast_terminal_scroll(TERMINAL(terminal), (uint32_t)(lines < 0 ? 0 : lines));
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_terminalWait(JNIEnv *env, jclass cls, jlong terminal, jlong seen,
+                                        jint timeout_ms) {
+    return windowcast_terminal_wait(TERMINAL(terminal), (uint64_t)seen, (uint32_t)timeout_ms);
+}
+
+/* A JSON text from one of the terminal calls that fill a buffer, or null. */
+typedef int64_t (*fill_fn)(const WindowcastTerminal *, uint8_t *, size_t, size_t *);
+
+static jstring terminal_text(JNIEnv *env, jlong terminal, fill_fn fill) {
+    size_t cap = 64 * 1024;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        uint8_t *buf = malloc(cap + 1);
+        if (!buf) return NULL;
+        size_t needed = 0;
+        int64_t len = fill(TERMINAL(terminal), buf, cap, &needed);
+        jstring result = NULL;
+        if (len >= 0) {
+            buf[len] = 0;
+            result = (*env)->NewStringUTF(env, (const char *)buf);
+        }
+        free(buf);
+        if (len >= 0) return result;
+        if (len != WINDOWCAST_BUFFER_TOO_SMALL) return NULL;
+        cap = needed;
+    }
+    return NULL;
+}
+
+JNIEXPORT jstring JNICALL
+Java_dev_windowcast_Native_terminalSnapshot(JNIEnv *env, jclass cls, jlong terminal) {
+    return terminal_text(env, terminal, windowcast_terminal_snapshot);
+}
+
+JNIEXPORT jstring JNICALL
+Java_dev_windowcast_Native_terminalTakeClipboard(JNIEnv *env, jclass cls, jlong terminal) {
+    return terminal_text(env, terminal, windowcast_terminal_take_clipboard);
+}
+
+/* Returns WINDOWCAST_TIMEOUT while the shell runs, WINDOWCAST_ENDED once it
+ * ended; code[0] gets the exit code (-1 for none). */
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_terminalEnded(JNIEnv *env, jclass cls, jlong terminal,
+                                         jintArray code) {
+    int32_t exit_code = -1;
+    int64_t result = windowcast_terminal_ended(TERMINAL(terminal), &exit_code);
+    jint value = (jint)exit_code;
+    (*env)->SetIntArrayRegion(env, code, 0, 1, &value);
+    return result;
+}
+
+/* Starts an application on the host. Returns its process id (0 if unknown) or
+ * WINDOWCAST_ERROR with the reason in lastError. */
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_launch(JNIEnv *env, jclass cls, jlong session, jstring argv_json) {
+    const char *chars = (*env)->GetStringUTFChars(env, argv_json, NULL);
+    last_error[0] = 0;
+    int64_t result = windowcast_session_launch(SESSION(session), chars, last_error,
+                                               sizeof last_error);
+    (*env)->ReleaseStringUTFChars(env, argv_json, chars);
+    return result;
 }

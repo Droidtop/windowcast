@@ -101,6 +101,36 @@ class WindowcastClient(dataDir: File) : Closeable {
         return WindowcastSession(session)
     }
 
+    /**
+     * Logs in to an SSH server and opens a shell. [key] is a private key in PEM form (then
+     * [secret] is unused); otherwise [secret] is the password. A server not pinned yet throws
+     * [UntrustedHostKey] under [HostKeyPolicy.PINNED], carrying the key it presented.
+     * Blocks: call it off the main thread.
+     */
+    fun sshTerminal(
+        host: String,
+        port: Int,
+        user: String,
+        secret: String,
+        key: String? = null,
+        passphrase: String? = null,
+        policy: HostKeyPolicy = HostKeyPolicy.PINNED,
+        fingerprint: String? = null,
+        cols: Int,
+        rows: Int,
+    ): TerminalSession {
+        val terminal = Native.sshTerminal(
+            handle, host, port, user, if (key != null) 1 else 0, key ?: secret, passphrase,
+            policy.id, fingerprint, cols, rows,
+        )
+        if (terminal == 0L) {
+            val seen = Native.lastFingerprint()
+            if (seen.isNotEmpty()) throw UntrustedHostKey(seen, Native.lastError())
+            throw IOException(Native.lastError())
+        }
+        return TerminalSession(terminal)
+    }
+
     override fun close() {
         if (handle != 0L) Native.clientFree(handle)
         handle = 0L
@@ -150,6 +180,23 @@ class WindowcastSession internal constructor(internal val handle: Long) : Closea
     /** Gives the host this device's clipboard text. */
     fun setClipboard(text: String) {
         Native.setClipboard(handle, text)
+    }
+
+    /** A shell on the host, drawn on a screen of [cols] by [rows] cells. The host may refuse (IOException). */
+    fun openTerminal(cols: Int, rows: Int): TerminalSession {
+        val terminal = Native.openTerminal(handle, cols, rows)
+        if (terminal == 0L) throw IOException(Native.lastError())
+        return TerminalSession(terminal)
+    }
+
+    /**
+     * Starts an application on the host: [argv] is the program and its arguments. Its windows
+     * arrive in the window list. Returns the process id (0 if the host does not know it).
+     */
+    fun launch(argv: List<String>): Long {
+        val pid = Native.launch(handle, org.json.JSONArray(argv).toString())
+        if (pid == Native.ERROR) throw IOException(Native.lastError())
+        return pid
     }
 
     /** The next event, or null after [timeoutMs] without one. */
