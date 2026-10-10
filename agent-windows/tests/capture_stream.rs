@@ -175,9 +175,14 @@ fn stream_with(
     session
         .start_window(WindowId(window), &[VideoCodec::H264])
         .unwrap();
-    match session.next_event(WAIT) {
-        Some(Event::StreamStarted { .. }) => {}
-        other => panic!("{choice:?}: expected the stream to start, got {other:?}"),
+    // The window's size can come just before the start (the first frame
+    // races the answer).
+    loop {
+        match session.next_event(WAIT) {
+            Some(Event::StreamStarted { .. }) => break,
+            Some(Event::WindowResized { .. }) => {}
+            other => panic!("{choice:?}: expected the stream to start, got {other:?}"),
+        }
     }
 
     let mut check = H264Check::new().unwrap();
