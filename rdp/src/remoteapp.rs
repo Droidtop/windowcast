@@ -20,11 +20,11 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Mutex};
 
-use ironrdp_pdu::gcc::ChannelName;
-use ironrdp_pdu::mcs::SendDataRequest;
+use ironrdp_pdu::gcc::{ChannelName, ChannelOptions, ConferenceCreateRequest};
+use ironrdp_pdu::mcs::{ConnectInitial, SendDataRequest};
 use ironrdp_pdu::rdp::capability_sets::CapabilitySet;
 use ironrdp_pdu::rdp::headers::{ShareControlHeader, ShareControlPdu};
-use ironrdp_pdu::x224::X224;
+use ironrdp_pdu::x224::{X224Data, X224};
 use ironrdp_svc::{SvcClientProcessor, SvcMessage, SvcProcessor};
 
 /// The program to run on the host.
@@ -48,6 +48,7 @@ const TS_WINDOW_LEVEL_SUPPORTED: u32 = 0x1;
 /// way out, when the session is a RemoteApp one.
 pub struct RailTap<S> {
     pub inner: S,
+    channel_done: bool,
     info_done: bool,
     caps_done: bool,
 }
@@ -56,6 +57,7 @@ impl<S> RailTap<S> {
     pub fn new(inner: S) -> Self {
         RailTap {
             inner,
+            channel_done: false,
             info_done: false,
             caps_done: false,
         }
@@ -65,6 +67,7 @@ impl<S> RailTap<S> {
     pub fn passthrough(inner: S) -> Self {
         RailTap {
             inner,
+            channel_done: true,
             info_done: true,
             caps_done: true,
         }
@@ -73,8 +76,14 @@ impl<S> RailTap<S> {
     /// The PDU in `buf` with RemoteApp asked for, or `None` to send it as
     /// it is.
     fn rewrite(&mut self, buf: &[u8]) -> Option<Vec<u8>> {
-        if self.info_done && self.caps_done {
+        if self.channel_done && self.info_done && self.caps_done {
             return None;
+        }
+        if !self.channel_done {
+            if let Some(edited) = rail_channel_options(buf) {
+                self.channel_done = true;
+                return Some(edited);
+            }
         }
         let X224(request) = ironrdp_core::decode::<X224<SendDataRequest<'_>>>(buf).ok()?;
         let data = request.user_data.as_ref();
@@ -121,6 +130,43 @@ impl<S> RailTap<S> {
         }
         None
     }
+}
+
+/// The options FreeRDP opens the rail channel with
+/// (channels/rail/client/rail_main.c, VirtualChannelEntryEx). With
+/// SHOW_PROTOCOL the host's RemoteApp process reads each PDU with its
+/// channel header, and the client's chunks carry CHANNEL_FLAG_SHOW_PROTOCOL
+/// (libfreerdp/core/channels.c, freerdp_channel_send). IronRDP declares a
+/// channel's options from its compression condition only, so they are set
+/// here, in the Connect Initial it writes.
+fn rail_options() -> ChannelOptions {
+    ChannelOptions::INITIALIZED
+        | ChannelOptions::ENCRYPT_RDP
+        | ChannelOptions::COMPRESS_RDP
+        | ChannelOptions::SHOW_PROTOCOL
+}
+
+/// The Connect Initial in `buf` with the rail channel's options set, or
+/// `None` when `buf` is not one.
+fn rail_channel_options(buf: &[u8]) -> Option<Vec<u8>> {
+    let X224(data) = ironrdp_core::decode::<X224<X224Data<'_>>>(buf).ok()?;
+    let mut initial = ironrdp_core::decode::<ConnectInitial>(data.data.as_ref()).ok()?;
+    let mut blocks = initial.conference_create_request.gcc_blocks().clone();
+    let rail = ChannelName::from_static(b"rail\0\0\0\0");
+    let channel = blocks
+        .network
+        .as_mut()?
+        .channels
+        .iter_mut()
+        .find(|c| c.name == rail)?;
+    channel.options = rail_options();
+    initial.conference_create_request = ConferenceCreateRequest::new(blocks).ok()?;
+    let user_data = ironrdp_core::encode_vec(&initial).ok()?;
+    tracing::debug!("RemoteApp: rail channel options set in the Connect Initial");
+    ironrdp_core::encode_vec(&X224(X224Data {
+        data: user_data.into(),
+    }))
+    .ok()
 }
 
 fn reencode(request: &SendDataRequest<'_>, user_data: Vec<u8>) -> Option<Vec<u8>> {
@@ -208,8 +254,11 @@ impl RailChannel {
     }
 
     /// The client's answer to the server's handshake: its own handshake,
-    /// its status, the system parameters a RemoteApp server waits for,
-    /// then the program (the order mstsc and FreeRDP send them in).
+    /// its status, the system parameters, then the program. FreeRDP sends
+    /// these, in this order, when the handshake comes (2.x
+    /// client/X11/xf_rail.c, xf_rail_server_handshake and
+    /// xf_rail_server_start_cmd; client/Windows/wf_rail.c), and the
+    /// parameters are its set (rail_main.c, rail_client_system_param).
     fn start_messages(&self) -> Vec<Vec<u8>> {
         let mut out = vec![
             rail_pdu(RAIL_HANDSHAKE, &7601u32.to_le_bytes()),
@@ -227,12 +276,18 @@ impl RailChannel {
             body.push(on);
             rail_pdu(RAIL_SYSPARAM, &body)
         };
+        // SPI_SETHIGHCONTRAST: flags (FreeRDP's 0x7E), then an empty colour
+        // scheme (its length, 2, then a zero-length unicode string).
+        let mut contrast = 0x0043u32.to_le_bytes().to_vec();
+        contrast.extend_from_slice(&0x7Eu32.to_le_bytes());
+        contrast.extend_from_slice(&2u32.to_le_bytes());
+        contrast.extend_from_slice(&0u16.to_le_bytes());
+        out.push(rail_pdu(RAIL_SYSPARAM, &contrast));
         out.push(flag(0x0021, 0)); // SPI_SETMOUSEBUTTONSWAP
         out.push(flag(0x0045, 0)); // SPI_SETKEYBOARDPREF
-        out.push(flag(0x0025, 1)); // SPI_SETDRAGFULLWINDOWS
+        out.push(flag(0x0025, 0)); // SPI_SETDRAGFULLWINDOWS
         out.push(flag(0x100B, 0)); // SPI_SETKEYBOARDCUES
         out.push(rect(0x002F)); // SPI_SETWORKAREA
-        out.push(rect(0xF001)); // RAIL_SPI_DISPLAYCHANGE
         let (exe, dir, args) = (
             utf16(&self.app.program),
             utf16(&self.app.working_dir),
@@ -316,10 +371,16 @@ pub enum WindowOrder {
         window: RemoteWindow,
     },
     Deleted(u32),
+    /// An Actively Monitored or Non-Monitored Desktop order, by its fields.
+    Desktop(u32),
 }
 
 // MS-RDPERP 2.2.1.3.1 FieldsPresentFlags.
 const ORDER_TYPE_WINDOW: u32 = 0x0100_0000;
+const ORDER_TYPE_DESKTOP: u32 = 0x0400_0000;
+/// MS-RDPERP 2.2.1.3.3.1: the server's desktop is being monitored and
+/// described in full.
+pub const DESKTOP_ARC_COMPLETED: u32 = 0x0000_0004;
 const STATE_NEW: u32 = 0x1000_0000;
 const STATE_DELETED: u32 = 0x2000_0000;
 const FIELD_APPBAR_EDGE: u32 = 0x0000_0001;
@@ -396,6 +457,14 @@ pub fn window_orders(frame: &[u8]) -> Vec<WindowOrder> {
         let Ok(update) = ironrdp_core::decode_cursor::<FastPathUpdatePdu<'_>>(&mut cursor) else {
             break;
         };
+        if update.update_code == UpdateCode::Orders {
+            tracing::trace!(
+                fragmentation = ?update.fragmentation,
+                compressed = update.compression_flags.is_some(),
+                bytes = update.data.len(),
+                "RemoteApp: fast-path orders update"
+            );
+        }
         if update.update_code != UpdateCode::Orders
             || update.fragmentation != Fragmentation::Single
             || update.compression_flags.is_some()
@@ -473,8 +542,11 @@ fn orders(reader: &mut Reader<'_>, count: u16, out: &mut Vec<WindowOrder>) {
 
 fn window_order(r: &mut Reader<'_>) -> Option<WindowOrder> {
     let fields = r.u32()?;
+    if fields & ORDER_TYPE_DESKTOP != 0 {
+        return Some(WindowOrder::Desktop(fields));
+    }
     if fields & ORDER_TYPE_WINDOW == 0 {
-        return None; // notification icon or desktop orders
+        return None; // notification icon orders
     }
     let id = r.u32()?;
     if fields & STATE_DELETED != 0 {
@@ -569,6 +641,7 @@ pub struct Windows {
 impl Windows {
     pub fn apply(&mut self, order: WindowOrder) {
         match order {
+            WindowOrder::Desktop(_) => {}
             WindowOrder::Deleted(id) => {
                 self.windows.remove(&id);
                 self.order.retain(|w| *w != id);
@@ -665,6 +738,20 @@ mod tests {
         let mut frame = vec![0x00, 0x80 | (total >> 8) as u8, total as u8];
         frame.extend_from_slice(&update);
         frame
+    }
+
+    #[test]
+    fn the_desktop_order_says_when_the_desktop_is_ready() {
+        // An Actively Monitored Desktop order with ARC_COMPLETED and an
+        // active window (the order's own fields follow and are skipped).
+        let fields = ORDER_TYPE_DESKTOP | DESKTOP_ARC_COMPLETED | 0x20;
+        let mut body = fields.to_le_bytes().to_vec();
+        body.extend_from_slice(&7u32.to_le_bytes());
+        let mut order = vec![0x2E]; // alternate secondary order, window
+        order.extend_from_slice(&((3 + body.len()) as u16).to_le_bytes());
+        order.extend_from_slice(&body);
+        let frame = fast_path_orders(&[order]);
+        assert_eq!(window_orders(&frame), vec![WindowOrder::Desktop(fields)]);
     }
 
     #[test]

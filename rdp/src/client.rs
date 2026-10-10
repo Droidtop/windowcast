@@ -26,7 +26,7 @@ use windowcast_protocol::{InputEvent, PointerButton};
 
 use crate::remoteapp::{
     slow_path_window_orders, window_orders, RailChannel, RailStatus, RailTap, RemoteApp,
-    RemoteWindow, Windows,
+    RemoteWindow, WindowOrder, Windows,
 };
 use crate::tls::{self, Pinned};
 use crate::RdpError;
@@ -365,6 +365,9 @@ fn run(
             };
             for order in orders {
                 tracing::debug!(?order, "RemoteApp: window order");
+                if let WindowOrder::Desktop(_) = order {
+                    continue;
+                }
                 windows.apply(order);
                 moved = true;
             }
@@ -409,9 +412,17 @@ fn run(
         if let Some(rail) = &rail {
             let outgoing = std::mem::take(&mut rail.lock().expect("rail").outgoing);
             if !outgoing.is_empty() {
+                for pdu in &outgoing {
+                    tracing::trace!(pdu = ?pdu, "RemoteApp: rail PDU to the host");
+                }
                 let messages = outgoing
                     .into_iter()
-                    .map(ironrdp_svc::SvcMessage::from)
+                    .map(|pdu| {
+                        // The rail channel is opened with SHOW_PROTOCOL
+                        // (remoteapp::rail_options), so every chunk says so.
+                        ironrdp_svc::SvcMessage::from(pdu)
+                            .with_flags(ironrdp_svc::ChannelFlags::SHOW_PROTOCOL)
+                    })
                     .collect();
                 let frame = stage
                     .process_svc_processor_messages(

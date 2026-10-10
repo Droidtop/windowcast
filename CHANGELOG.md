@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- RemoteApp works against Windows' own Remote Desktop: `windowcast-rdp connect HOST USER --app PROGRAM` (and `ClientConfig::remote_app`) shows only the program's window. The host's RemoteApp process ignored everything the client sent on the `rail` channel, because IronRDP opened it with no channel options; the client now opens it with INITIALIZED, ENCRYPT_RDP, COMPRESS_RDP and SHOW_PROTOCOL and flags its chunks SHOW_PROTOCOL, as FreeRDP does, and sends FreeRDP's set of system parameters. Tested in CI: Notepad as a RemoteApp on a Windows Server runner.
+
 ## [0.23.1] - 2026-10-10
 
 ### Added

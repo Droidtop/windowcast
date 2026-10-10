@@ -76,6 +76,19 @@ IronRDP has no way to do today:
   when an Orders update carries window orders, so the application keeps
   its own window list; other orders keep being ignored.
 
+- `ironrdp-svc`: a way for an `SvcProcessor` to declare its channel's
+  options (`fn channel_options(&self) -> ChannelOptions`, defaulting to
+  today's `make_channel_options`), and for `encode_svc_messages` to set
+  CHANNEL_FLAG_SHOW_PROTOCOL on every chunk when SHOW_PROTOCOL is among
+  them. `make_channel_options` derives the options from the compression
+  condition alone, so `rail` goes out with options 0. A Windows host's
+  RemoteApp process (rdpinit) then sends its handshake but ignores every
+  client PDU: no Execute Result, no window orders. With the options
+  FreeRDP and mstsc use (INITIALIZED | ENCRYPT_RDP | COMPRESS_RDP |
+  SHOW_PROTOCOL, FreeRDP channels/rail/client/rail_main.c:715, and
+  CHANNEL_FLAG_SHOW_PROTOCOL per chunk, libfreerdp/core/channels.c:99) the
+  same session runs the program.
+
 The `rail` static virtual channel itself (handshake, client status,
 execute, system parameters, activate, ...) can already be added by an
 application through `ClientConnector::with_static_channel`, so this
@@ -98,10 +111,11 @@ Clients built on IronRDP can show a remote desktop but not a single
 remote application (mstsc's and FreeRDP's RemoteApp mode), which is what a
 client wants on a small screen or when it shows one application among its
 own windows. windowcast uses IronRDP for RDP and shows single windows, so
-it needs exactly this; until the change is merged it sets the flag and
-the capability sets by rewriting those two PDUs on their way out and reads
-Orders updates before IronRDP sees them, which a proper option would make
-unnecessary.
+it needs exactly this; until the change is merged it sets the flag, the
+capability sets and the `rail` channel's options by rewriting those three
+PDUs (Client Info, Confirm Active, Connect Initial) on their way out and
+reads Orders updates before IronRDP sees them, which proper options would
+make unnecessary.
 
 ## References
 
