@@ -915,6 +915,7 @@ class MainActivity : Activity() {
             (info.width * scale).toInt().coerceAtLeast(64),
             (info.height * scale).toInt().coerceAtLeast(64),
         )
+        placeAgainstOwner(dialog, info)
         view.setOnTouchListener { v, e -> touchWindow(event.window, v, e) }
         dialog.setOnDismissListener {
             // Closed here (Back, a tap outside): the host stops sending it.
@@ -938,6 +939,28 @@ class MainActivity : Activity() {
             }
         })
         dialog.show()
+    }
+
+    /**
+     * Puts a popup's floating window where it is on the host against its owner, as the owner is
+     * shown on screen now (the watched window's surface), when the host gives both positions.
+     */
+    private fun placeAgainstOwner(dialog: Dialog, info: WindowInfo) {
+        val owner = windows.firstOrNull { it.id == info.owner } ?: return
+        if (owner.id != watching?.id || surface.visibility != View.VISIBLE) return
+        val (px, py) = info.position ?: return
+        val (ox, oy) = owner.position ?: return
+        val origin = IntArray(2)
+        surface.getLocationOnScreen(origin)
+        val sx = surface.width.toFloat() / owner.width.coerceAtLeast(1)
+        val sy = surface.height.toFloat() / owner.height.coerceAtLeast(1)
+        val attributes = dialog.window?.attributes ?: return
+        attributes.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+        attributes.x = origin[0] + ((px - ox) * sx).toInt()
+        attributes.y = origin[1] + ((py - oy) * sy).toInt()
+        attributes.width = (info.width * sx).toInt().coerceAtLeast(32)
+        attributes.height = (info.height * sy).toInt().coerceAtLeast(32)
+        dialog.window?.attributes = attributes
     }
 
     /** The host stopped a popup (it closed): its floating window goes. */

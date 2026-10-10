@@ -181,6 +181,7 @@ mod tests {
             focused: false,
             owner: None,
             kind: crate::WindowKind::Normal,
+            position: None,
             content: classify(app_id, title),
         }
     }

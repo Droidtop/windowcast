@@ -265,6 +265,7 @@ pub fn list_windows() -> Result<Vec<WindowInfo>, ToplevelError> {
                 focused: t.focused,
                 owner: None,
                 kind: windowcast_protocol::WindowKind::Normal,
+                position: None,
             }
         })
         .collect())

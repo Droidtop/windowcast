@@ -225,7 +225,7 @@ A window is a session object, the same whatever carries its picture:
 | Owned by the session | Today | Under this design |
 |---|---|---|
 | Identity, title, owner and kind, popups | session (`WindowInfo`, 0.25.0) | unchanged |
-| Geometry and z-order | size only (`WindowResized`) | position, size and stacking per window (`WindowGeometry`), so a client can place popups and menus where they belong |
+| Geometry and z-order | size only (`WindowResized`) | position, size and stacking per window, so a client can place popups and menus where they belong. Built: `WindowInfo::position` (protocol 11; Windows hosts and RemoteApp windows give it, Wayland does not), the list sent again when it changes, and the list in stacking order; the Windows client opens a popup's window borderless against its owner's stream window, the viewer its floating window against the watched one |
 | Focus | `WindowFocused`, input focus | unchanged |
 | Input (pointer, touch, keys, text) | session, except RDP: client-core sends a window's input over its RDP connection and the RDP server injects it | always the session (`ControlMessage::Input`), one set of rules (input gate, allowed windows, focus); a carrier never carries a windowcast client's input |
 | Gamepads | session (`GamepadSink`) | unchanged; a GameStream carrier's controller channel is not used by windowcast clients |

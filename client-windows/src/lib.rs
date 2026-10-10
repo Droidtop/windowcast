@@ -49,6 +49,23 @@ pub struct Placement {
     /// fullscreen window, or the one a normal window opens on. `None`, or a
     /// number no display has: the primary display.
     pub display: Option<u32>,
+    /// A window placed by its owner (a popup, menu or dialog shown where
+    /// it is on the host, against its owner's stream window): the screen
+    /// rectangle of its client area (left, top, width, height), borderless.
+    pub at: Option<(i32, i32, i32, i32)>,
+    /// The stream window it belongs to, which it stays above.
+    pub owner: Option<isize>,
+}
+
+/// Where a stream window is on screen and how it scales the host's
+/// window, so the windows it owns can be placed against it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct View {
+    pub hwnd: isize,
+    /// Its client area's top-left on screen.
+    pub origin: (i32, i32),
+    /// Screen pixels per host pixel, across and down.
+    pub scale: (f32, f32),
 }
 
 /// One display, in physical pixels.
@@ -104,6 +121,8 @@ pub struct Shared {
     pub switch: Mutex<Option<(StreamSource, u32)>>,
     /// A switch that did not happen, by generation.
     pub cancel_switch: Mutex<Option<u32>>,
+    /// Where the window is on screen, once it shows a picture.
+    pub view: Mutex<Option<View>>,
 }
 
 pub type SharedStats = Arc<Shared>;

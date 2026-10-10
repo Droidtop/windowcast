@@ -191,7 +191,9 @@ fn run(
         .or_else(|| displays.iter().find(|d| d.primary))
         .or_else(|| displays.first())
         .map_or((0, 0, 1280, 720), |d| (d.left, d.top, d.width, d.height));
-    let (style, rect) = if placement.fullscreen {
+    let (style, rect) = if let Some(at) = placement.at {
+        (WS_POPUP | WS_VISIBLE, at)
+    } else if placement.fullscreen {
         (WS_POPUP | WS_VISIBLE, display)
     } else {
         (
@@ -231,7 +233,7 @@ fn run(
             rect.1,
             rect.2,
             rect.3,
-            None,
+            placement.owner.map(|owner| HWND(owner as *mut _)),
             None,
             GetModuleHandleW(None).ok().map(Into::into),
             None,
@@ -474,6 +476,7 @@ fn show(
         let resized = size != state.client;
         state.client = size;
         presenter.resize(size)?;
+        publish_view(hwnd, state, shared);
 
         // A switch asked for, or given up.
         if let Some((source, generation)) = shared.switch.lock().expect("switch").take() {
@@ -528,6 +531,25 @@ fn show(
             &mut bytes_then,
         );
     }
+}
+
+/// Where the window is on screen and how it scales the host's window.
+fn publish_view(hwnd: HWND, state: &WindowState, shared: &Shared) {
+    if state.picture.0 == 0 || state.picture.1 == 0 {
+        return;
+    }
+    let mut origin = windows::Win32::Foundation::POINT::default();
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut origin);
+    }
+    *shared.view.lock().expect("view") = Some(crate::View {
+        hwnd: hwnd.0 as isize,
+        origin: (origin.x, origin.y),
+        scale: (
+            state.client.0 as f32 / state.picture.0 as f32,
+            state.client.1 as f32 / state.picture.1 as f32,
+        ),
+    });
 }
 
 /// Once a second: the rates, and the title of a normal window.

@@ -25,6 +25,7 @@ struct WithPopup {
 impl WindowSource for WithPopup {
     fn list_windows(&self) -> Vec<WindowInfo> {
         let mut windows = TestPatternSource.list_windows();
+        windows[0].position = Some((100, 100));
         if self.open.load(Ordering::SeqCst) {
             let owner = windows[0].clone();
             windows.push(WindowInfo {
@@ -35,6 +36,7 @@ impl WindowSource for WithPopup {
                 focused: false,
                 owner: Some(owner.id),
                 kind: WindowKind::Popup,
+                position: Some((140, 180)),
                 ..owner
             });
         }
@@ -121,7 +123,10 @@ fn wait_for(session: &ClientSession, what: &str, mut wanted: impl FnMut(&Event) 
 
 fn lists_popup(event: &Event) -> bool {
     matches!(event, Event::Windows { windows } if windows.iter().any(|w| {
-        w.id == POPUP && w.owner == Some(WINDOW) && w.kind == WindowKind::Popup
+        w.id == POPUP
+            && w.owner == Some(WINDOW)
+            && w.kind == WindowKind::Popup
+            && w.position == Some((140, 180))
     }))
 }
 

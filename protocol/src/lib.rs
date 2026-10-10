@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped on any incompatible change to the message shapes below. A peer
 /// that receives a mismatched version should refuse the session rather
 /// than guess at how to interpret an unknown wire format.
-pub const PROTOCOL_VERSION: u16 = 10;
+pub const PROTOCOL_VERSION: u16 = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
@@ -35,6 +35,11 @@ pub struct WindowInfo {
     /// (docs/BACKENDS.md, "Window by window, always").
     pub owner: Option<WindowId>,
     pub kind: WindowKind,
+    /// Its top-left corner on the host's desktop, in the same pixels as
+    /// `width` and `height`, when the host knows it (Wayland does not tell
+    /// one client where another's windows are). A client places a popup
+    /// against its owner by the difference of their positions.
+    pub position: Option<(i32, i32)>,
 }
 
 /// What a window is, as far as a client shows it.
@@ -664,6 +669,7 @@ mod tests {
             focused: true,
             owner: None,
             kind: WindowKind::Normal,
+            position: None,
             content: ContentHint::Text,
         }]);
         let bytes = encode(&msg).unwrap();

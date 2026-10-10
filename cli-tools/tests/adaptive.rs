@@ -40,6 +40,7 @@ impl WindowSource for Busy {
             focused: true,
             owner: None,
             kind: windowcast_protocol::WindowKind::Normal,
+            position: None,
             content: ContentHint::General,
         }]
     }

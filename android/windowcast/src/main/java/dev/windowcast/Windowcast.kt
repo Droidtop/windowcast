@@ -35,6 +35,8 @@ data class WindowInfo(
     val owner: Long? = null,
     /** "normal", "dialog", "popup" or "menu". */
     val kind: String = "normal",
+    /** Its top-left on the host's desktop, when the host knows it. */
+    val position: Pair<Int, Int>? = null,
 )
 
 /** Session events, as client-core reports them. */
@@ -68,6 +70,7 @@ sealed interface Event {
                             content = w.getString("content"),
                             owner = if (w.isNull("owner")) null else w.getLong("owner"),
                             kind = w.optString("kind", "normal"),
+                            position = w.optJSONArray("position")?.let { p -> p.getInt(0) to p.getInt(1) },
                         )
                     })
                 }

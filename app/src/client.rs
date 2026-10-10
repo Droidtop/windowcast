@@ -54,6 +54,42 @@ impl Stream {
     }
 }
 
+/// Where a window another owns goes on screen: its rectangle against its
+/// owner's stream window, and that window.
+// Read by the Windows stream window only.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+struct Against {
+    rect: (i32, i32, i32, i32),
+    owner: isize,
+}
+
+/// A popup's, menu's or dialog's place, from its and its owner's positions
+/// on the host and how its owner's stream window shows the owner.
+fn against_owner(state: &State, window: u64) -> Option<Against> {
+    let info = state.windows.iter().find(|w| w.id.0 == window)?;
+    let owner_id = info.owner?;
+    let owner = state.windows.iter().find(|w| w.id == owner_id)?;
+    let (px, py) = info.position?;
+    let (ox, oy) = owner.position?;
+    let view = (*state
+        .streams
+        .get(&owner_id.0)?
+        .shared
+        .view
+        .lock()
+        .expect("view"))?;
+    Some(Against {
+        rect: (
+            view.origin.0 + ((px - ox) as f32 * view.scale.0).round() as i32,
+            view.origin.1 + ((py - oy) as f32 * view.scale.1).round() as i32,
+            ((info.width as f32 * view.scale.0).round() as i32).max(1),
+            ((info.height as f32 * view.scale.1).round() as i32).max(1),
+        ),
+        owner: view.hwnd,
+    })
+}
+
 #[derive(Default)]
 struct State {
     session: Option<Arc<ClientSession>>,
@@ -497,6 +533,7 @@ impl ClientRole {
                         .iter()
                         .find(|info| info.id.0 == window)
                         .map_or_else(|| format!("window {window}"), |info| info.title.clone());
+                    let against = against_owner(&state, window);
                     let stream = state
                         .streams
                         .entry(window)
@@ -509,14 +546,20 @@ impl ClientRole {
                         codec.map(|c| format!(" in {c:?}")).unwrap_or_default()
                     );
                     if backend == BackendKind::Rdp {
-                        self.open_window(&session, stream, window, StreamSource::Pictures, title);
+                        self.open_window(
+                            &session,
+                            stream,
+                            window,
+                            StreamSource::Pictures,
+                            (title, against),
+                        );
                     } else if let Some(codec) = codec {
                         self.open_window(
                             &session,
                             stream,
                             window,
                             StreamSource::Video(codec),
-                            title,
+                            (title, against),
                         );
                     }
                     drop(state);
@@ -608,7 +651,7 @@ impl ClientRole {
         stream: &mut Stream,
         window: u64,
         source: StreamSource,
-        title: String,
+        (title, against): (String, Option<Against>),
     ) {
         let config = self.settings();
         stream.close_window();
@@ -617,9 +660,21 @@ impl ClientRole {
             .shared
             .send_input
             .store(config.send_input, Ordering::SeqCst);
-        let placement = Placement {
-            fullscreen: config.fullscreen,
-            display: (config.display > 0).then_some(config.display as u32),
+        // A popup, menu or dialog sits where it is on the host against its
+        // owner's stream window; any other window by the settings.
+        let placement = match against {
+            Some(against) => Placement {
+                fullscreen: false,
+                display: None,
+                at: Some(against.rect),
+                owner: Some(against.owner),
+            },
+            None => Placement {
+                fullscreen: config.fullscreen,
+                display: (config.display > 0).then_some(config.display as u32),
+                at: None,
+                owner: None,
+            },
         };
         stream.window = Some(windowcast_client_windows::open(
             Arc::clone(session),
@@ -638,7 +693,7 @@ impl ClientRole {
         stream: &mut Stream,
         _: u64,
         _: StreamSource,
-        _: String,
+        _: (String, Option<Against>),
     ) {
         let _ = (Placement::default(), Ordering::SeqCst);
         let mut stats = stream.shared.stats.lock().expect("stats");

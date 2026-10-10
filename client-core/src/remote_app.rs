@@ -96,6 +96,7 @@ pub(crate) fn infos(shared: &Shared) -> Vec<WindowInfo> {
                     focused: false,
                     owner: w.owner.map(|o| window_id(conn.key, o)),
                     kind: w.kind,
+                    position: Some((w.rect.x, w.rect.y)),
                     content: ContentHint::Text,
                 }
             })
@@ -134,6 +135,7 @@ impl ClientSession {
             focused: false,
             owner: None,
             kind: windowcast_protocol::WindowKind::Normal,
+            position: None,
         };
         let rules = self.rules.lock().expect("rules");
         selection::choose_backend(&window, &rules) == BackendKind::Rdp

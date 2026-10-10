@@ -142,7 +142,7 @@ unsafe fn shown(hwnd: HWND) -> bool {
             return false;
         }
     }
-    size(hwnd).is_some_and(|(w, h)| w > 0 && h > 0)
+    bounds(hwnd).is_some_and(|(_, _, w, h)| w > 0 && h > 0)
 }
 
 fn candidate(hwnd: HWND) -> Candidate {
@@ -172,7 +172,8 @@ fn describe(
     owner: Option<HWND>,
 ) -> WindowInfo {
     let app_id = executable(c.hwnd).unwrap_or_default();
-    let (width, height) = size(c.hwnd).unwrap_or((0, 0));
+    let bounds = bounds(c.hwnd);
+    let (width, height) = bounds.map_or((0, 0), |b| (b.2, b.3));
     // An untitled popup or menu is named after its owner.
     let title = c.title.clone().unwrap_or_else(|| {
         let what = match kind {
@@ -199,6 +200,7 @@ fn describe(
         content,
         owner: owner.map(|o| WindowId(o.0 as usize as u64)),
         kind,
+        position: bounds.map(|b| (b.0, b.1)),
     }
 }
 
@@ -231,8 +233,9 @@ fn executable(hwnd: HWND) -> Option<String> {
     }
 }
 
-/// The window's visible bounds (without the invisible resize border).
-fn size(hwnd: HWND) -> Option<(u32, u32)> {
+/// The window's visible bounds (without the invisible resize border):
+/// left, top, width and height on the desktop.
+fn bounds(hwnd: HWND) -> Option<(i32, i32, u32, u32)> {
     let mut rect = RECT::default();
     unsafe {
         DwmGetWindowAttribute(
@@ -244,6 +247,8 @@ fn size(hwnd: HWND) -> Option<(u32, u32)> {
         .ok()?;
     }
     Some((
+        rect.left,
+        rect.top,
         (rect.right - rect.left).max(0) as u32,
         (rect.bottom - rect.top).max(0) as u32,
     ))
