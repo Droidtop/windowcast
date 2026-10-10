@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Window positions (Droidtop/tracker#457 step 4, protocol 11): `WindowInfo::position` is the window's top-left on the host (Windows hosts and RemoteApp windows; Wayland does not say). The Windows client opens a popup's, menu's or dialog's window borderless and above its owner's stream window, where it is on the host against its owner (`Placement::at`, `owner`; each stream window publishes its `View`); the viewer places a popup's floating window the same way against the watched window.
 
+### Fixed
+- Viewer: a carrier switch, by hand or by itself, no longer drops to the connect form ("Stream ended after N pictures"): the replaced carrier's end, which the switch causes, ended the stream now on the new carrier. A renderer's callbacks act only while it is the stream's renderer, a stream that really ends is stopped (renderer and sound), and a surface stops the renderer drawing on it before it is destroyed, so no decoder writes to a surface that is gone (the "SoftwareRenderer dequeueBuffer -19" lines) (Droidtop/tracker#463).
+- `windowcast-testhost --carriers native` offers video only, so a switch to RDP pictures is refused (for trying a refused switch).
+
 ## [0.28.1] - 2026-10-10
 
 ### Fixed

@@ -90,6 +90,22 @@ class MainActivity : Activity() {
 
     private var switching: Switch? = null
 
+    /**
+     * The renderer drawing on each surface: stopped when that surface is destroyed, before the
+     * callback returns, so no decoder writes to a surface that is gone (#463).
+     */
+    private val drawing = mutableMapOf<SurfaceView, WindowRenderer>()
+
+    private fun watchSurface(view: SurfaceView) {
+        view.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {}
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                drawing.remove(view)?.stop()
+            }
+        })
+    }
+
     /** The carrier the watched window is on ("Native", "Rdp"), for the switch menu. */
     private var carrier: String? = null
     private lateinit var terminalView: TerminalView
@@ -237,6 +253,8 @@ class MainActivity : Activity() {
             visibility = View.GONE
             setOnTouchListener { view, event -> touch(view, event) }
         }
+        watchSurface(surface)
+        watchSurface(spare)
         clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
             val text = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()
@@ -671,34 +689,41 @@ class MainActivity : Activity() {
         val s = session ?: return
         form.visibility = View.GONE
         surface.visibility = View.VISIBLE
+        val view = surface
         val begin = {
-            decoder = if (event.backend == "Rdp") {
-                WindowPictures(s, event.window, surface.holder) { stats ->
-                    main.post {
-                        if (surface.visibility == View.VISIBLE) {
-                            title = "${window.title}: ${stats.pictures} pictures over RDP, ${stats.width}x${stats.height}"
-                        }
-                        if (stats.ended) {
-                            status.text = "Stream ended after ${stats.pictures} pictures" +
-                                (stats.error?.let { ": $it" } ?: "")
-                            showForm()
+            // Its callbacks act only while it is the stream's renderer: a carrier switch stops
+            // it, and its end must not end the stream now on the new carrier (#463).
+            var mine: WindowRenderer? = null
+            val report = { line: String, ended: Boolean, count: Long, error: String? ->
+                main.post {
+                    if (decoder === mine) {
+                        if (surface.visibility == View.VISIBLE) title = "${window.title}: $line"
+                        if (ended) {
+                            status.text = "Stream ended after $count pictures" + (error?.let { ": $it" } ?: "")
+                            stopDecoding()
                         }
                     }
+                }
+            }
+            mine = if (event.backend == "Rdp") {
+                WindowPictures(s, event.window, view.holder) { stats ->
+                    report(
+                        "${stats.pictures} pictures over RDP, ${stats.width}x${stats.height}",
+                        stats.ended, stats.pictures, stats.error,
+                    )
                 }
             } else {
-                WindowDecoder(s, event.window, surface.holder.surface, window.width, window.height) { stats ->
-                    main.post {
-                        if (surface.visibility == View.VISIBLE) {
-                            title = "${window.title}: ${stats.frames} frames (${stats.codec ?: event.codec}), sound $soundPackets packets"
-                        }
-                        if (stats.ended) {
-                            status.text = "Stream ended after ${stats.frames} frames" +
-                                (stats.error?.let { ": $it" } ?: "")
-                            showForm()
-                        }
-                    }
+                WindowDecoder(s, event.window, view.holder.surface, window.width, window.height) { stats ->
+                    report(
+                        "${stats.frames} frames (${stats.codec ?: event.codec}), sound $soundPackets packets",
+                        stats.ended, stats.frames, stats.error,
+                    )
                 }
-            }.also { it.start() }
+            }.also {
+                drawing[view] = it
+                it.start()
+            }
+            decoder = mine
             soundPackets = 0
             audio = AudioPlayer(s, event.window) { packets -> soundPackets = packets }.also { it.start() }
         }
@@ -998,7 +1023,7 @@ class MainActivity : Activity() {
                         if (surface.visibility == View.VISIBLE) title = "${window.title}: $line"
                         if (ended) {
                             status.text = "Stream ended" + (error?.let { ": $it" } ?: "")
-                            showForm()
+                            stopDecoding()
                         }
                     }
                 }
@@ -1013,7 +1038,10 @@ class MainActivity : Activity() {
                     if (stats.frames > 0) onShown()
                     report("${stats.frames} frames (${stats.codec ?: event.codec})", stats.ended, stats.error)
                 }
-            }).also { it.start() }
+            }).also {
+                drawing[view] = it
+                it.start()
+            }
         }
         if (view.holder.surface?.isValid == true) {
             begin(view.holder)
@@ -1037,12 +1065,11 @@ class MainActivity : Activity() {
         switching = null
         carrier = pending.backend
         invalidateOptionsMenu()
-        val old = decoder
         decoder = pending.renderer
-        old?.let { d -> worker.execute { d.stop() } }
         val shown = surface
         surface = view
         spare = shown
+        // Hiding it destroys its surface, which stops its renderer first.
         shown.visibility = View.GONE
         worker.execute { s.carrierShown(window.id, pending.generation) }
     }
@@ -1051,8 +1078,11 @@ class MainActivity : Activity() {
     private fun cancelSwitch() {
         val pending = switching ?: return
         switching = null
-        pending.renderer?.let { r -> worker.execute { r.stop() } }
         spare.visibility = View.GONE
+        // A renderer that never got its surface on screen stops here.
+        pending.renderer?.let { r ->
+            if (drawing.values.none { it === r }) worker.execute { r.stop() }
+        }
         invalidateOptionsMenu()
     }
 

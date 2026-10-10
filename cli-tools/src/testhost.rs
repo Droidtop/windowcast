@@ -4,7 +4,9 @@
 //! sessions and streams are the real host library.
 //!
 //! Usage: `windowcast-testhost [--listen ADDR:PORT] [--no-pairing] [--tone]
-//! [--microphone-level] [--content general|text|game|video]` (`--content`: the
+//! [--microphone-level] [--content general|text|game|video] [--carriers native,rdp]`
+//! (`--carriers`: the carriers offered, both by default; `--carriers native`
+//! refuses a switch to RDP pictures, for trying a refused switch; `--content`: the
 //! window's content hint, which the default rules turn into a backend, so
 //! `--content text` makes a client get RDP; `--tone`: the window also sounds a 440 Hz tone,
 //! for trying a client's audio; `--microphone-level`: a client's
@@ -90,6 +92,7 @@ async fn main() {
     let mut tone = false;
     let mut measure = false;
     let mut content = None;
+    let mut rdp = true;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -105,6 +108,14 @@ async fn main() {
                     panic!("unknown content {name}");
                 };
                 content = Some(hint);
+            }
+            "--carriers" => {
+                let list = args.next().expect("--carriers needs a list: native, rdp");
+                let names: Vec<&str> = list.split(',').map(str::trim).collect();
+                if let Some(unknown) = names.iter().find(|n| !matches!(**n, "native" | "rdp")) {
+                    panic!("unknown carrier {unknown} (native, rdp)");
+                }
+                rdp = names.contains(&"rdp");
             }
             other => panic!("unknown argument {other}"),
         }
@@ -130,14 +141,18 @@ async fn main() {
     };
     // RDP for clients that ask for it (windowcast-rdp is the protocol's
     // own client; windowcast clients get the login over the session).
-    let source: Arc<dyn WindowSource> =
+    let source: Arc<dyn WindowSource> = if !rdp {
+        println!("carriers: native only (a switch to RDP is refused)");
+        source
+    } else {
         match windowcast_rdp::host::WithRdp::new(source, std::net::IpAddr::from([0, 0, 0, 0])) {
             Ok(with_rdp) => Arc::new(with_rdp),
             Err(e) => {
                 eprintln!("no RDP: {e}");
                 std::process::exit(1);
             }
-        };
+        }
+    };
     if let Err(e) = windowcast_host::run(config, source).await {
         eprintln!("host stopped: {e}");
         std::process::exit(1);
