@@ -123,7 +123,8 @@ jobs:
             Add-LocalGroupMember -Group "Remote Desktop Users" -Member $name
           }
           $env:WINDOWCAST_TEST_WINDOWS_RDP_USER = "wcrdp"
-          $env:WINDOWCAST_TEST_WINDOWS_RDP_APP_USER = "wcrdpapp"
+          # The RemoteApp test (WINDOWCAST_TEST_WINDOWS_RDP_APP_USER=wcrdpapp)
+          # is off until a window appears: the server logs the session off.
           $env:WINDOWCAST_TEST_WINDOWS_RDP_PASSWORD = $password
           cargo test -p windowcast-rdp --no-fail-fast -- --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
