@@ -181,6 +181,12 @@ pub struct RailStatus {
     pub started: bool,
     /// The Server Execute Result, when it came: 0 is success.
     pub exec_result: Option<u16>,
+    /// PDUs for the client to send on the channel. They go out through
+    /// the session's own sender (ActiveStage::process_svc_processor_
+    /// messages, with the client's MCS user ID): a reply returned from
+    /// `process` is sent with the server's ID as the initiator instead
+    /// (ironrdp-session x224 `process_svc_messages`).
+    pub outgoing: Vec<Vec<u8>>,
 }
 
 /// The `rail` static virtual channel, client side.
@@ -267,11 +273,8 @@ impl SvcProcessor for RailChannel {
                     return Ok(Vec::new());
                 }
                 status.started = true;
-                Ok(self
-                    .start_messages()
-                    .into_iter()
-                    .map(SvcMessage::from)
-                    .collect())
+                status.outgoing.extend(self.start_messages());
+                Ok(Vec::new())
             }
             RAIL_EXEC_RESULT if payload.len() >= 12 => {
                 // Flags (2), ExecResult (2), RawResult (4), ...

@@ -5,12 +5,18 @@
 //! job enables Remote Desktop and makes the user):
 //! WINDOWCAST_TEST_WINDOWS_RDP_USER and WINDOWCAST_TEST_WINDOWS_RDP_PASSWORD.
 
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use windowcast_rdp::client::{connect, ClientConfig};
 
+/// One login at a time: two at once have had Windows end one TLS
+/// handshake with an internal error (run 38015612165).
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
 #[test]
 fn our_client_logs_in_to_windows_remote_desktop() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let (Ok(user), Ok(password)) = (
         std::env::var("WINDOWCAST_TEST_WINDOWS_RDP_USER"),
         std::env::var("WINDOWCAST_TEST_WINDOWS_RDP_PASSWORD"),
@@ -67,6 +73,7 @@ fn our_client_logs_in_to_windows_remote_desktop() {
 
 #[test]
 fn our_client_runs_notepad_as_a_remoteapp() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     // A user of its own: a second login of the same user would take over
     // the desktop test's session, which is no RemoteApp session.
     let (Ok(user), Ok(password)) = (

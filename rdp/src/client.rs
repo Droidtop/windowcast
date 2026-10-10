@@ -267,7 +267,8 @@ pub fn connect(config: &ClientConfig) -> Result<RdpStream, RdpError> {
                 tx: pictures_tx,
                 latest,
             };
-            if let Err(e) = run(result, framed, pictures_tx, input_rx, &stop, remote_app) {
+            let rail = remote_app.then_some(rail);
+            if let Err(e) = run(result, framed, pictures_tx, input_rx, &stop, rail) {
                 eprintln!("rdp: the session ended: {e}");
             }
             ended.store(true, Ordering::SeqCst);
@@ -290,8 +291,9 @@ fn run(
     pictures: Pictures,
     input: Receiver<InputEvent>,
     stop: &AtomicBool,
-    remote_app: bool,
+    rail: Option<Arc<std::sync::Mutex<RailStatus>>>,
 ) -> Result<(), RdpError> {
+    let remote_app = rail.is_some();
     let size = result.desktop_size;
     // What the client sees: the desktop, or for RemoteApp the program's
     // window, once the server has described it.
@@ -375,6 +377,23 @@ fn run(
         }
         if !handle(&mut framed, outputs, &image, &pictures, area)? {
             return Ok(());
+        }
+        // What the rail channel has to say.
+        if let Some(rail) = &rail {
+            let outgoing = std::mem::take(&mut rail.lock().expect("rail").outgoing);
+            if !outgoing.is_empty() {
+                let messages = outgoing
+                    .into_iter()
+                    .map(ironrdp_svc::SvcMessage::from)
+                    .collect();
+                let frame = stage
+                    .process_svc_processor_messages(
+                        ironrdp_svc::SvcProcessorMessages::<RailChannel>::new(messages),
+                    )
+                    .map_err(session)?;
+                tracing::debug!(bytes = frame.len(), "RemoteApp: rail PDUs sent");
+                framed.write_all(&frame)?;
+            }
         }
     }
     // Leave politely.
