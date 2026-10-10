@@ -1,6 +1,7 @@
 //! Our RDP client against Windows' own Remote Desktop: it logs in to the
 //! local machine (TLS and NLA with NTLM) as a user made for the test and
-//! sees the session's desktop. Runs only where that is set up (CI's Windows
+//! sees the session's desktop; and as a RemoteApp client, it has Notepad
+//! run and sees only Notepad's window (CI allows unlisted programs). Runs only where that is set up (CI's Windows
 //! job enables Remote Desktop and makes the user):
 //! WINDOWCAST_TEST_WINDOWS_RDP_USER and WINDOWCAST_TEST_WINDOWS_RDP_PASSWORD.
 
@@ -32,6 +33,7 @@ fn our_client_logs_in_to_windows_remote_desktop() {
         domain: None,
         size: (1280, 720),
         pinned: None,
+        remote_app: None,
     })
     .unwrap();
     println!("logged in: desktop {:?}", stream.size);
@@ -61,4 +63,49 @@ fn our_client_logs_in_to_windows_remote_desktop() {
     println!("{pictures} picture updates; varied: {varied}");
     assert!(pictures >= 3, "only {pictures} pictures");
     assert!(varied, "the desktop is one flat colour");
+}
+
+#[test]
+fn our_client_runs_notepad_as_a_remoteapp() {
+    let (Ok(user), Ok(password)) = (
+        std::env::var("WINDOWCAST_TEST_WINDOWS_RDP_USER"),
+        std::env::var("WINDOWCAST_TEST_WINDOWS_RDP_PASSWORD"),
+    ) else {
+        println!("skipped: set WINDOWCAST_TEST_WINDOWS_RDP_USER and _PASSWORD");
+        return;
+    };
+    let stream = connect(&ClientConfig {
+        address: "127.0.0.1:3389".parse().unwrap(),
+        server_name: "localhost".into(),
+        username: user,
+        password,
+        domain: None,
+        size: (1280, 720),
+        pinned: None,
+        remote_app: Some(windowcast_rdp::remoteapp::RemoteApp {
+            program: "C:\\Windows\\System32\\notepad.exe".into(),
+            arguments: String::new(),
+            working_dir: String::new(),
+        }),
+    })
+    .unwrap();
+    // Pictures come once the server has described Notepad's window, and
+    // are that window: smaller than the desktop.
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let picture = loop {
+        assert!(Instant::now() < deadline, "no RemoteApp window appeared");
+        assert!(
+            !stream.ended.load(std::sync::atomic::Ordering::SeqCst),
+            "the session ended"
+        );
+        if let Ok(picture) = stream.next_picture(Duration::from_millis(500)) {
+            break picture;
+        }
+    };
+    println!("RemoteApp window: {}x{}", picture.width, picture.height);
+    assert!(picture.width >= 100 && picture.height >= 100);
+    assert!(
+        (picture.width, picture.height) != (1280, 720),
+        "the whole desktop came, not a window"
+    );
 }

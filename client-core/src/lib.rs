@@ -883,6 +883,7 @@ fn connect_rdp(
                 domain: None,
                 size,
                 pinned: target.certificate_sha256,
+                remote_app: None,
             })
             .map_err(|e| e.to_string()),
             None => Err("the host's RDP address is not reachable from here".to_owned()),

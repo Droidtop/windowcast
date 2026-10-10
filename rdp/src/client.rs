@@ -24,6 +24,9 @@ use ironrdp_session::image::DecodedImage;
 use ironrdp_session::{ActiveStageBuilder, ActiveStageOutput};
 use windowcast_protocol::{InputEvent, PointerButton};
 
+use crate::remoteapp::{
+    window_orders, RailChannel, RailStatus, RailTap, RemoteApp, RemoteWindow, Windows,
+};
 use crate::tls::{self, Pinned};
 use crate::RdpError;
 
@@ -41,6 +44,10 @@ pub struct ClientConfig {
     /// The host certificate's SHA-256 to insist on; `None` takes any and
     /// reports it in [`RdpStream::fingerprint`].
     pub pinned: Option<[u8; 32]>,
+    /// Run this program on the host and show only its window (RemoteApp)
+    /// instead of the desktop. `size` is then the desktop the program's
+    /// window lives on.
+    pub remote_app: Option<RemoteApp>,
 }
 
 /// The host's whole picture after a change: RGBA, tightly packed.
@@ -91,7 +98,7 @@ impl Drop for RdpStream {
     }
 }
 
-type Tls = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
+type Tls = RailTap<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>;
 
 /// Answers sspi's requests for a Kerberos KDC: there is none here, so NLA
 /// uses NTLM (as it does with a local account or an address for a name).
@@ -179,6 +186,14 @@ pub fn connect(config: &ClientConfig) -> Result<RdpStream, RdpError> {
 
     let mut framed = Framed::new(tcp);
     let mut connector = ClientConnector::new(connector_config(config), client_addr);
+    let rail = Arc::new(std::sync::Mutex::new(RailStatus::default()));
+    if let Some(app) = &config.remote_app {
+        connector.attach_static_channel(RailChannel::new(
+            app.clone(),
+            config.size,
+            Arc::clone(&rail),
+        ));
+    }
     let should_upgrade =
         ironrdp_blocking::connect_begin(&mut framed, &mut connector).map_err(connect_err)?;
 
@@ -198,7 +213,7 @@ pub fn connect(config: &ClientConfig) -> Result<RdpStream, RdpError> {
         .map_err(|e| RdpError::Tls(e.to_string()))?;
     let session = rustls::ClientConnection::new(Arc::new(tls_config), name)
         .map_err(|e| RdpError::Tls(e.to_string()))?;
-    let mut stream: Tls = rustls::StreamOwned::new(session, tcp);
+    let mut stream = rustls::StreamOwned::new(session, tcp);
     stream.flush()?;
     let cert = stream
         .conn
@@ -210,6 +225,12 @@ pub fn connect(config: &ClientConfig) -> Result<RdpStream, RdpError> {
     let public_key = tls::public_key(&cert)?;
 
     let upgraded = ironrdp_blocking::mark_as_upgraded(should_upgrade, &mut connector);
+    // A RemoteApp session asks for it in two PDUs IronRDP writes itself.
+    let stream = if config.remote_app.is_some() {
+        RailTap::new(stream)
+    } else {
+        RailTap::passthrough(stream)
+    };
     let mut framed = Framed::new(stream);
     let result = ironrdp_blocking::connect_finalize(
         upgraded,
@@ -223,6 +244,7 @@ pub fn connect(config: &ClientConfig) -> Result<RdpStream, RdpError> {
     .map_err(connect_err)?;
 
     let size = (result.desktop_size.width, result.desktop_size.height);
+    let remote_app = config.remote_app.is_some();
     let (pictures_tx, pictures) = mpsc::sync_channel(2);
     let (input, input_rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
@@ -232,7 +254,7 @@ pub fn connect(config: &ClientConfig) -> Result<RdpStream, RdpError> {
     {
         let (stop, ended) = (Arc::clone(&stop), Arc::clone(&ended));
         std::thread::spawn(move || {
-            if let Err(e) = run(result, framed, pictures_tx, input_rx, &stop) {
+            if let Err(e) = run(result, framed, pictures_tx, input_rx, &stop, remote_app) {
                 eprintln!("rdp: the session ended: {e}");
             }
             ended.store(true, Ordering::SeqCst);
@@ -254,8 +276,19 @@ fn run(
     pictures: SyncSender<RgbaPicture>,
     input: Receiver<InputEvent>,
     stop: &AtomicBool,
+    remote_app: bool,
 ) -> Result<(), RdpError> {
     let size = result.desktop_size;
+    // What the client sees: the desktop, or for RemoteApp the program's
+    // window, once the server has described it.
+    let desktop = Area {
+        x: 0,
+        y: 0,
+        width: size.width,
+        height: size.height,
+    };
+    let mut windows = Windows::default();
+    let mut area = (!remote_app).then_some(desktop);
     let mut image = DecodedImage::new(PixelFormat::RgbA32, size.width, size.height);
     let mut stage = ActiveStageBuilder {
         static_channels: result.static_channels,
@@ -275,14 +308,16 @@ fn run(
         // Input first, so a busy host does not hold it up.
         let mut operations = Vec::new();
         while let Ok(event) = input.try_recv() {
-            operations.extend(operations_for(&event, size));
+            if let Some(area) = area {
+                operations.extend(operations_for(&event, area));
+            }
         }
         if !operations.is_empty() {
             let events = keys.apply(operations);
             let outputs = stage
                 .process_fastpath_input(&mut image, &events)
                 .map_err(session)?;
-            if !handle(&mut framed, outputs, &image, &pictures)? {
+            if !handle(&mut framed, outputs, &image, &pictures, area)? {
                 return Ok(());
             }
         }
@@ -299,10 +334,31 @@ fn run(
             }
             Err(e) => return Err(e.into()),
         };
-        let outputs = stage
+        let mut moved = false;
+        if remote_app && action == ironrdp_pdu::Action::FastPath {
+            for order in window_orders(&payload) {
+                windows.apply(order);
+                moved = true;
+            }
+            if moved {
+                area = windows.main().map(|w| Area::of(w, desktop));
+            }
+        }
+        let mut outputs = stage
             .process(&mut image, action, &payload)
             .map_err(session)?;
-        if !handle(&mut framed, outputs, &image, &pictures)? {
+        if moved {
+            // The window moved or appeared: hand out its picture again.
+            outputs.push(ActiveStageOutput::GraphicsUpdate(
+                ironrdp_pdu::geometry::InclusiveRectangle {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                },
+            ));
+        }
+        if !handle(&mut framed, outputs, &image, &pictures, area)? {
             return Ok(());
         }
     }
@@ -324,6 +380,7 @@ fn handle(
     outputs: Vec<ActiveStageOutput>,
     image: &DecodedImage,
     pictures: &SyncSender<RgbaPicture>,
+    area: Option<Area>,
 ) -> Result<bool, RdpError> {
     let mut changed = false;
     for output in outputs {
@@ -347,22 +404,59 @@ fn handle(
             _ => {}
         }
     }
-    if changed {
+    if let (true, Some(area)) = (changed, area) {
         // A consumer that is behind gets the newest picture next time.
-        let _ = pictures.try_send(RgbaPicture {
-            width: u32::from(image.width()),
-            height: u32::from(image.height()),
-            data: image.data().to_vec(),
-        });
+        let _ = pictures.try_send(area.cut(image));
     }
     Ok(true)
 }
 
-/// RDP input for one windowcast event.
-fn operations_for(event: &InputEvent, size: DesktopSize) -> Vec<Operation> {
+/// The part of the desktop the client shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Area {
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+}
+
+impl Area {
+    /// A remote window's rectangle, kept inside the desktop.
+    fn of(window: &RemoteWindow, desktop: Area) -> Area {
+        let x = window.offset.0.clamp(0, i32::from(desktop.width) - 1) as u16;
+        let y = window.offset.1.clamp(0, i32::from(desktop.height) - 1) as u16;
+        let width = (window.size.0.min(u32::from(desktop.width - x)) as u16).max(1);
+        let height = (window.size.1.min(u32::from(desktop.height - y)) as u16).max(1);
+        Area {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// This part of the picture, as its own RGBA picture.
+    fn cut(&self, image: &DecodedImage) -> RgbaPicture {
+        let stride = usize::from(image.width()) * 4;
+        let row = usize::from(self.width) * 4;
+        let mut data = Vec::with_capacity(row * usize::from(self.height));
+        for y in 0..usize::from(self.height) {
+            let start = (usize::from(self.y) + y) * stride + usize::from(self.x) * 4;
+            data.extend_from_slice(&image.data()[start..start + row]);
+        }
+        RgbaPicture {
+            width: u32::from(self.width),
+            height: u32::from(self.height),
+            data,
+        }
+    }
+}
+
+/// RDP input for one windowcast event, positions within `area`.
+fn operations_for(event: &InputEvent, area: Area) -> Vec<Operation> {
     let position = |x: f32, y: f32| MousePosition {
-        x: (x.clamp(0.0, 1.0) * f32::from(size.width.max(1) - 1)).round() as u16,
-        y: (y.clamp(0.0, 1.0) * f32::from(size.height.max(1) - 1)).round() as u16,
+        x: area.x + (x.clamp(0.0, 1.0) * f32::from(area.width.max(1) - 1)).round() as u16,
+        y: area.y + (y.clamp(0.0, 1.0) * f32::from(area.height.max(1) - 1)).round() as u16,
     };
     match event {
         InputEvent::PointerMove { x, y, .. } => vec![Operation::MouseMove(position(*x, *y))],

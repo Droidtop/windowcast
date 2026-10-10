@@ -109,6 +109,9 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1
           Start-Service TermService -ErrorAction SilentlyContinue
+          # RemoteApp: let any program run (the test runs Notepad).
+          if (-not (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Terminal Server\TSAppAllowList')) { New-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Terminal Server\TSAppAllowList' | Out-Null }
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Terminal Server\TSAppAllowList' -Name fDisabledAllowList -Value 1 -Type DWord
           $password = "Wc-" + [guid]::NewGuid().ToString("N") + "-9a"
           Write-Output "::add-mask::$password"
           # New-LocalUser, not net user: net user asks before taking a

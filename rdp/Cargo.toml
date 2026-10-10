@@ -33,6 +33,8 @@ ironrdp-blocking = "0.10"
 ironrdp-input = "0.7"
 ironrdp-pdu = "0.9"
 ironrdp-graphics = "0.9"
+ironrdp-svc = "0.8"
+ironrdp-core = "0.2"
 anyhow = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

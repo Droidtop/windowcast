@@ -75,6 +75,7 @@ fn our_client_sees_and_drives_a_window_over_our_rdp_host() {
         domain: None,
         size: (1024, 768),
         pinned: Some(fingerprint),
+        remote_app: None,
     };
     assert!(
         connect(&config("not it")).is_err(),

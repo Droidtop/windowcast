@@ -2,9 +2,11 @@
 //! hosts and clients.
 //!
 //! Usage:
-//!   windowcast-rdp connect HOST[:PORT] USER [SECONDS]
+//!   windowcast-rdp connect HOST[:PORT] USER [SECONDS] [--app PROGRAM]
 //!       logs in (the password from WINDOWCAST_RDP_PASSWORD), reports the
-//!       host's certificate fingerprint, the desktop and the pictures seen
+//!       host's certificate fingerprint, the desktop and the pictures seen;
+//!       with --app, runs PROGRAM on the host as a RemoteApp and shows only
+//!       its window
 //!   windowcast-rdp serve [ADDRESS] [USER]
 //!       serves the test pattern window over RDP (default 127.0.0.1:3389),
 //!       the password from WINDOWCAST_RDP_PASSWORD
@@ -29,6 +31,15 @@ fn main() {
                 fail("usage: windowcast-rdp connect HOST[:PORT] USER [SECONDS]")
             };
             let seconds: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(10);
+            let remote_app = args
+                .iter()
+                .position(|a| a == "--app")
+                .and_then(|i| args.get(i + 1))
+                .map(|program| windowcast_rdp::remoteapp::RemoteApp {
+                    program: program.clone(),
+                    arguments: String::new(),
+                    working_dir: String::new(),
+                });
             let with_port = if host.contains(':') && !host.starts_with('[') {
                 host.clone()
             } else {
@@ -54,6 +65,7 @@ fn main() {
                 domain,
                 size: (1280, 720),
                 pinned: None,
+                remote_app,
             })
             .unwrap_or_else(|e| fail(&e.to_string()));
             let hex: String = stream
@@ -68,7 +80,10 @@ fn main() {
             let started = Instant::now();
             let mut pictures = 0u64;
             while started.elapsed() < Duration::from_secs(seconds) {
-                if stream.next_picture(Duration::from_millis(200)).is_ok() {
+                if let Ok(picture) = stream.next_picture(Duration::from_millis(200)) {
+                    if pictures == 0 {
+                        println!("first picture: {}x{}", picture.width, picture.height);
+                    }
                     pictures += 1;
                 }
                 if stream.ended.load(std::sync::atomic::Ordering::SeqCst) {
