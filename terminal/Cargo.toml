@@ -1,0 +1,28 @@
+[package]
+name = "windowcast-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The client end of the command stream (docs/COMMAND-STREAM.md) that does
+# not depend on the transport: the channel a shell or command is read and
+# written through, the screen model that turns a shell's bytes into cells,
+# and an SSH client that opens the same kinds of channel on any SSH server.
+
+[dependencies]
+windowcast-protocol = { path = "../protocol" }
+# ring, not the default aws-lc-rs: it cross-compiles for Android without a
+# C++ toolchain beyond the NDK's.
+russh = { version = "0.64", default-features = false, features = ["ring", "flate2", "rsa"] }
+vt100 = "0.16"
+tokio = { workspace = true, features = ["net", "time", "sync", "rt"] }
+tracing.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json = "1"
+base64 = "0.22"
+
+[dev-dependencies]
+windowcast-pty = { path = "../pty" }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros"] }
+rand = { version = "0.10", features = ["thread_rng"] }
