@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.25.0] - 2026-10-10
 
 ### Added
 - Window by window, always (docs/BACKENDS.md): every dialog, popup and menu is its own window-list entry. `WindowInfo` gains `owner` and `kind` (normal, dialog, popup, menu); protocol version 9. The Windows agent lists the windows the Alt+Tab ones own and the menus, tooltips and drop-downs their threads show, and captures a window Windows.Graphics.Capture refuses (menus, tooltips) from its part of the screen. RemoteApp sessions list each window too.
