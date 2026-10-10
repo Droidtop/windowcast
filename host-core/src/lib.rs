@@ -926,9 +926,18 @@ impl Host {
                     target: StreamTarget::Window(window),
                     options,
                 } => {
-                    let response = match self.start(&session, peer, window, &options, &rtt).await {
-                        Ok(started) => {
-                            streams.insert(window, started.stream);
+                    // RDP input goes to the window over its own connection,
+                    // past the session's input rule: an account that may
+                    // not drive windows gets them natively instead.
+                    let options =
+                        if decision.input == Some(false) && options.backend == BackendKind::Rdp {
+                            StreamOptions {
+                                backend: BackendKind::Native,
+                                ..options
+                            }
+                        } else {
+                            options
+                        };
                     let allowed = self.window_allowed(&decision, window).await;
                     let started = if allowed {
                         self.start(&session, peer, window, &options, &rtt).await
@@ -936,8 +945,8 @@ impl Host {
                         Err("not allowed for this account".to_owned())
                     };
                     let response = match started {
-                        Ok((stream, track, backend)) => {
-                            streams.insert(window, stream);
+                        Ok(started) => {
+                            streams.insert(window, started.stream);
                             ControlMessage::StreamStartResponse {
                                 target: StreamTarget::Window(window),
                                 accepted: true,

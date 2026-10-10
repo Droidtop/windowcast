@@ -28,11 +28,9 @@ use windowcast_accounts::oidc::{BrowserSignIn, DeviceSignIn, OidcError};
 use windowcast_identity::{Identity, PeerId, TrustStore};
 use windowcast_protocol::selection::{self, BackendRule};
 use windowcast_protocol::{
-    BackendKind, ControlMessage, HandoffTarget, InputEvent, StreamBackend, StreamLimits,
-    StreamOptions, StreamQuality, StreamTarget, VideoCodec, WindowId, WindowInfo,
-    AccountCredential, AccountOffer, BackendKind, ControlMessage, InputEvent, OidcProviderInfo,
-    SignInMethod, StreamLimits, StreamOptions, StreamQuality, StreamTarget, VideoCodec, WindowId,
-    WindowInfo,
+    AccountCredential, AccountOffer, BackendKind, ControlMessage, HandoffTarget, InputEvent,
+    OidcProviderInfo, SignInMethod, StreamBackend, StreamLimits, StreamOptions, StreamQuality,
+    StreamTarget, VideoCodec, WindowId, WindowInfo,
 };
 use windowcast_rdp::client::RdpStream;
 pub use windowcast_rdp::client::RgbaPicture;
@@ -307,10 +305,12 @@ impl Client {
         let accept = accept_host.map(PeerId::from_hex).transpose()?;
         let identity = Arc::clone(&self.identity);
         let make = |offer: &AccountOffer| sign_in.credential(offer);
+        let mut host_ip = None;
         let established = self.runtime.block_on(async {
             let stream = tokio::net::TcpStream::connect(address)
                 .await
                 .map_err(|e| ClientError::Unreachable(address.to_owned(), e))?;
+            host_ip = stream.peer_addr().ok().map(|peer| peer.ip());
             let local = stream.peer_addr().is_ok_and(|peer| peer.ip().is_loopback());
             let session = if local {
                 Session::local_only().await?
@@ -335,7 +335,7 @@ impl Client {
             trust.pin(established.peer);
             trust.save(&self.trust_path)?;
         }
-        Ok(self.started(established))
+        Ok(self.started(established, host_ip))
     }
 
     /// Starts signing in with an OpenID Connect provider in the user's

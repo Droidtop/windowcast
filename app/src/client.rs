@@ -8,10 +8,8 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use windowcast_client::{Client, ClientSession, Event};
-use windowcast_client_windows::{Placement, Shared, StreamSource, StreamStats};
 use windowcast_client::{Client, ClientError, ClientSession, Event, SignIn, SignInOptions};
-use windowcast_client_windows::{Placement, Shared, StreamStats};
+use windowcast_client_windows::{Placement, Shared, StreamSource, StreamStats};
 use windowcast_protocol::selection::{self, BackendRule, WindowMatch};
 use windowcast_protocol::{
     BackendKind, OidcProviderInfo, StreamLimits, StreamQuality, VideoCodec, WindowId, WindowInfo,
