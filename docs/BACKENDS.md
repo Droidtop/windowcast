@@ -307,12 +307,20 @@ codec }`), not something the user sees.
 ### Third-party clients and RemoteApp
 
 - Plain RDP, GameStream (Moonlight) and VNC clients are not windowcast
-  sessions: they have no session window model and cannot switch. The
-  host keeps compatibility endpoints for them (an RDP server for one
-  window as its desktop, the GameStream server's app list), each with its
-  own input and audio, gated by the same host rules. Seamless windows for
-  those clients (RDP rail) are not pursued: seamless windows are a
-  property of windowcast sessions, the same on every carrier.
+  sessions: they have no session window model and cannot switch.
+  Approved by the owner with: "Yep, go for it. We can have a
+  compatibility mode for each stream, so we can still cast to other
+  clienrs". So every stream (one window) can be put into **compatibility
+  mode**, which also exposes that window to third-party clients: an RDP
+  desktop of the window (mstsc, FreeRDP), a GameStream app (Moonlight)
+  and a VNC endpoint. It is off by default and switched per stream, from
+  the host or from the client streaming the window; the endpoints run
+  only while it is on, with the host's rules and authentication (a login
+  made for the stream, or the host's PIN pairing for Moonlight). A
+  third-party client brings its own input and audio, under the same input
+  rules. Seamless windows for those clients (RDP rail) are not pursued:
+  seamless windows are a property of windowcast sessions, the same on
+  every carrier. This replaces always-on compatibility endpoints.
 - Windows RemoteApp launches (opt-in, above) move to the host: the host
   logs in to its own Remote Desktop as the RemoteApp client and serves
   those windows as host windows, so they too are carried by any carrier
