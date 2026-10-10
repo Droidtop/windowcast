@@ -15,6 +15,7 @@ path = "src/main.rs"
 windowcast-protocol = { path = "../protocol" }
 windowcast-host = { path = "../host-core" }
 windowcast-client-core = { path = "../client-core" }
+windowcast-terminal = { path = "../terminal" }
 windowcast-identity = { path = "../identity" }
 windowcast-transport = { path = "../transport" }
 windowcast-rdp = { path = "../rdp" }

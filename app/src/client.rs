@@ -143,6 +143,7 @@ pub struct ClientRole {
     #[cfg(windows)]
     microphone: Mutex<Option<windowcast_client_windows::Microphone>>,
     microphone_error: Mutex<Option<String>>,
+    terminals: crate::terminal::Terminals,
 }
 
 impl ClientRole {
@@ -156,6 +157,7 @@ impl ClientRole {
             #[cfg(windows)]
             microphone: Mutex::new(None),
             microphone_error: Mutex::new(None),
+            terminals: Default::default(),
         }))
     }
 
@@ -198,6 +200,53 @@ impl ClientRole {
         while state.log.len() > LOG_LINES {
             state.log.pop_front();
         }
+    }
+
+    /// The open terminals and the state of the SSH form.
+    pub fn terminals(&self) -> &crate::terminal::Terminals {
+        &self.terminals
+    }
+
+    /// Opens a shell on the connected host, on a thread of its own.
+    pub fn open_host_terminal_in_background(self: &Arc<Self>) {
+        let role = Arc::clone(self);
+        std::thread::spawn(move || {
+            let result = role.session().and_then(|session| {
+                let host = role
+                    .state
+                    .lock()
+                    .expect("state")
+                    .address
+                    .clone()
+                    .unwrap_or_default();
+                role.terminals
+                    .open_host(&session, &host)
+                    .map_err(|e| e.to_string())
+            });
+            if let Err(e) = result {
+                role.log(format!("terminal: {e}"));
+                role.state.lock().expect("state").error = Some(e);
+            }
+        });
+    }
+
+    /// Starts an application on the connected host, on a thread of its own.
+    pub fn launch_in_background(self: &Arc<Self>, command_line: String) {
+        let role = Arc::clone(self);
+        std::thread::spawn(move || match role.session() {
+            Ok(session) => role.terminals.launch(&session, &command_line),
+            Err(e) => role.state.lock().expect("state").error = Some(e),
+        });
+    }
+
+    /// Logs in to an SSH server and opens a shell, on a thread of its own.
+    pub fn open_ssh_in_background(
+        self: &Arc<Self>,
+        request: crate::terminal::SshRequest,
+        trust: Option<String>,
+    ) {
+        let role = Arc::clone(self);
+        std::thread::spawn(move || role.terminals.open_ssh(&role.client, &request, trust));
     }
 
     /// Connects on a thread of its own: pairs with `pin` if given, else

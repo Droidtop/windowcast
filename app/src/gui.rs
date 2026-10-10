@@ -12,6 +12,7 @@ use windowcast_protocol::{BackendKind, ContentHint, VideoCodec};
 use crate::client::{ClientRole, ClientSnapshot};
 use crate::config::{HostSettings, Roles};
 use crate::host::{HostRole, HostSnapshot};
+use crate::terminal::SshRequest;
 
 type Role<T> = Option<Result<Arc<T>, String>>;
 
@@ -36,6 +37,8 @@ pub fn run(roles: Roles, host: Role<HostRole>, client: Role<ClientRole>) -> Resu
         password: String::new(),
         new_account: Default::default(),
         clipboard: String::new(),
+        ssh: SshRequest::default(),
+        launch_line: String::new(),
         show_client: true,
         error: None,
     };
@@ -55,6 +58,8 @@ struct App {
     /// (comma-separated).
     new_account: (String, String, String),
     clipboard: String,
+    ssh: SshRequest,
+    launch_line: String,
     /// The client window, when both roles run (closing it hides it).
     show_client: bool,
     error: Option<String>,
@@ -62,7 +67,8 @@ struct App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(Duration::from_millis(500));
+        ctx.request_repaint_after(Duration::from_millis(100));
+        self.terminal_windows(ctx);
         match self.roles {
             Roles::Client => {
                 egui::CentralPanel::default().show(ctx, |ui| self.client_ui(ui));
@@ -160,6 +166,116 @@ const BACKENDS: [(BackendKind, &str, bool); 6] = [
 ];
 
 impl App {
+    /// One window per open terminal.
+    fn terminal_windows(&mut self, ctx: &egui::Context) {
+        let Some(Ok(client)) = &self.client else {
+            return;
+        };
+        for entry in client.terminals().open() {
+            let id = egui::ViewportId::from_hash_of(("windowcast terminal", entry.id));
+            let builder = egui::ViewportBuilder::default()
+                .with_title(format!("windowcast terminal: {}", entry.title))
+                .with_inner_size([900.0, 560.0]);
+            ctx.show_viewport_immediate(id, builder, |ctx, _| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| crate::terminal::terminal_ui(ui, &entry));
+                if ctx.input(|i| i.viewport().close_requested()) {
+                    client.terminals().close(entry.id);
+                }
+            });
+        }
+    }
+
+    /// Shells and application launches: on the connected host, and on any
+    /// SSH server.
+    fn terminals_ui(&mut self, ui: &mut egui::Ui, client: &Arc<ClientRole>, connected: bool) {
+        ui.heading("Terminals and applications");
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(connected, |ui| {
+                if ui.button("Open a shell on the host").clicked() {
+                    client.open_host_terminal_in_background();
+                }
+                ui.label("Start on the host");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.launch_line)
+                        .desired_width(200.0)
+                        .hint_text("program and arguments"),
+                );
+                if ui.button("Start").clicked() && !self.launch_line.trim().is_empty() {
+                    client.launch_in_background(self.launch_line.trim().to_owned());
+                }
+            });
+        });
+        let progress = client.terminals().progress();
+        if let Some(done) = &progress.launched {
+            ui.label(RichText::new(done).weak());
+        }
+        ui.horizontal(|ui| {
+            ui.label("SSH");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.ssh.user)
+                    .desired_width(80.0)
+                    .hint_text("user"),
+            );
+            ui.label("@");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.ssh.host)
+                    .desired_width(140.0)
+                    .hint_text("server"),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut self.ssh.port)
+                    .desired_width(40.0)
+                    .hint_text("22"),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.ssh.password)
+                    .password(true)
+                    .desired_width(120.0)
+                    .hint_text("password"),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut self.ssh.key_file)
+                    .desired_width(160.0)
+                    .hint_text("or key file"),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut self.ssh.passphrase)
+                    .password(true)
+                    .desired_width(100.0)
+                    .hint_text("key passphrase"),
+            );
+            ui.add_enabled_ui(!progress.busy, |ui| {
+                if ui.button("Log in").clicked() {
+                    client.open_ssh_in_background(self.ssh.clone(), None);
+                }
+            });
+            if progress.busy {
+                ui.label("Connecting...");
+            }
+        });
+        if let Some((server, fingerprint)) = &progress.untrusted {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("{server} is not known yet. Its key is {fingerprint}."),
+                );
+                if ui.button("Trust it and log in").clicked() {
+                    client.open_ssh_in_background(self.ssh.clone(), Some(fingerprint.clone()));
+                }
+            });
+        }
+        if let Some(error) = &progress.error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        for entry in client.terminals().open() {
+            ui.label(RichText::new(format!("open: {}", entry.title)).weak());
+        }
+    }
+
     fn host_ui(&mut self, ui: &mut egui::Ui) {
         let host = match &self.host {
             Some(Ok(host)) => Arc::clone(host),
@@ -579,6 +695,9 @@ impl App {
 
                 ui.heading("Stream windows");
                 stream_window_ui(ui, &client);
+                ui.separator();
+
+                self.terminals_ui(ui, &client, snapshot.address.is_some());
                 ui.separator();
 
                 ui.horizontal(|ui| {

@@ -18,11 +18,14 @@ use windowcast_terminal::{
 
 const WAIT: Duration = Duration::from_secs(20);
 
+/// The terminal a client asked for: its TERM, columns and rows.
+type PtyRequest = (String, u32, u32);
+
 #[derive(Clone)]
 struct TestServer {
     user_key: Arc<russh::keys::PublicKey>,
     ptys: Arc<Mutex<HashMap<ChannelId, Arc<windowcast_pty::Pty>>>>,
-    asked: Arc<Mutex<HashMap<ChannelId, (String, u32, u32)>>>,
+    asked: Arc<Mutex<HashMap<ChannelId, PtyRequest>>>,
 }
 
 impl server::Server for TestServer {

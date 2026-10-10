@@ -19,6 +19,10 @@ pub enum Known {
     },
 }
 
+/// Asks the user whether to trust a server's key: called with the server
+/// and the fingerprint it presents.
+pub type AskUser = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+
 /// How an unknown server is dealt with.
 #[derive(Clone)]
 pub enum HostKeyPolicy {
@@ -29,7 +33,7 @@ pub enum HostKeyPolicy {
     Fingerprint(String),
     /// Ask the user: called with the server and the fingerprint it
     /// presents; `true` pins it.
-    Ask(Arc<dyn Fn(&str, &str) -> bool + Send + Sync>),
+    Ask(AskUser),
     /// Refuse servers not pinned already.
     Pinned,
 }

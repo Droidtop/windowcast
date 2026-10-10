@@ -26,6 +26,7 @@ mod config;
 mod gui;
 mod host;
 mod platform;
+mod terminal;
 
 use std::path::PathBuf;
 use std::sync::Arc;
