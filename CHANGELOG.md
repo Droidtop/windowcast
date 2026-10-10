@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.23.3] - 2026-10-10
 
 ### Fixed
 - `windowcast-testhost`: input reaches the test pattern through `--content` (`WithContent`), the tone and the microphone wrappers, which dropped every event; the test pattern prints each event it gets (Droidtop/tracker#450).
