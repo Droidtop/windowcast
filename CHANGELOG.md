@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.23.0] - 2026-10-10
 
 ### Added
 - SSH logins from an account sign-in: `SshAuth::Certificate` logs in with an OpenSSH user certificate a host issued (`ControlMessage::SshCertificateRequest`) for the client's own SSH key, kept in its data folder (`Client::ssh_public_key`, `Client::ssh_certificate_auth`; C: `windowcast_client_ssh_public_key`, `WINDOWCAST_SSH_CERTIFICATE`). Tested against an SSH server that trusts the host's CA.
