@@ -188,7 +188,7 @@ jobs:
     steps:
       - name: Install system dependencies
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rust nasm cmake sway wayland libxkbcommon xkeyboard-config pulseaudio libpulse moonlight-qt freerdp
+          pacman -Syu --noconfirm --needed base-devel git rust nasm cmake sway swaylock wayland libxkbcommon xkeyboard-config pulseaudio libpulse moonlight-qt freerdp
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -234,3 +234,5 @@ jobs:
           mkdir -p /tmp/rdphome
           HOME=/tmp/rdphome WINDOWCAST_TEST_FREERDP=1 \
             cargo test -p windowcast-rdp --test freerdp -- --nocapture
+          # Last: swaylock leaves the session locked.
+          WINDOWCAST_TEST_SWAYLOCK=1 cargo test -p windowcast-agent-linux --test lock -- --nocapture

@@ -198,3 +198,9 @@ jobs:
             target/release/windowcast-client.exe
             target/release/windowcast-rdp.exe
             target/debug/deps/encoders-*.exe
+
+      - name: Window capture while the session is locked
+        # Last: the session stays locked (no password to unlock it with).
+        env:
+          WINDOWCAST_TEST_LOCK: "1"
+        run: cargo test -p windowcast-agent-windows --test lock -- --nocapture
