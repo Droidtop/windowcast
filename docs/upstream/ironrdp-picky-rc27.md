@@ -1,9 +1,9 @@
 # Draft upstream issue: release IronRDP and sspi on picky 7.0.0-rc.27
 
 **For:** IronRDP (Devolutions; `ironrdp-connector` 0.10.0) and sspi-rs
-(`sspi` 0.21.x). **Status:** draft for the owner to review and file; not
+(`sspi` 0.21.x and `winscard` 0.3.x, which pins `picky = "=7.0.0-rc.26"`). **Status:** draft for the owner to review and file; not
 filed. Until a release exists, windowcast carries patched copies of
-`ironrdp-connector`, `sspi` and `picky` under `vendor/` through
+`ironrdp-connector`, `sspi` and `winscard` under `vendor/` through
 `[patch.crates-io]` (see `NOTICE` and each copy's README).
 
 ## Title
@@ -47,7 +47,7 @@ everything resolves.
 
 ## Request
 
-Release `sspi` and `ironrdp-connector` (and whatever else pins picky) on
+Release `sspi`, `winscard` and `ironrdp-connector` (and whatever else pins picky) on
 `picky = "7.0.0-rc.27"` or later, ideally with a `^` requirement rather
 than `=`, so applications can share the RustCrypto releases with other
 crates.

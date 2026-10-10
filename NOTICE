@@ -18,6 +18,19 @@ sspi (sspi-rs), used by IronRDP for CredSSP/NLA
   Dual-licensed under the MIT licence or the Apache License, version 2.0;
   windowcast uses it under the MIT licence.
 
+winscard (Devolutions sspi-rs workspace), used by sspi for smart cards
+  https://github.com/Devolutions/sspi-rs
+  Authors: Devolutions Inc. and contributors.
+  Dual-licensed under the MIT licence or the Apache License, version 2.0;
+  windowcast uses it under the MIT licence.
+
+Patched copies: vendor/ironrdp-connector (0.10.0), vendor/sspi (0.21.3)
+and vendor/winscard (0.3.4) are those crates as published, with only
+their picky (and, for sspi, macOS/iOS RustCrypto) requirements moved to
+picky 7.0.0-rc.27's, so they build beside russh; each has a
+README.windowcast.md saying exactly what changed and why. They go once
+upstream releases on picky rc.27 or later.
+
 The MIT licence text, as these crates carry it:
 
   Permission is hereby granted, free of charge, to any person obtaining a

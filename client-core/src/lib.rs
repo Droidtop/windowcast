@@ -77,6 +77,12 @@ pub enum ClientError {
     HostNotTrusted(String),
     #[error("OpenID Connect: {0}")]
     Oidc(#[from] OidcError),
+    /// A host or server did not open a command channel; the reason is
+    /// for the user.
+    #[error("{0}")]
+    Refused(String),
+    #[error("{0}")]
+    Ssh(#[from] windowcast_terminal::SshError),
 }
 
 /// How a client signs in to a host with an account (docs/ACCOUNTS.md).
@@ -160,12 +166,6 @@ pub fn fingerprint(peer_hex: &str) -> String {
         .map(|c| String::from_utf8_lossy(c).into_owned())
         .collect::<Vec<_>>()
         .join("-")
-    /// A host or server did not open a command channel; the reason is
-    /// for the user.
-    #[error("{0}")]
-    Refused(String),
-    #[error("{0}")]
-    Ssh(#[from] windowcast_terminal::SshError),
 }
 
 /// 20 ms of interleaved stereo at 48 kHz: one Opus packet's worth.

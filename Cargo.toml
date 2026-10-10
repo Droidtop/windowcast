@@ -1,5 +1,8 @@
 [workspace]
 resolver = "2"
+# Patched copies of upstream crates (see [patch.crates-io] below): not
+# ours to lint or format.
+exclude = ["vendor"]
 members = [
     "protocol",
     "pty",
@@ -33,3 +36,16 @@ thiserror = "1"
 rand_core = { version = "0.6", features = ["getrandom"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tracing = "0.1"
+
+# IronRDP 0.10 (ironrdp-connector), sspi 0.21 and winscard 0.3 pin picky
+# pre-releases (=7.0.0-rc.25 and rc.26),
+# whose exact RustCrypto pre-release pins cannot share a workspace with
+# russh (the command stream, #444). These copies change only those
+# requirements (to picky rc.27 and the releases it uses); see each
+# vendor/*/README.windowcast.md and docs/upstream/ironrdp-picky-rc27.md.
+# Drop the patches once IronRDP, sspi and winscard release on picky rc.27
+# or later.
+[patch.crates-io]
+ironrdp-connector = { path = "vendor/ironrdp-connector" }
+sspi = { path = "vendor/sspi" }
+winscard = { path = "vendor/winscard" }

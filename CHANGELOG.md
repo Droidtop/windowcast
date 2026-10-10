@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- The command stream (docs/COMMAND-STREAM.md): numbered channels between a client and a host for a shell on a pseudo-terminal (ConPTY on Windows, openpty elsewhere), one command, or an application launch whose windows then appear in the window list. They ride the session's control channel, are checked by `CommandAuthorizer` (a paired device may open them by default; `HostControl::set_command_authorizer` is where the account layer plugs in), and end with the session.
+- An SSH client (`windowcast-terminal`, on russh) that opens the same channels on any SSH server: password or private-key login, host keys pinned per server (trust on first use, a typed fingerprint, an ask callback or pinned-only; a changed key is always refused).
+- A screen model in the client library (vt100): one JSON snapshot of coloured cells and the cursor for every viewer, keys by name, bracketed pastes, OSC 52 clipboard writes. C interface in `windowcast.h` (`windowcast_session_open_terminal`, `windowcast_client_ssh_terminal`, `windowcast_session_launch`, `windowcast_terminal_*`).
+- Terminals in the reference app (egui) and in the Android library and viewer (`TerminalSession`, `TerminalView`).
+
+### Changed
+- `ironrdp-connector`, `sspi` and `winscard` are patched copies under `vendor/` (`[patch.crates-io]`): their pinned picky pre-releases (7.0.0-rc.25, rc.26) could not share a workspace with russh, which the command stream needs. Only their requirements move to picky 7.0.0-rc.27; see `NOTICE` and each copy's `README.windowcast.md`. They go once upstream releases on picky rc.27 (`docs/upstream/ironrdp-picky-rc27.md`).
+
 ## [0.21.0] - 2026-10-09
 
 ### Added
@@ -26,14 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - One table for PC scan codes and evdev key codes (`windowcast_protocol::keys`), used by the Windows agent, the Windows client and RDP, in place of the two copies the Windows crates had.
-## [Unreleased]
-
-### Added
-- The command stream (docs/COMMAND-STREAM.md): numbered channels between a client and a host for a shell on a pseudo-terminal (ConPTY on Windows, openpty elsewhere), one command, or an application launch whose windows then appear in the window list. They ride the session's control channel, are checked by `CommandAuthorizer` (a paired device may open them by default; `HostControl::set_command_authorizer` is where the account layer plugs in), and end with the session.
-- An SSH client (`windowcast-terminal`, on russh) that opens the same channels on any SSH server: password or private-key login, host keys pinned per server (trust on first use, a typed fingerprint, an ask callback or pinned-only; a changed key is always refused).
-- A screen model in the client library (vt100): one JSON snapshot of coloured cells and the cursor for every viewer, keys by name, bracketed pastes, OSC 52 clipboard writes. C interface in `windowcast.h` (`windowcast_session_open_terminal`, `windowcast_client_ssh_terminal`, `windowcast_session_launch`, `windowcast_terminal_*`).
-- Terminals in the reference app (egui) and in the Android library and viewer (`TerminalSession`, `TerminalView`).
-
 ## [0.19.1] - 2026-10-09
 
 ### Fixed
