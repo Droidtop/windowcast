@@ -125,6 +125,52 @@ Each session binds UDP on every interface and on 127.0.0.1, so a client
 and host on the same device (droidtop and its own desktop container)
 connect over loopback even with no network up.
 
+## Install on Linux
+
+Each release carries four ways to install the Linux programs (the Wayland
+host agent `windowcast-agent-linux`, `windowcast-app`, `windowcast-client`
+and `windowcast-testhost`), for x86_64 and aarch64, with their SHA-256 in
+`SHA256SUMS-linux`:
+
+| File | What it is |
+|---|---|
+| `windowcast-linux-<arch>.tar.zst` | Portable: the programs, a menu entry, the icon, `install.sh` and `uninstall.sh`. |
+| `windowcast-linux-<arch>.run` | One file you can run (any of the programs) or install from. |
+| `windowcast_<version>-1_<amd64\|arm64>.deb` | For Debian, Ubuntu and relatives. |
+| `windowcast-<version>-1.<x86_64\|aarch64>.rpm` | For Fedora, openSUSE and relatives. |
+
+For you only, without root or a package manager:
+
+```
+curl -fsSL https://github.com/Droidtop/windowcast/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Droidtop/windowcast/releases/latest/download/install.sh | sh -s -- --autostart
+```
+
+That downloads the tarball for this machine, checks it against
+`SHA256SUMS-linux`, puts the programs in `~/.local/bin` and a menu entry and
+icon under `~/.local/share`, and, with `--autostart`, starts the host agent
+when you sign in (a systemd user unit, or an XDG autostart entry on a session
+without systemd). The same `install.sh` is in the tarball (`sh install.sh`)
+and inside the `.run` file (`./windowcast-linux-x86_64.run install`).
+Everything it creates is listed in `~/.local/share/windowcast/install-manifest`.
+
+To remove it, run `~/.local/share/windowcast/uninstall.sh`: it stops the
+programs, turns off the host agent's start at sign-in and deletes exactly what
+the manifest lists. This device's identity, who it trusts and its settings
+stay unless you add `--purge` (after which it must pair again).
+
+The `.deb` and `.rpm` put the programs in `/usr/bin` and ship the systemd user
+unit `windowcast-agent.service` without enabling it; `systemctl --user enable
+--now windowcast-agent` turns it on. Remove them with `apt remove windowcast`
+or `dnf remove windowcast`.
+
+The single file is made with [uruntime](https://github.com/VHSgunzo/uruntime)'s
+RunImage runtime and a squashfs image, not with AppImage or its tools. There
+is no Flatpak: a sandbox would defeat the purpose of a program that watches and
+controls the session it runs in. The packages are made by
+`.github/workflows/linux-packages.yml` from `packaging/linux`, and attached to a
+release when it is published.
+
 ## Building
 
 ```

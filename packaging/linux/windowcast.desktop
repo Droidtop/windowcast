@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=windowcast
+GenericName=Window streaming
+Comment=Stream application windows between computers and handhelds
+Exec=@BINDIR@/windowcast-app
+Icon=windowcast
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=windowcast;remote;stream;windows;desktop;

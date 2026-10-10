@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Linux packages (Droidtop/tracker#118): with each release, a portable `.tar.zst`, one runnable `.run` file (uruntime), a `.deb` and an `.rpm` for x86_64 and aarch64 holding `windowcast-agent-linux`, `windowcast-app`, `windowcast-client` and `windowcast-testhost`, with `install.sh` (per user, no root, `--autostart` optional) and `uninstall.sh` (removes exactly what the install manifest lists; `--purge` also deletes the device's data) and `SHA256SUMS-linux`. Built by `.github/workflows/linux-packages.yml` from `packaging/linux`. The systemd user unit `windowcast-agent.service` ships in the packages, not enabled.
+
 ## [0.30.0] - 2026-10-10
 
 ### Added

@@ -1,0 +1,15 @@
+[Unit]
+Description=windowcast host agent: streams this session's windows
+Documentation=https://github.com/Droidtop/windowcast
+# It captures the session it runs in, so it needs the session's Wayland socket.
+ConditionEnvironment=WAYLAND_DISPLAY
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=@BINDIR@/windowcast-agent-linux
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,63 @@
+# The .deb and .rpm: build.sh fills in the variables below and runs nfpm on this.
+# The systemd user unit is shipped but not enabled.
+name: windowcast
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${PKG_VERSION}
+release: ${PKG_RELEASE}
+section: net
+priority: optional
+maintainer: Droidtop <noreply@github.com>
+vendor: Droidtop
+homepage: https://github.com/Droidtop/windowcast
+license: GPL-3.0-only
+description: |-
+  Stream application windows between computers and handhelds
+  windowcast streams application windows (not a whole desktop) from a host
+  to a client, each window over the protocol that suits it. This package has
+  the Wayland host agent, the reference application, the command-line client
+  and a test-pattern host.
+contents:
+  - src: ${STAGE}/bin/windowcast-agent-linux
+    dst: /usr/bin/windowcast-agent-linux
+  - src: ${STAGE}/bin/windowcast-app
+    dst: /usr/bin/windowcast-app
+  - src: ${STAGE}/bin/windowcast-client
+    dst: /usr/bin/windowcast-client
+  - src: ${STAGE}/bin/windowcast-testhost
+    dst: /usr/bin/windowcast-testhost
+  - src: ${PKGFILES}/windowcast.desktop
+    dst: /usr/share/applications/windowcast.desktop
+  - src: ${STAGE}/share/icons/hicolor/scalable/apps/windowcast.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/windowcast.svg
+  - src: ${PKGFILES}/windowcast-agent.service
+    dst: /usr/lib/systemd/user/windowcast-agent.service
+  - src: ${STAGE}/LICENSE
+    dst: /usr/share/doc/windowcast/LICENSE
+overrides:
+  deb:
+    depends:
+      - libc6 (>= ${GLIBC_MIN})
+      - libgcc-s1
+      - libstdc++6
+      - libpulse0
+      - libxkbcommon0
+      - libpam0g
+      - libgssapi-krb5-2
+    recommends:
+      - libgl1
+      - libegl1
+      - libwayland-client0
+  rpm:
+    depends:
+      - glibc >= ${GLIBC_MIN}
+      - libgcc
+      - libstdc++
+      - pulseaudio-libs
+      - libxkbcommon
+      - pam
+      - krb5-libs
+    recommends:
+      - mesa-libGL
+      - mesa-libEGL
+      - libwayland-client
