@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped on any incompatible change to the message shapes below. A peer
 /// that receives a mismatched version should refuse the session rather
 /// than guess at how to interpret an unknown wire format.
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
@@ -361,12 +361,20 @@ pub enum ControlMessage {
     /// agent may require a one-time host-user approval before answering
     /// (see the security model's authorization section) — this can be a
     /// slow round-trip, not just a lookup.
+    ///
+    /// A window's stream may have several carriers at once while it
+    /// switches (docs/BACKENDS.md, "One window, any carrier"): each start
+    /// names a `generation`, the client's number for that carrier, and a
+    /// second start of a window while its first runs is a switch. Carriers
+    /// running at once differ in backend.
     StreamStartRequest {
         target: StreamTarget,
         options: StreamOptions,
+        generation: u32,
     },
     StreamStartResponse {
         target: StreamTarget,
+        generation: u32,
         accepted: bool,
         backend: StreamBackend,
         /// Session track id the video arrives on, for backends that send on
@@ -377,8 +385,20 @@ pub enum ControlMessage {
         reason: Option<String>,
     },
 
+    /// Client: stop the stream, every carrier of it.
     StreamStopRequest(StreamTarget),
+    /// Client: stop one carrier of a window's stream, the one a switch
+    /// replaced. The stream goes on on its others; stopping the last one
+    /// ends it.
+    CarrierStop {
+        window: WindowId,
+        generation: u32,
+    },
+    /// Host: the stream ended (stopped, or the window closed).
     StreamStopped(StreamTarget),
+    /// Transport: a window's video track on the session ended. Its stream
+    /// may go on on another carrier; `StreamStopped` says when it ends.
+    TrackEnded(WindowId),
 
     Input(InputEvent),
 
@@ -657,6 +677,7 @@ mod tests {
         // handoff are independently started/stopped, each keeping its own
         // response shape.
         let window_response = ControlMessage::StreamStartResponse {
+            generation: 1,
             target: StreamTarget::Window(WindowId(3)),
             accepted: true,
             backend: StreamBackend::Native {
@@ -667,6 +688,7 @@ mod tests {
             reason: None,
         };
         let game_response = ControlMessage::StreamStartResponse {
+            generation: 1,
             target: StreamTarget::Game(GameId(101)),
             accepted: true,
             backend: StreamBackend::GameStream,
@@ -695,6 +717,7 @@ mod tests {
         let experimental = StreamBackend::Other("web-vnc-poc".into());
 
         let rdp_msg = ControlMessage::StreamStartResponse {
+            generation: 1,
             target: StreamTarget::Window(WindowId(9)),
             accepted: true,
             backend: rdp,
@@ -709,6 +732,7 @@ mod tests {
             reason: None,
         };
         let experimental_msg = ControlMessage::StreamStartResponse {
+            generation: 1,
             target: StreamTarget::Window(WindowId(10)),
             accepted: true,
             backend: experimental,

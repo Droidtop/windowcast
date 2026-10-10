@@ -674,9 +674,19 @@ struct Shared {
     /// The password this client signed in with, for RemoteApps logging in
     /// as the same Windows user. In memory only.
     sign_in_password: Mutex<Option<String>>,
+    /// The last carrier generation asked for, per window.
+    generations: Mutex<HashMap<WindowId, u32>>,
 }
 
 impl Shared {
+    /// The next carrier generation of `window`'s stream.
+    fn next_generation(&self, window: WindowId) -> u32 {
+        let mut generations = self.generations.lock().expect("generations");
+        let next = generations.entry(window).or_insert(0);
+        *next += 1;
+        *next
+    }
+
     fn emit(&self, event: Event) {
         let _ = self.event_tx.lock().expect("events").send(event);
     }
@@ -797,6 +807,7 @@ impl ClientSession {
             remote_keys: AtomicU32::new(1),
             remote_viewing: Mutex::default(),
             sign_in_password: Mutex::default(),
+            generations: Mutex::default(),
         });
         let windows = Arc::new(Mutex::new(Vec::new()));
 
@@ -920,6 +931,7 @@ impl ClientSession {
             .copied()
             .unwrap_or_default();
         self.send(ControlMessage::StreamStartRequest {
+            generation: self.shared.next_generation(window),
             target: StreamTarget::Window(window),
             options: StreamOptions {
                 backend,
@@ -958,21 +970,18 @@ impl ClientSession {
             }
             *focus
         };
-        // A window on RDP takes its pointer, keys and text over RDP;
+        // Input goes over the session whatever carries the window's
+        // picture, under the session's rules (docs/BACKENDS.md, "One window,
+        // any carrier"). Only a RemoteApp window of this client's own
+        // (opt-in Windows RemoteApp) is driven over its RDP connection;
         // gamepads always go over the session.
-        let over_rdp = !matches!(
+        let pointer_or_keys = !matches!(
             event,
             InputEvent::Gamepad { .. } | InputEvent::GamepadGone { .. }
         );
-        if over_rdp {
+        if pointer_or_keys {
             if let Some(w) = window.filter(|w| remote_app::split(*w).is_some()) {
                 self.remote_input(w, event);
-                return Ok(());
-            }
-            if let Some(rdp) =
-                window.and_then(|w| self.shared.rdp.lock().expect("rdp").get(&w).cloned())
-            {
-                rdp.input(event);
                 return Ok(());
             }
         }
@@ -1391,6 +1400,15 @@ async fn pump_events(
                         reason: reason.unwrap_or_default(),
                     }
                 }
+            }
+            ControlMessage::TrackEnded(window) => {
+                // The window's video track ended; its stream may go on on
+                // another carrier, so only the frame queue ends.
+                let slot = shared.slots.lock().expect("slots").remove(&window);
+                if let Some(slot) = slot {
+                    slot.sender.lock().expect("sender").take();
+                }
+                continue;
             }
             ControlMessage::StreamStopped(StreamTarget::Window(window)) => {
                 // A stream stopped before its track delivered anything still

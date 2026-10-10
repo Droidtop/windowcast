@@ -427,7 +427,7 @@ impl Session {
         };
         self.peer_connection.remove_track(track.sender()).await?;
         self.renegotiate().await?;
-        self.send_control(&ControlMessage::StreamStopped(StreamTarget::Window(window)))
+        self.send_control(&ControlMessage::TrackEnded(window))
             .await?;
         Ok(true)
     }
@@ -621,7 +621,9 @@ async fn run_control_channel(
             }
             ControlMessage::Goodbye => break,
             other => {
-                if let ControlMessage::StreamStopped(StreamTarget::Window(window)) = &other {
+                if let ControlMessage::TrackEnded(window)
+                | ControlMessage::StreamStopped(StreamTarget::Window(window)) = &other
+                {
                     let ended = ended_windows.lock().expect("ended windows").remove(window);
                     for flag in ended.into_iter().flatten() {
                         let _ = flag.send(true);

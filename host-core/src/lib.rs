@@ -753,8 +753,20 @@ struct Stream {
     _handoff: Option<Box<dyn Send>>,
 }
 
+/// The carriers of one window's stream (docs/BACKENDS.md, "One window,
+/// any carrier"), by generation, and its sound, which goes on whatever
+/// carries the picture.
+#[derive(Default)]
+struct WindowStreams {
+    carriers: std::collections::HashMap<u32, (BackendKind, Stream)>,
+    /// Stops the window's sound when dropped.
+    audio: Option<Stream>,
+}
+
 /// A started stream: on the session (a track), or handed off.
 struct Started {
+    /// Its row in the host's stream list, for one on the session.
+    serial: Option<u64>,
     stream: Stream,
     backend: StreamBackend,
     track_id: Option<String>,
@@ -929,7 +941,7 @@ impl Host {
             Arc::clone(&control.commands),
             Arc::clone(&control.command_serial),
         );
-        let mut streams = std::collections::HashMap::<WindowId, Stream>::new();
+        let mut streams = std::collections::HashMap::<WindowId, WindowStreams>::new();
         let input = deliver_input(Arc::clone(&self.source));
         let mut focus: Option<WindowId> = None;
         let clipboard = Arc::new(std::sync::Mutex::new(None::<String>));
@@ -989,30 +1001,36 @@ impl Host {
                 ControlMessage::StreamStartRequest {
                     target: StreamTarget::Window(window),
                     options,
+                    generation,
                 } => {
-                    // RDP input goes to the window over its own connection,
-                    // past the session's input rule: an account that may
-                    // not drive windows gets them natively instead.
-                    let options =
-                        if decision.input == Some(false) && options.backend == BackendKind::Rdp {
-                            StreamOptions {
-                                backend: BackendKind::Native,
-                                ..options
-                            }
-                        } else {
-                            options
-                        };
+                    // Input always comes over the session, whatever the
+                    // carrier, under the session's rules.
+                    let kind = selection::serve(options.backend, &self.source.backends());
+                    let running = streams.get(&window).is_some_and(|w| {
+                        w.carriers.contains_key(&generation)
+                            || w.carriers.values().any(|(k, _)| *k == kind)
+                    });
                     let allowed = self.window_allowed(&decision, window).await;
-                    let started = if allowed {
-                        self.start(&session, peer, window, &options, &rtt).await
-                    } else {
+                    let started = if !allowed {
                         Err("not allowed for this account".to_owned())
+                    } else if running {
+                        Err(format!("this window is already carried by {kind:?}"))
+                    } else {
+                        self.start(&session, peer, window, &options, &rtt).await
                     };
                     let response = match started {
                         Ok(started) => {
-                            streams.insert(window, started.stream);
+                            let entry = streams.entry(window).or_default();
+                            if entry.audio.is_none() {
+                                entry.audio =
+                                    Some(self.start_audio(&session, window, started.serial).await);
+                            }
+                            entry
+                                .carriers
+                                .insert(generation, (started.backend.kind(), started.stream));
                             ControlMessage::StreamStartResponse {
                                 target: StreamTarget::Window(window),
+                                generation,
                                 accepted: true,
                                 backend: started.backend,
                                 track_id: started.track_id,
@@ -1020,28 +1038,39 @@ impl Host {
                                 reason: None,
                             }
                         }
-                        Err(reason) => refusal(StreamTarget::Window(window), reason),
+                        Err(reason) => refusal(StreamTarget::Window(window), generation, reason),
                     };
                     session.send_control(&response).await?;
                 }
-                ControlMessage::StreamStartRequest { target, .. } => {
+                ControlMessage::StreamStartRequest {
+                    target, generation, ..
+                } => {
                     session
-                        .send_control(&refusal(target, "not supported by this host".into()))
+                        .send_control(&refusal(
+                            target,
+                            generation,
+                            "not supported by this host".into(),
+                        ))
                         .await?;
                 }
                 ControlMessage::StreamStopRequest(StreamTarget::Window(window)) => {
-                    let handed_off = streams
-                        .remove(&window)
-                        .is_some_and(|stream| stream._handoff.is_some());
-                    session.detach_audio(window).await?;
-                    if !session.detach_window(window).await? && handed_off {
-                        // A handed-off stream has no track to detach; its
-                        // backend stopped when the stream was dropped.
-                        session
-                            .send_control(&ControlMessage::StreamStopped(StreamTarget::Window(
-                                window,
-                            )))
-                            .await?;
+                    if let Some(ended) = streams.remove(&window) {
+                        end_stream(&session, window, ended).await?;
+                    }
+                }
+                ControlMessage::CarrierStop { window, generation } => {
+                    let Some(entry) = streams.get_mut(&window) else {
+                        continue;
+                    };
+                    if let Some((kind, carrier)) = entry.carriers.remove(&generation) {
+                        drop(carrier);
+                        if session_track(kind) {
+                            session.detach_window(window).await?;
+                        }
+                    }
+                    if entry.carriers.is_empty() {
+                        let ended = streams.remove(&window).expect("listed");
+                        end_stream(&session, window, ended).await?;
                     }
                 }
                 ControlMessage::SshCertificateRequest { public_key } => {
@@ -1064,8 +1093,12 @@ impl Host {
                     }
                 }
                 ControlMessage::StreamLimits { window, limits } => {
-                    if let Some(stream) = streams.get(&window) {
-                        *stream.limits.lock().expect("limits") = limits;
+                    for (_, carrier) in streams
+                        .get(&window)
+                        .into_iter()
+                        .flat_map(|w| w.carriers.values())
+                    {
+                        *carrier.limits.lock().expect("limits") = limits;
                     }
                 }
                 other => tracing::debug!("ignoring {other:?}"),
@@ -1121,6 +1154,7 @@ impl Host {
                 other => StreamBackend::Other(format!("{other:?}")),
             };
             return Ok(Started {
+                serial: None,
                 stream: Stream {
                     stop: Arc::new(AtomicBool::new(false)),
                     limits: Arc::new(std::sync::Mutex::new(options.limits)),
@@ -1190,8 +1224,8 @@ impl Host {
             Arc::clone(&self.control),
             serial,
         );
-        self.start_audio(session, window, &stop, serial).await;
         Ok(Started {
+            serial: Some(serial),
             stream: Stream {
                 stop,
                 limits,
@@ -1204,8 +1238,27 @@ impl Host {
     }
 
     /// Streams the window's sound beside its picture, if the agent captures
-    /// it. Audio that cannot start leaves the picture streaming.
+    /// it, whatever carries the picture; dropping the returned stream stops
+    /// it. Audio that cannot start leaves the picture streaming. `serial` is
+    /// the host's stream row to count its packets in.
     async fn start_audio(
+        &self,
+        session: &Arc<Session>,
+        window: WindowId,
+        serial: Option<u64>,
+    ) -> Stream {
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = Stream {
+            stop: Arc::clone(&stop),
+            limits: Arc::default(),
+            _handoff: None,
+        };
+        let serial = serial.unwrap_or(0);
+        self.start_audio_on(session, window, &stop, serial).await;
+        handle
+    }
+
+    async fn start_audio_on(
         &self,
         session: &Arc<Session>,
         window: WindowId,
@@ -1387,9 +1440,10 @@ async fn share_clipboard(
     }
 }
 
-fn refusal(target: StreamTarget, reason: String) -> ControlMessage {
+fn refusal(target: StreamTarget, generation: u32, reason: String) -> ControlMessage {
     ControlMessage::StreamStartResponse {
         target,
+        generation,
         accepted: false,
         backend: StreamBackend::Native {
             codec: VideoCodec::H264,
@@ -1398,6 +1452,33 @@ fn refusal(target: StreamTarget, reason: String) -> ControlMessage {
         handoff: None,
         reason: Some(reason),
     }
+}
+
+/// Whether a carrier sends on the session's video track (rather than a
+/// connection of its own).
+fn session_track(kind: BackendKind) -> bool {
+    matches!(kind, BackendKind::Native | BackendKind::Desktop)
+}
+
+/// Ends a window's stream: every carrier, its track and its sound, and
+/// tells the client.
+async fn end_stream(
+    session: &Session,
+    window: WindowId,
+    ended: WindowStreams,
+) -> Result<(), TransportError> {
+    let on_session = ended
+        .carriers
+        .values()
+        .any(|(kind, _)| session_track(*kind));
+    drop(ended);
+    session.detach_audio(window).await?;
+    if on_session {
+        session.detach_window(window).await?;
+    }
+    session
+        .send_control(&ControlMessage::StreamStopped(StreamTarget::Window(window)))
+        .await
 }
 
 /// What adaptive quality steers a stream by, besides its track's receiver
@@ -1596,12 +1677,17 @@ fn feed(
         }
         watcher.abort();
         control.streams.lock().expect("streams").remove(&serial);
-        // A window that closed by itself is detached here; a stop request
-        // was already detached by the session loop.
+        // A window that closed by itself ends its stream here; a stopped
+        // carrier was already detached by the session loop.
         if !stop.load(Ordering::SeqCst) {
             let window = track.window();
             let _ = runtime.block_on(session.detach_audio(window));
             let _ = runtime.block_on(session.detach_window(window));
+            let _ =
+                runtime
+                    .block_on(session.send_control(&ControlMessage::StreamStopped(
+                        StreamTarget::Window(window),
+                    )));
         }
     });
 }

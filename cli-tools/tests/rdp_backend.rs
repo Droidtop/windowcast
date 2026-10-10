@@ -144,7 +144,8 @@ fn a_window_streams_over_rdp_through_a_session() {
     assert!(numbers.len() >= 5);
     assert!(numbers.last() > numbers.first());
 
-    // Input over RDP reaches the host's window.
+    // Input for the window streamed over RDP goes over the session (not
+    // the RDP connection) and reaches the host's window.
     session
         .send_input(InputEvent::PointerMove {
             window: WINDOW,

@@ -61,6 +61,7 @@ fn our_client_sees_and_drives_a_window_over_our_rdp_host() {
             identity: Arc::new(identity),
             stats: Arc::new(HostStats::default()),
             stop: Arc::new(AtomicBool::new(false)),
+            input: true,
         };
         if let Err(e) = serve_window(listener, server) {
             eprintln!("host: {e}");

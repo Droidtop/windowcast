@@ -41,6 +41,7 @@ fn stock_freerdp_logs_in_and_shows_the_window() {
                 identity: Arc::new(identity),
                 stats,
                 stop: Arc::new(AtomicBool::new(false)),
+                input: true,
             };
             if let Err(e) = serve_window(listener, server) {
                 eprintln!("host: {e}");

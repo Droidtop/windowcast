@@ -48,6 +48,12 @@ pub struct WindowServer {
     pub stats: Arc<HostStats>,
     /// Set to stop serving; a connected client is dropped.
     pub stop: Arc<AtomicBool>,
+    /// Whether input from the RDP client drives the window: for a
+    /// third-party client (compatibility mode, `windowcast-rdp serve`), not
+    /// for a carrier of a windowcast session, whose input comes over the
+    /// session under its rules (docs/BACKENDS.md, "One window, any
+    /// carrier").
+    pub input: bool,
 }
 
 /// Serves the window to RDP clients on `listener`, one connection at a
@@ -80,6 +86,7 @@ async fn serve(listener: TcpListener, config: WindowServer) -> Result<(), RdpErr
         identity,
         stats,
         stop,
+        input,
     } = config;
     let size = source
         .list_windows()
@@ -96,14 +103,19 @@ async fn serve(listener: TcpListener, config: WindowServer) -> Result<(), RdpErr
         width: size.0,
         height: size.1,
     };
-    let mut server = RdpServer::builder()
+    let builder = RdpServer::builder()
         .with_addr(listener.local_addr()?)
-        .with_hybrid(identity.acceptor()?, identity.public_key()?)
-        .with_input_handler(WindowInput {
+        .with_hybrid(identity.acceptor()?, identity.public_key()?);
+    let builder = if input {
+        builder.with_input_handler(WindowInput {
             window,
             deliver: windowcast_host::deliver_input(Arc::clone(&source)),
             size: desktop,
         })
+    } else {
+        builder.with_no_input()
+    };
+    let mut server = builder
         .with_display_handler(WindowDisplay {
             source,
             window,
@@ -184,6 +196,7 @@ impl WithRdp {
             identity: Arc::clone(&self.identity),
             stats: Arc::new(HostStats::default()),
             stop: Arc::clone(&stop),
+            input: false,
         };
         std::thread::spawn(move || {
             if let Err(e) = serve_window(listener, server) {

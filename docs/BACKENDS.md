@@ -73,15 +73,18 @@ keyed from it. For RDP:
 3. The client logs in with TLS and NLA, pinning that certificate, and
    only then reports the stream started; a failed login refuses it and
    tells the host to stop. Its pictures come out of `client-core` as RGBA
-   (`next_picture`, `windowcast_session_next_picture`), and the input it
-   sends for that window (pointer, keys, text) goes over RDP; gamepads stay
-   on the session.
+   (`next_picture`, `windowcast_session_next_picture`). Its input (pointer,
+   keys, text, gamepads), like every window's, goes over the session, and
+   its sound comes on the session's audio track.
 4. Stopping the stream (either side, or the session ending) stops the RDP
    server. The window's picture size is fixed when the client logs in.
 
 The RDP desktop is the window, so any RDP client given that login sees
-only that window, and the host's own input rules apply (the app's input
-setting gates RDP input as it does session input).
+only that window. A carrier's RDP server takes no input from its RDP
+connection (`WindowServer::input` off): a client could otherwise drive
+the window past the session's input rules with the login it was handed.
+Only an RDP server for third-party clients (compatibility mode,
+`windowcast-rdp serve`) takes input, under the host's input rules.
 
 ## RemoteApp: programs and windows over RDP (Windows hosts)
 
@@ -237,21 +240,24 @@ GameStream video, RDP pictures, VNC. Each is interchangeable per window.
 Bitrate, frame rate and resolution adapt continuously within a carrier
 (host-core `quality`, as today).
 
-On the host, one capture per window feeds every carrier of that window
-(a fan-out), so two carriers during a switch do not capture twice and
-both show the same picture.
+On the host, one capture per window should feed every carrier of that
+window (a fan-out), so two carriers during a switch do not capture twice.
+Not built yet: during the few seconds two carriers overlap, the window
+is captured twice (Windows.Graphics.Capture and the Wayland capture both
+allow it).
 
 ### Switching a carrier: make-before-break (protocol 10)
 
 A window's stream gets a generation number; two generations of one
 window may run at once.
 
-1. `CarrierSwitchRequest { window, generation: n+1, options }` (client to
-   host; `options` as `StreamOptions`: the carrier, codecs, limits).
-2. The host starts generation n+1 from the same capture and answers
-   `CarrierStarted { window, generation, backend, handoff }` (a handoff
-   for carriers with their own connection, such as RDP), or
-   `CarrierRefused { window, generation, reason }`.
+1. `StreamStartRequest { target, options, generation: n+1 }` while
+   generation n runs (`options` as for any start: the carrier, codecs,
+   limits). Carriers running at once differ in backend; the host refuses
+   a second carrier of the same backend.
+2. The host starts generation n+1 and answers `StreamStartResponse` with
+   that generation (a handoff for carriers with their own connection,
+   such as RDP), or refuses it.
 3. The client brings the new carrier up beside the old one, decodes it
    off screen, and when it has a picture at the window's current size
    swaps the view to it in one frame. Then it sends
@@ -259,9 +265,13 @@ window may run at once.
 4. If generation n+1 shows no picture within 5 s, the client stops it
    and keeps n (the switch failed; see backoff below).
 
-Input, audio, clipboard, cursor and the window's own events never move:
-they are the session's. The existing `StreamStartRequest` and
-`StreamStopRequest` become generation 1 and "every generation".
+`StreamStopRequest` stops every carrier. The host sends `StreamStopped`
+once, when the window's stream ends (stopped, its last carrier stopped,
+or the window closed); the transport sends `TrackEnded` when a window's
+video track on the session ends, which alone ends no stream. Input,
+audio, clipboard, cursor and the window's own events never move: they
+are the session's. The window's sound starts with its first carrier,
+whichever it is, and stops with its stream.
 
 ### When a carrier switches, and why it does not flap
 

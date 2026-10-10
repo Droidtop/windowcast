@@ -133,6 +133,7 @@ fn main() {
                 identity: Arc::new(identity),
                 stats: Arc::new(HostStats::default()),
                 stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                input: true,
             };
             if let Err(e) = serve_window(listener, server) {
                 fail(&e.to_string());
