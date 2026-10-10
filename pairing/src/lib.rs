@@ -13,6 +13,10 @@
 //! established at the end of a successful run here — see `SessionKey` and
 //! the `authenticate_fingerprint`/`verify_fingerprint` helpers below, and
 //! the identity-binding step callers are expected to perform afterward.
+//! That step is [`exchange`]: the hellos, the transcript and the proofs,
+//! shared by windowcast's signaling and droidtop-agent's pairing.
+
+pub mod exchange;
 
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
@@ -27,6 +31,8 @@ pub enum PairingError {
     KeyExchangeFailed,
     #[error("fingerprint authentication tag did not match — possible MITM")]
     FingerprintAuthFailed,
+    #[error("the signature is not the sender's identity's")]
+    SignatureFailed,
 }
 
 /// A fixed-length key derived from the PAKE run. Zeroized on drop since

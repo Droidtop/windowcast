@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey, SECRET_KEY_LENGTH};
 use rand_core::OsRng;
@@ -87,6 +87,14 @@ impl Identity {
         Ok(identity)
     }
 
+    /// The identity from its 32-byte seed, the form the identity file holds
+    /// (and droidtop keeps sealed on the handheld).
+    pub fn from_seed(seed: &[u8; SECRET_KEY_LENGTH]) -> Self {
+        Identity {
+            signing_key: SigningKey::from_bytes(seed),
+        }
+    }
+
     pub fn peer_id(&self) -> PeerId {
         PeerId::from_verifying_key(&self.signing_key.verifying_key())
     }
@@ -121,6 +129,32 @@ pub fn verify_bytes(peer: &PeerId, message: &[u8], signature: &[u8]) -> bool {
     }
 }
 
+/// windowcast's own folder on this computer: `%APPDATA%\windowcast\app` on
+/// Windows, else `$XDG_CONFIG_HOME/windowcast/app` or
+/// `~/.config/windowcast/app`. The reference app keeps its host and client
+/// state under it unless told otherwise (`--data-dir`).
+pub fn app_dir() -> PathBuf {
+    let base = std::env::var_os("APPDATA")
+        .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("windowcast").join("app")
+}
+
+/// Where this computer's one device identity and its trusted devices live:
+/// the reference app's host folder. droidtop-agent keeps its identity and
+/// trusted handhelds here too, so a computer paired once, with either
+/// program, is paired for both.
+pub fn computer_dir() -> PathBuf {
+    app_dir().join("host")
+}
+
+/// The host's identity file in its data folder.
+pub const HOST_IDENTITY_FILE: &str = "agent-identity.key";
+/// The host's trusted devices in its data folder.
+pub const HOST_TRUST_FILE: &str = "agent-trusted-clients";
+
 /// A host's (or client's) list of pinned peers it trusts, persisted as one
 /// hex pubkey per line. Deliberately dumb storage — authorization *scope*
 /// per peer (which windows they may see) is a separate concern layered on
@@ -141,10 +175,28 @@ impl TrustStore {
         Ok(TrustStore { pinned })
     }
 
+    /// Writes the list beside `path` and renames it over, so a reader never
+    /// sees half of it.
     pub fn save(&self, path: &Path) -> Result<(), IdentityError> {
         let contents: String = self.pinned.iter().map(|p| format!("{p}\n")).collect();
-        fs::write(path, contents)?;
+        let tmp = path.with_extension("tmp");
+        fs::write(&tmp, contents)?;
+        fs::rename(&tmp, path)?;
         Ok(())
+    }
+
+    /// Changes the list at `path` as it is on disk now, and saves it: two
+    /// programs sharing one list (windowcast's host and droidtop-agent) each
+    /// pin and revoke without dropping the other's changes. Returns the
+    /// list as saved.
+    pub fn update(
+        path: &Path,
+        change: impl FnOnce(&mut TrustStore),
+    ) -> Result<TrustStore, IdentityError> {
+        let mut store = TrustStore::load(path)?;
+        change(&mut store);
+        store.save(path)?;
+        Ok(store)
     }
 
     pub fn pin(&mut self, peer: PeerId) {
@@ -168,6 +220,35 @@ impl TrustStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_writers_keep_each_others_pins() {
+        let dir = std::env::temp_dir().join(format!("wc-trust-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(HOST_TRUST_FILE);
+        let (a, b) = (
+            Identity::generate().peer_id(),
+            Identity::generate().peer_id(),
+        );
+        TrustStore::update(&path, |t| t.pin(a)).unwrap();
+        // The second writer starts from the list on disk, so the first pin stays.
+        let both = TrustStore::update(&path, |t| t.pin(b)).unwrap();
+        assert!(both.is_pinned(&a) && both.is_pinned(&b));
+        TrustStore::update(&path, |t| t.revoke(&a)).unwrap();
+        assert!(!TrustStore::load(&path).unwrap().is_pinned(&a));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_identity_comes_back_from_its_seed() {
+        let dir = std::env::temp_dir().join(format!("wc-seed-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(HOST_IDENTITY_FILE);
+        let made = Identity::load_or_generate(&path).unwrap();
+        let seed: [u8; SECRET_KEY_LENGTH] = fs::read(&path).unwrap().try_into().unwrap();
+        assert_eq!(Identity::from_seed(&seed).peer_id(), made.peer_id());
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn signs_and_verifies() {

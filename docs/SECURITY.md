@@ -88,6 +88,15 @@ bootstrap, not something re-entered per session.
 A paired peer's public key is a revocable grant (`TrustStore::revoke`), not
 a permanent "once paired, forever trusted" record.
 
+**One identity per computer, shared with droidtop-agent.** droidtop-agent,
+the program that keeps a computer in step with droidtop on a handheld, uses
+the same identity file and the same trusted-device list as the reference
+app's host (`windowcast_identity::computer_dir`). It pairs with the same
+exchange (`windowcast_pairing::exchange`) under its own label. So a device
+paired with either program is trusted by both, and forgetting it in either
+forgets it in both. Both write the list with `TrustStore::update`, against
+what is on disk.
+
 ## Away from the LAN: addresses through third parties, never data
 
 A host and a client it trusts find each other away from the LAN the way

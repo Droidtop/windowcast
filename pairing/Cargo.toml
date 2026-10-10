@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+windowcast-identity = { path = "../identity" }
 spake2 = "0.4"
 hkdf = "0.12"
 sha2 = "0.10"
