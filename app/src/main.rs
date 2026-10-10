@@ -16,8 +16,12 @@
 //! Usage: `windowcast-app [--role host|client|both] [--data-dir DIR]
 //! [--listen ADDR:PORT] [--no-window] [--connect ADDR [--pin PIN]
 //! [--stream APP_OR_TITLE] [--fullscreen] [--display N] [--codec h264|h265|av1]]`
+//! or `windowcast-app --open-pairing [--data-dir DIR]`
 //!
 //! `--no-window` runs a host without its window (the PIN is printed).
+//! `--open-pairing` asks the host already running on the data directory
+//! for a new PIN (pairing closes once a client pairs) and ends; the PIN
+//! shows in that host's window, or its output without one.
 //! `--stream` streams one window from the command line: only its stream
 //! window opens, and the program ends when it is closed.
 
@@ -37,7 +41,8 @@ use config::{Roles, Store};
 fn usage() -> ! {
     eprintln!(
         "usage: windowcast-app [--role host|client|both] [--data-dir DIR] [--listen ADDR:PORT] [--no-window]\n\
-         \x20                     [--connect ADDR [--pin PIN] [--stream APP_OR_TITLE] [--fullscreen] [--display N] [--codec h264|h265|av1]]"
+         \x20                     [--connect ADDR [--pin PIN] [--stream APP_OR_TITLE] [--fullscreen] [--display N] [--codec h264|h265|av1]]\n\
+         \x20      windowcast-app --open-pairing [--data-dir DIR]"
     );
     std::process::exit(2);
 }
@@ -48,6 +53,7 @@ struct Args {
     data_dir: Option<PathBuf>,
     listen: Option<String>,
     no_window: bool,
+    open_pairing: bool,
     connect: Option<String>,
     pin: Option<String>,
     stream: Option<String>,
@@ -64,6 +70,7 @@ fn parse() -> Args {
             "--data-dir" => parsed.data_dir = Some(PathBuf::from(value())),
             "--listen" => parsed.listen = Some(value()),
             "--no-window" => parsed.no_window = true,
+            "--open-pairing" => parsed.open_pairing = true,
             "--connect" => parsed.connect = Some(value()),
             "--pin" => parsed.pin = Some(value()),
             "--stream" => parsed.stream = Some(value()),
@@ -98,6 +105,21 @@ fn main() {
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         eprintln!("cannot use {}: {e}", data_dir.display());
         std::process::exit(1);
+    }
+    if args.open_pairing {
+        match host::request_open_pairing(&data_dir) {
+            Ok(()) => {
+                println!(
+                    "asked the host running on {} to open pairing; its new PIN shows in its window or output",
+                    data_dir.display()
+                );
+                return;
+            }
+            Err(e) => {
+                eprintln!("cannot ask the host: {e}");
+                std::process::exit(1);
+            }
+        }
     }
     let store = Arc::new(Store::load(&data_dir));
     let config = store.get();

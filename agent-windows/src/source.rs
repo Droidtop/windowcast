@@ -207,10 +207,32 @@ impl WindowSource for WindowsSource {
 }
 
 fn check_window(window: WindowId) -> Result<(), String> {
-    if unsafe { IsWindow(Some(windows_list::hwnd(window))) }.as_bool() {
-        Ok(())
-    } else {
-        Err("no such window".into())
+    if !unsafe { IsWindow(Some(windows_list::hwnd(window))) }.as_bool() {
+        return Err("no such window".into());
+    }
+    if desktop_locked() {
+        return Err(LOCKED.into());
+    }
+    Ok(())
+}
+
+/// Why nothing streams while the host is locked: its windows are not drawn
+/// then, so a capture never yields a picture (Droidtop/tracker#467).
+const LOCKED: &str = "the host computer is locked; unlock it to stream its windows";
+
+/// Whether the input desktop is out of this session's reach: the lock
+/// screen (and UAC's secure desktop) is a desktop of its own that a user's
+/// process cannot open.
+fn desktop_locked() -> bool {
+    use windows::Win32::System::StationsAndDesktops::{
+        CloseDesktop, OpenInputDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_SWITCHDESKTOP,
+    };
+    match unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_SWITCHDESKTOP) } {
+        Ok(desktop) => {
+            let _ = unsafe { CloseDesktop(desktop) };
+            false
+        }
+        Err(_) => true,
     }
 }
 

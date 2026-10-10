@@ -23,11 +23,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TrustStore::update`: pin or revoke against the list as it is on disk,
   so two programs sharing one list keep each other's changes. `save` now
   writes beside the file and renames it over.
+- `windowcast-app --open-pairing [--data-dir DIR]` asks the host running on that data
+  folder for a new PIN, window or not (pairing closes once a client pairs); the host
+  window's button reads "Open pairing" while pairing is closed.
+- `windowcast-testhost --pattern still`: the window stands still (lines of "text" sent
+  once a second), for trying a client's selector moving still content to RDP pictures
+  by itself.
+- Viewer: a "Refresh the window list" button; window lists and refusals are logged.
 
 ### Changed
 - The host reads its trusted-client list from disk when a client connects
   and when it lists them, so a device paired through droidtop-agent can
   resume at once.
+
+### Fixed
+- Windows host: the app no longer crashes opening its window (`OleInitialize` failed
+  with RPC_E_CHANGED_MODE): the main thread is made single-threaded COM before winit
+  starts, and the capture check initialises WinRT on a thread of its own
+  (Droidtop/tracker#464).
+- Shells on a Windows host show output: the terminal answers the cursor-position,
+  status and attribute queries, and ConPTY waits for the cursor position before
+  printing anything (Droidtop/tracker#466).
+- A Windows host that is locked refuses streams with "the host computer is locked;
+  unlock it to stream its windows" instead of a stream that never shows a picture.
+  The viewer shows why a popup (such as Save As) was refused, and a refused switch or
+  popup shows as a toast while a stream is on screen (Droidtop/tracker#467, #471).
+- A client in an emulator reaches the host's stream: the host's candidates are also
+  tried at the address the client dialled (10.0.2.2 from BlueStacks or the Android
+  emulator). When no path comes up, the error says so plainly instead of timing out
+  (Droidtop/tracker#465).
 
 ## [0.29.0] - 2026-10-10
 

@@ -249,6 +249,15 @@ pub struct HostRole {
     away_status: Arc<Mutex<windowcast_host::remote::RemoteStatus>>,
 }
 
+/// The file in a host's data directory that asks it to open pairing
+/// ([`request_open_pairing`]); the host takes it within a second.
+pub const OPEN_PAIRING_REQUEST: &str = "open-pairing";
+
+/// Asks the host running on `data_dir` to open pairing with a new PIN.
+pub fn request_open_pairing(data_dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::write(data_dir.join(OPEN_PAIRING_REQUEST), b"")
+}
+
 impl HostRole {
     /// Starts the host on `runtime`: opens the agent with the saved
     /// settings and serves on `listen`. Its snapshot is refreshed once a
@@ -317,7 +326,13 @@ impl HostRole {
         });
         role.set_away(settings.away, settings.away_port);
         let refresher = Arc::clone(&role);
+        let request = data_dir.join(OPEN_PAIRING_REQUEST);
         std::thread::spawn(move || loop {
+            // `windowcast-app --open-pairing` asks a running host for a
+            // new PIN, with or without its window.
+            if std::fs::remove_file(&request).is_ok() {
+                refresher.pairing(true);
+            }
             let snapshot = refresher.take_snapshot();
             *refresher.snapshot.lock().expect("snapshot") = snapshot;
             std::thread::sleep(Duration::from_secs(1));

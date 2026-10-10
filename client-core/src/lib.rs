@@ -317,6 +317,9 @@ impl Client {
             } else {
                 Session::new().await?
             };
+            if let Some(ip) = *host_ip {
+                session.set_dialed_address(ip);
+            }
             let credential = match pin {
                 Some(pin) => ClientCredential::Pin(pin),
                 None => ClientCredential::Pinned(trusted),
@@ -395,6 +398,9 @@ impl Client {
             } else {
                 Session::new().await?
             };
+            if let Some(ip) = host_ip {
+                session.set_dialed_address(ip);
+            }
             let credential = ClientCredential::Account {
                 trusted: &trusted,
                 accept,

@@ -58,6 +58,15 @@ mod imp {
         unsafe {
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         }
+        // The main thread is the window's, and winit's drag and drop needs
+        // it in OLE's single-threaded apartment: claim it first, so nothing
+        // the host starts on this thread can put it in the multithreaded
+        // one (OleInitialize then failed with RPC_E_CHANGED_MODE and the
+        // host window could not open, Droidtop/tracker#464). winit's own
+        // OleInitialize finds it done.
+        unsafe {
+            let _ = windows::Win32::System::Ole::OleInitialize(None);
+        }
     }
 }
 

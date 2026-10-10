@@ -115,6 +115,14 @@ pub enum TransportError {
     AudioNotNegotiated,
     #[error("timed out")]
     Timeout,
+    /// Signaling worked but no network path for the session itself: the
+    /// two ends' addresses do not reach each other (an emulator's NAT
+    /// address, a firewall dropping UDP).
+    #[error(
+        "reached the host, but no network path for the stream was found; from an emulator \
+         (10.0.2.2) or across a firewall, connect to the computer's LAN address"
+    )]
+    NoMediaPath,
     #[error("the session is closed")]
     Closed,
 }
@@ -167,6 +175,9 @@ pub struct Session {
     windows: Mutex<HashMap<WindowId, WindowTrack>>,
     /// Host side: the windows' audio tracks.
     audio: Mutex<HashMap<WindowId, AudioTrack>>,
+    /// Client side: the address the client reached the host's signaling
+    /// at ([`Session::set_dialed_address`]).
+    dialed: std::sync::Mutex<Option<std::net::IpAddr>>,
 }
 
 /// A track the host attached: a window's video or its audio.
@@ -298,6 +309,7 @@ impl Session {
             negotiation: Mutex::new(()),
             windows: Mutex::new(HashMap::new()),
             audio: Mutex::new(HashMap::new()),
+            dialed: std::sync::Mutex::new(None),
         })
     }
 
@@ -468,6 +480,35 @@ impl Session {
             .await
             .map_err(|_| TransportError::Timeout)?
             .map_err(|_| TransportError::Closed)?;
+        Ok(())
+    }
+
+    /// Client side: the address the client dialled the host's signaling
+    /// at. When the host's answer names no candidate there, the session
+    /// also tries the host's ports at that address: an emulator's NAT
+    /// (BlueStacks' and Android's 10.0.2.2) reaches the host that way,
+    /// while the host's own addresses are out of the guest's reach
+    /// (Droidtop/tracker#465).
+    pub fn set_dialed_address(&self, ip: std::net::IpAddr) {
+        *self.dialed.lock().expect("dialed") = Some(ip);
+    }
+
+    /// Adds the host's UDP host candidates again at the dialled address.
+    pub(crate) async fn add_dialed_candidates(&self, answer: &str) -> Result<(), TransportError> {
+        let Some(ip) = *self.dialed.lock().expect("dialed") else {
+            return Ok(());
+        };
+        for (mid, index, candidate) in candidates_at(answer, ip) {
+            let init = rtc::peer_connection::transport::RTCIceCandidateInit {
+                candidate,
+                sdp_mid: Some(mid),
+                sdp_mline_index: Some(index),
+                ..Default::default()
+            };
+            if let Err(e) = self.peer_connection.add_ice_candidate(init).await {
+                tracing::debug!("candidate at the dialled address not taken: {e}");
+            }
+        }
         Ok(())
     }
 
@@ -653,4 +694,71 @@ async fn answer_renegotiation(
         },
     )
     .await
+}
+
+/// The UDP host candidates of `sdp` again at `ip` (each with its m-line's
+/// mid and index), unless `sdp` already names `ip`.
+fn candidates_at(sdp: &str, ip: std::net::IpAddr) -> Vec<(String, u16, String)> {
+    let address = ip.to_string();
+    let mut out = Vec::new();
+    let mut mid = None::<String>;
+    let mut index = None::<u16>;
+    for line in sdp.lines() {
+        if line.starts_with("m=") {
+            index = Some(index.map_or(0, |i| i + 1));
+            mid = None;
+        } else if let Some(m) = line.strip_prefix("a=mid:") {
+            mid = Some(m.trim().to_owned());
+        } else if let Some(candidate) = line.strip_prefix("a=candidate:") {
+            let fields: Vec<&str> = candidate.split_whitespace().collect();
+            if fields.len() < 8 {
+                continue;
+            }
+            if fields[4] == address {
+                return Vec::new();
+            }
+            let host = fields.get(6) == Some(&"typ") && fields.get(7) == Some(&"host");
+            if !host || !fields[2].eq_ignore_ascii_case("udp") {
+                continue;
+            }
+            let mut rewritten: Vec<String> = fields.iter().map(|f| (*f).to_owned()).collect();
+            rewritten[0] = format!("{}d", fields[0]);
+            rewritten[4] = address.clone();
+            if let (Some(mid), Some(index)) = (&mid, index) {
+                out.push((mid.clone(), index, rewritten.join(" ")));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod dialed_tests {
+    use super::*;
+
+    #[test]
+    fn host_candidates_are_offered_again_at_the_dialled_address() {
+        let sdp = "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=mid:0\r\n\
+                   a=candidate:1 1 udp 2130706431 127.0.0.1 50001 typ host\r\n\
+                   a=candidate:2 1 udp 2130706431 192.168.1.5 50002 typ host\r\n\
+                   a=candidate:3 1 udp 1694498815 203.0.113.9 50003 typ srflx raddr 0.0.0.0 rport 0\r\n";
+        let at = candidates_at(sdp, "10.0.2.2".parse().unwrap());
+        assert_eq!(
+            at,
+            vec![
+                (
+                    "0".to_owned(),
+                    0,
+                    "1d 1 udp 2130706431 10.0.2.2 50001 typ host".to_owned()
+                ),
+                (
+                    "0".to_owned(),
+                    0,
+                    "2d 1 udp 2130706431 10.0.2.2 50002 typ host".to_owned()
+                ),
+            ]
+        );
+        // Dialled at one of the host's own addresses: nothing to add.
+        assert!(candidates_at(sdp, "192.168.1.5".parse().unwrap()).is_empty());
+    }
 }

@@ -192,6 +192,13 @@ class MainActivity : Activity() {
             hint = "Start on the host: program and arguments"
             inputType = InputType.TYPE_CLASS_TEXT
         }
+        val refresh = Button(this).apply {
+            text = "Refresh the window list"
+            setOnClickListener {
+                val s = session
+                if (s == null) status.text = "Not connected" else worker.execute { s.requestWindows() }
+            }
+        }
         val shell = Button(this).apply {
             text = "Open a shell on the host"
             setOnClickListener { openHostTerminal() }
@@ -233,6 +240,7 @@ class MainActivity : Activity() {
             addView(cancelBrowserSignIn, MATCH_PARENT, WRAP_CONTENT)
             addView(sendMicrophone, MATCH_PARENT, WRAP_CONTENT)
             addView(status, MATCH_PARENT, WRAP_CONTENT)
+            addView(refresh, MATCH_PARENT, WRAP_CONTENT)
             addView(shell, MATCH_PARENT, WRAP_CONTENT)
             addView(launchLine, MATCH_PARENT, WRAP_CONTENT)
             addView(launch, MATCH_PARENT, WRAP_CONTENT)
@@ -591,13 +599,18 @@ class MainActivity : Activity() {
                     is Event.CarrierRefused -> main.post {
                         if (event.window == watching?.id && switching?.generation == event.generation) {
                             cancelSwitch()
-                            status.text = "No switch: ${event.reason}"
+                            tell("No switch: ${event.reason}")
                         }
                     }
                     is Event.StreamRefused -> main.post {
+                        android.util.Log.i(TAG, "window ${event.window} refused: ${event.reason}")
                         if (event.window == watching?.id) {
                             status.text = "Refused: ${event.reason}"
                             showForm()
+                        } else {
+                            // A window the host opened as it appeared (a
+                            // dialog such as Save As) that could not be shown.
+                            tell("A new window could not be shown: ${event.reason}")
                         }
                     }
                     is Event.StreamStopped -> main.post {
@@ -620,7 +633,17 @@ class MainActivity : Activity() {
         reader.start()
     }
 
+    /**
+     * Says [text] on the status line, and as a toast while a stream covers that line, so a
+     * refused switch or popup is not silent while watching (Droidtop/tracker#471).
+     */
+    private fun tell(text: String) {
+        status.text = text
+        if (streaming()) android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show()
+    }
+
     private fun showWindows(list: List<WindowInfo>) {
+        android.util.Log.i(TAG, "window list: ${list.size} windows")
         windows = list
         this.list.removeAllViews()
         for (window in list) {
@@ -1154,6 +1177,7 @@ class MainActivity : Activity() {
     }
 
     companion object {
+        private const val TAG = "windowcast"
         private const val RECORD_REQUEST = 1
         private const val MENU_VIDEO = 1
         private const val MENU_PICTURES = 2

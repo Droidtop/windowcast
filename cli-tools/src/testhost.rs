@@ -4,20 +4,23 @@
 //! sessions and streams are the real host library.
 //!
 //! Usage: `windowcast-testhost [--listen ADDR:PORT] [--no-pairing] [--tone]
-//! [--microphone-level] [--content general|text|game|video] [--carriers native,rdp]`
+//! [--microphone-level] [--content general|text|game|video] [--carriers native,rdp]
+//! [--pattern moving|still]`
 //! (`--carriers`: the carriers offered, both by default; `--carriers native`
 //! refuses a switch to RDP pictures, for trying a refused switch; `--content`: the
 //! window's content hint, which the default rules turn into a backend, so
 //! `--content text` makes a client get RDP; `--tone`: the window also sounds a 440 Hz tone,
 //! for trying a client's audio; `--microphone-level`: a client's
 //! microphone is taken and its level printed once a second, the sound
-//! itself kept nowhere).
+//! itself kept nowhere; `--pattern still`: the window stands still, lines
+//! of "text" sent once a second, so a client's selector moves it to RDP
+//! pictures by itself).
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use windowcast_cli_tools::testpattern::{
-    parse_content, TestPatternSource, TestPatternWithTone, WithContent,
+    parse_content, StillTextSource, TestPatternSource, TestPatternWithTone, WithContent,
 };
 use windowcast_host::audio::{AudioSource, MicrophoneSink};
 use windowcast_host::{FrameSource, HostConfig, WindowSource, DEFAULT_LISTEN};
@@ -93,6 +96,7 @@ async fn main() {
     let mut measure = false;
     let mut content = None;
     let mut rdp = true;
+    let mut still = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -117,6 +121,11 @@ async fn main() {
                 }
                 rdp = names.contains(&"rdp");
             }
+            "--pattern" => match args.next().as_deref() {
+                Some("moving") => still = false,
+                Some("still") => still = true,
+                other => panic!("--pattern needs moving or still, not {other:?}"),
+            },
             other => panic!("unknown argument {other}"),
         }
     }
@@ -125,7 +134,12 @@ async fn main() {
         pairing,
         data_dir: windowcast_cli_tools::data_dir().join("testhost"),
     };
-    let source: Arc<dyn WindowSource> = if tone {
+    if still && tone {
+        panic!("--tone sounds over the moving pattern only");
+    }
+    let source: Arc<dyn WindowSource> = if still {
+        Arc::new(StillTextSource)
+    } else if tone {
         Arc::new(TestPatternWithTone)
     } else {
         Arc::new(TestPatternSource)

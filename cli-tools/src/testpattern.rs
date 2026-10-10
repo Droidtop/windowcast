@@ -46,23 +46,7 @@ impl WindowSource for TestPatternSource {
     }
 
     fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
-        if window != WINDOW {
-            return Err("no such window".into());
-        }
-        if codec != VideoCodec::H264 {
-            return Err("the test pattern only encodes H.264".into());
-        }
-        let config = EncoderConfig::new()
-            .max_frame_rate(FrameRate::from_hz(FPS as f32))
-            // Keyframes on request, plus one every two seconds.
-            .intra_frame_period(IntraFramePeriod::from_num_frames(FPS * 2));
-        let encoder = Encoder::with_api_config(OpenH264API::from_source(), config)
-            .map_err(|e| format!("encoder: {e}"))?;
-        Ok(Box::new(TestPattern {
-            encoder,
-            frame: 0,
-            next_at: Instant::now(),
-        }))
+        Ok(Box::new(open_pattern(window, codec, false)?))
     }
 
     fn open_pictures(&self, window: WindowId) -> Option<Result<Box<dyn PictureSource>, String>> {
@@ -70,15 +54,81 @@ impl WindowSource for TestPatternSource {
             Ok(Box::new(TestPictures {
                 frame: 0,
                 next_at: Instant::now(),
+                still: false,
             }) as _)
         })
     }
+}
+
+/// The test pattern standing still: the same picture, with lines of
+/// "text", sent once a second (a capture sends nothing while a window does
+/// not change; once a second keeps a client's stream alive). For trying
+/// the selector: a still window scores better on RDP pictures, so a client
+/// moves it there by itself.
+pub struct StillTextSource;
+
+/// How often a still window sends its picture again.
+const STILL_TIME: Duration = Duration::from_secs(1);
+
+impl WindowSource for StillTextSource {
+    fn list_windows(&self) -> Vec<WindowInfo> {
+        let mut windows = TestPatternSource.list_windows();
+        for window in &mut windows {
+            window.title = "windowcast still text".into();
+        }
+        windows
+    }
+
+    fn encoders(&self) -> Vec<VideoCodec> {
+        TestPatternSource.encoders()
+    }
+
+    fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
+        TestPatternSource.input(event, focus)
+    }
+
+    fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
+        Ok(Box::new(open_pattern(window, codec, true)?))
+    }
+
+    fn open_pictures(&self, window: WindowId) -> Option<Result<Box<dyn PictureSource>, String>> {
+        (window == WINDOW).then(|| {
+            Ok(Box::new(TestPictures {
+                frame: 0,
+                next_at: Instant::now(),
+                still: true,
+            }) as _)
+        })
+    }
+}
+
+/// The pattern's encoder for `window`, moving or still.
+fn open_pattern(window: WindowId, codec: VideoCodec, still: bool) -> Result<TestPattern, String> {
+    if window != WINDOW {
+        return Err("no such window".into());
+    }
+    if codec != VideoCodec::H264 {
+        return Err("the test pattern only encodes H.264".into());
+    }
+    let config = EncoderConfig::new()
+        .max_frame_rate(FrameRate::from_hz(FPS as f32))
+        // Keyframes on request, plus one every two seconds.
+        .intra_frame_period(IntraFramePeriod::from_num_frames(FPS * 2));
+    let encoder = Encoder::with_api_config(OpenH264API::from_source(), config)
+        .map_err(|e| format!("encoder: {e}"))?;
+    Ok(TestPattern {
+        encoder,
+        frame: 0,
+        next_at: Instant::now(),
+        still,
+    })
 }
 
 /// The test pattern's pictures, unencoded.
 struct TestPictures {
     frame: u64,
     next_at: Instant,
+    still: bool,
 }
 
 impl PictureSource for TestPictures {
@@ -86,6 +136,10 @@ impl PictureSource for TestPictures {
         let now = Instant::now();
         if self.next_at > now {
             std::thread::sleep(self.next_at - now);
+        }
+        if self.still {
+            self.next_at += STILL_TIME;
+            return Some(still_bgra());
         }
         self.next_at += FRAME_TIME;
         let picture = draw_bgra(self.frame);
@@ -114,6 +168,37 @@ pub fn draw_bgra(frame: u64) -> Picture {
                 pixel = [v, v, v, 255];
             }
             data[(y * w + x) * 4..][..4].copy_from_slice(&pixel);
+        }
+    }
+    Picture {
+        width: w as u32,
+        height: h as u32,
+        stride: w * 4,
+        data,
+    }
+}
+
+/// Whether (x, y) is ink in the still picture's lines of "text": rows of
+/// short dark words on a light page.
+fn text_ink(x: usize, y: usize) -> bool {
+    let (line, in_line) = (y / 24, y % 24);
+    let word = (x + line * 37) % 90;
+    (2..=12).contains(&line)
+        && in_line < 12
+        && x > 32
+        && x < WIDTH - 32
+        && word < 70
+        && !word.is_multiple_of(9)
+}
+
+/// The still picture as BGRA: dark lines of "text" on a light page.
+pub fn still_bgra() -> Picture {
+    let (w, h) = (WIDTH, HEIGHT);
+    let mut data = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let v = if text_ink(x, y) { 24 } else { 240 };
+            data[(y * w + x) * 4..][..4].copy_from_slice(&[v, v, v, 255]);
         }
     }
     Picture {
@@ -266,6 +351,7 @@ struct TestPattern {
     encoder: Encoder,
     frame: u64,
     next_at: Instant,
+    still: bool,
 }
 
 const FRAME_TIME: Duration = Duration::from_nanos(1_000_000_000 / FPS as u64);
@@ -276,9 +362,14 @@ impl FrameSource for TestPattern {
         if self.next_at > now {
             std::thread::sleep(self.next_at - now);
         }
-        self.next_at += FRAME_TIME;
+        let (time, pixels) = if self.still {
+            (STILL_TIME, draw_still())
+        } else {
+            (FRAME_TIME, draw(self.frame))
+        };
+        self.next_at += time;
 
-        let picture = YUVBuffer::from_vec(draw(self.frame), WIDTH, HEIGHT);
+        let picture = YUVBuffer::from_vec(pixels, WIDTH, HEIGHT);
         if keyframe {
             self.encoder.force_intra_frame();
         }
@@ -287,10 +378,22 @@ impl FrameSource for TestPattern {
         self.frame += 1;
         Some(EncodedFrame {
             data,
-            duration: FRAME_TIME,
+            duration: time,
             size: first.then_some((WIDTH as u32, HEIGHT as u32)),
         })
     }
+}
+
+/// The still picture as I420.
+fn draw_still() -> Vec<u8> {
+    let (w, h) = (WIDTH, HEIGHT);
+    let mut yuv = vec![128u8; w * h * 3 / 2];
+    for y in 0..h {
+        for x in 0..w {
+            yuv[y * w + x] = if text_ink(x, y) { 24 } else { 235 };
+        }
+    }
+    yuv
 }
 
 /// One I420 picture: a luma ramp, a bar that sweeps across, and the frame
@@ -332,6 +435,28 @@ fn draw(frame: u64) -> Vec<u8> {
 #[cfg(test)]
 mod content_tests {
     use super::*;
+
+    #[test]
+    fn the_still_pattern_is_the_same_picture_once_a_second() {
+        let mut pictures = StillTextSource.open_pictures(WINDOW).unwrap().unwrap();
+        let first = pictures.next_picture().unwrap();
+        let started = Instant::now();
+        let second = pictures.next_picture().unwrap();
+        assert!(started.elapsed() >= STILL_TIME - Duration::from_millis(50));
+        assert_eq!(first.data, second.data);
+        // Lines of dark "text" on a light page.
+        assert!(first.data.as_chunks::<4>().0.iter().any(|p| p[0] < 64));
+        assert!(
+            first
+                .data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[0] > 200)
+                .count()
+                > WIDTH * HEIGHT / 2
+        );
+    }
 
     #[test]
     fn with_content_overrides_every_windows_hint() {

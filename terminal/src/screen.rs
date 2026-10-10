@@ -20,9 +20,38 @@ const SCROLLBACK: usize = 1000;
 struct Callbacks {
     /// Text programs set on the clipboard (OSC 52), not yet taken.
     clipboard: Vec<String>,
+    /// Answers to the program's queries, to send it.
+    replies: Vec<Vec<u8>>,
 }
 
 impl vt100::Callbacks for Callbacks {
+    /// The queries a program waits on: the cursor position (CSI 6 n),
+    /// the terminal's status (CSI 5 n) and its attributes (CSI c). Windows'
+    /// ConPTY asks for the cursor position before it shows anything
+    /// (portable-pty creates it with PSEUDOCONSOLE_INHERIT_CURSOR), so a
+    /// terminal that never answers stays blank (Droidtop/tracker#466).
+    fn unhandled_csi(
+        &mut self,
+        screen: &mut vt100::Screen,
+        i1: Option<u8>,
+        _i2: Option<u8>,
+        params: &[&[u16]],
+        c: char,
+    ) {
+        let first = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
+        let reply = match (i1, c, first) {
+            (None, 'n', 6) => {
+                let (row, col) = screen.cursor_position();
+                format!("\x1b[{};{}R", row + 1, col + 1)
+            }
+            (None, 'n', 5) => "\x1b[0n".to_owned(),
+            // A VT100 with advanced video.
+            (None, 'c', 0) => "\x1b[?1;2c".to_owned(),
+            _ => return,
+        };
+        self.replies.push(reply.into_bytes());
+    }
+
     /// OSC 52 ; selection ; base64 data. A request to read the clipboard
     /// (`paste_from_clipboard`) is left unanswered: a remote program never
     /// gets the user's clipboard.
@@ -220,7 +249,14 @@ impl Terminal {
             };
             match event {
                 ChannelEvent::Data(bytes) => {
-                    state.parser.lock().expect("screen").process(&bytes);
+                    let replies = {
+                        let mut parser = state.parser.lock().expect("screen");
+                        parser.process(&bytes);
+                        std::mem::take(&mut parser.callbacks_mut().replies)
+                    };
+                    for reply in replies {
+                        reader.write(&reply);
+                    }
                 }
                 ChannelEvent::Exited(code) => {
                     state.ended.lock().expect("ended").get_or_insert(code);
@@ -476,6 +512,21 @@ mod tests {
         // A request to read the clipboard is never answered.
         feed(&end, &t, b"\x1b]52;c;?\x07x");
         assert!(t.take_clipboard().is_empty());
+    }
+
+    #[test]
+    fn the_cursor_position_query_is_answered() {
+        let (t, mut end) = terminal();
+        // As Windows' ConPTY does before its first output.
+        feed(&end, &t, b"ab\x1b[6n");
+        feed(&end, &t, b"\x1b[5n\x1b[c");
+        let mut sent = Vec::new();
+        while let Ok(command) = end.commands.try_recv() {
+            if let crate::channel::Command::Data(bytes) = command {
+                sent.extend(bytes);
+            }
+        }
+        assert_eq!(sent, b"\x1b[1;3R\x1b[0n\x1b[?1;2c");
     }
 
     #[test]

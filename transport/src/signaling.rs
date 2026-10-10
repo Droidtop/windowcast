@@ -221,6 +221,9 @@ where
 /// The whole exchange, including PIN key exchange, ICE gathering and the
 /// control channel opening.
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long the session's own path may take once signaling is done (inside
+/// HANDSHAKE_TIMEOUT).
+const MEDIA_PATH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 async fn connect_inner<S>(
     stream: &mut S,
@@ -317,9 +320,14 @@ where
     )
     .await?;
     session
-        .set_remote_description(SdpKind::Answer, answer)
+        .set_remote_description(SdpKind::Answer, answer.clone())
         .await?;
-    session.wait_control_open().await?;
+    session.add_dialed_candidates(&answer).await?;
+    // Signaling is done; what is left is the network path. Running out of
+    // time here is that, said plainly (Droidtop/tracker#465).
+    tokio::time::timeout(MEDIA_PATH_TIMEOUT, session.wait_control_open())
+        .await
+        .map_err(|_| TransportError::NoMediaPath)??;
     Ok((host.peer, key.is_some(), mode == ConnectMode::Account))
 }
 

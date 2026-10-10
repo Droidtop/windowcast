@@ -320,7 +320,8 @@ impl App {
                 }
             }
             ui.horizontal(|ui| {
-                if ui.button("New PIN").clicked() {
+                let open = if snapshot.pin.is_some() { "New PIN" } else { "Open pairing" };
+                if ui.button(open).clicked() {
                     host.pairing(true);
                 }
                 if ui.button("Close pairing").clicked() {
