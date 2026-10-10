@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - One table for PC scan codes and evdev key codes (`windowcast_protocol::keys`), used by the Windows agent, the Windows client and RDP, in place of the two copies the Windows crates had.
+## [Unreleased]
+
+### Added
+- Account sign-in beside PIN pairing (Droidtop/tracker#443, docs/ACCOUNTS.md), in the new `windowcast-accounts` crate: a client signs in once and the host registers its device key to the account; later connections resume with the key while the registration lasts (30 days by default). Sign-in methods: the host's own accounts (Argon2id), the host OS's accounts (PAM on Linux, `LogonUserW` on Windows), LDAP and Active Directory (bind template or search then bind, groups from `memberOf` or a group search), OpenID Connect (authorization code with PKCE through a loopback redirect, or the device code flow; ID tokens checked against the provider's keys, bound to the device by their nonce, used once; SAML through an OIDC broker), and Kerberos with the user's tickets (GSS-API on Linux, SSPI on Windows). The credential crosses sealed with HPKE to a host key the client already trusts or the user confirmed by its fingerprint. A per-host policy decides who connects, which windows they see and stream, and whether they send input or use commands. A host with an SSH CA key signs short-lived SSH user certificates for signed-in accounts. Protocol version 6.
+- client-core: `Client::sign_in_options`, `Client::connect_account`, `Client::oidc_browser`, `Client::oidc_device`, `ClientSession::request_ssh_certificate`, and their C functions. The reference app signs in on the client (password, a provider in the browser, Kerberos) and keeps accounts and registered devices on the host.
+
+### Changed
+- The account crate removed in 0.16.0 is back as `windowcast-accounts`: its Argon2id account store is the local accounts; its directory CA and PASETO session certificates are gone (an organisation's own identity provider is the directory).
 
 ## [0.19.1] - 2026-10-09
 

@@ -10,10 +10,14 @@ that path can substitute their own fingerprint and sit in the middle — a
 PIN that's only checked out-of-band, and never actually bound into the key
 agreement, doesn't stop that.
 
-windowcast's credential is the device: the client device itself is the
-identity, the same no matter who is sitting at it. This is the
+windowcast's first credential is the device: the client device itself is
+the identity, the same no matter who is sitting at it. This is the
 Moonlight/GameStream shape: pair once with a device, stream to that device
-from then on.
+from then on. The second is an account a person signs in with (a local or
+OS account, LDAP, OpenID Connect, Kerberos), which registers the device's
+key to the account instead of a PIN pinning it; see
+[ACCOUNTS.md](ACCOUNTS.md). Either way the device key identifies the
+endpoint and signs the session.
 
 ## Device credential: PIN-authenticated key exchange, not just a PIN check
 
@@ -44,12 +48,16 @@ design.
 the next one as one exchange over any byte stream (a LAN TCP socket today):
 
 1. Both sides send `Hello`: protocol version, persistent Ed25519 public
-   key, a fresh 32-byte nonce, and the client's mode (`Pair` or `Resume`).
+   key, a fresh 32-byte nonce, and the client's mode (`Pair`, `Resume` or
+   `Account`).
 2. `Pair` only: one SPAKE2 message each way, seeded with the PIN.
+   `Account` only: the host's signed sign-in offer with a fresh HPKE key,
+   and the client's credential sealed to it, sent only to a host key the
+   client already trusts (ACCOUNTS.md, "Signing in on the wire").
 3. The client's offer and the host's answer are each signed with the
    sender's identity key over a transcript of: a domain label, the
-   description kind, the mode, both nonces, both public keys, and the
-   **complete SDP**. While pairing, each is also HMAC-SHA256-tagged with
+   description kind, the mode, both nonces, both public keys, a hash of
+   the account sign-in (zeros without one), and the **complete SDP**. While pairing, each is also HMAC-SHA256-tagged with
    the PIN-derived key over the same transcript.
 
 Authenticating the whole SDP rather than just the fingerprint line also

@@ -35,6 +35,10 @@ opus = "0.3"
 
 [dev-dependencies]
 windowcast-identity = { path = "../identity" }
+windowcast-accounts = { path = "../accounts" }
+# Following a test identity provider's redirects in the sign-in tests.
+ureq = { version = "2", default-features = false }
+url = "2"
 windowcast-transport = { path = "../transport" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

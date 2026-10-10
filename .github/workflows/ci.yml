@@ -28,7 +28,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwayland-dev libxkbcommon-dev libpulse-dev pkg-config
+          sudo apt-get install -y libwayland-dev libxkbcommon-dev libpulse-dev pkg-config libpam0g-dev libkrb5-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -72,6 +72,105 @@ jobs:
           sudo modprobe uinput || { sudo apt-get install -y "linux-modules-extra-$(uname -r)" && sudo modprobe uinput; }
           cargo test -p windowcast-agent-linux --test gamepad --no-run --message-format=json             | jq -r 'select(.profile.test == true and .target.name == "gamepad") | .executable'             > gamepad-test-path
           sudo WINDOWCAST_TEST_UINPUT=1 "$(cat gamepad-test-path)" --nocapture
+
+      # Account sign-in against identity services run on this runner only
+      # (docs/ACCOUNTS.md): Dex for OpenID Connect (its mock connector signs
+      # in without a form), slapd for LDAP, an MIT KDC for Kerberos, and a
+      # local user through PAM. Nothing outside the runner is asked.
+      - name: Sign-in against local identity services
+        run: |
+          set -eu
+          # OpenID Connect: Dex with a public client and no stored users.
+          cat > /tmp/dex.yaml <<'YAML'
+          issuer: http://127.0.0.1:5556/dex
+          storage:
+            type: memory
+          web:
+            http: 127.0.0.1:5556
+          oauth2:
+            skipApprovalScreen: true
+          enablePasswordDB: false
+          connectors:
+            - type: mockCallback
+              id: mock
+              name: Mock
+          staticClients:
+            - id: windowcast
+              name: windowcast
+              public: true
+          YAML
+          docker run -d --name dex --network host -v /tmp/dex.yaml:/dex.yaml:ro \
+            ghcr.io/dexidp/dex:v2.41.1 dex serve /dex.yaml
+          # LDAP: slapd for dc=windowcast,dc=test, one user in one group.
+          printf '%s\n' \
+            'slapd slapd/domain string windowcast.test' \
+            'slapd shared/organization string windowcast' \
+            'slapd slapd/password1 password admin-password' \
+            'slapd slapd/password2 password admin-password' \
+            'slapd slapd/no_configuration boolean false' | sudo debconf-set-selections
+          printf '%s\n' 'krb5-config krb5-config/default_realm string WINDOWCAST.TEST' \
+            | sudo debconf-set-selections
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y slapd ldap-utils \
+            krb5-kdc krb5-admin-server krb5-user
+          cat > /tmp/seed.ldif <<'LDIF'
+          dn: ou=people,dc=windowcast,dc=test
+          objectClass: organizationalUnit
+          ou: people
+
+          dn: ou=groups,dc=windowcast,dc=test
+          objectClass: organizationalUnit
+          ou: groups
+
+          dn: uid=alice,ou=people,dc=windowcast,dc=test
+          objectClass: inetOrgPerson
+          uid: alice
+          cn: Alice
+          sn: Example
+          userPassword: alice-password
+
+          dn: cn=streamers,ou=groups,dc=windowcast,dc=test
+          objectClass: groupOfNames
+          cn: streamers
+          member: uid=alice,ou=people,dc=windowcast,dc=test
+          LDIF
+          ldapadd -x -H ldap://127.0.0.1 -D cn=admin,dc=windowcast,dc=test -w admin-password -f /tmp/seed.ldif
+          # Kerberos: realm WINDOWCAST.TEST on loopback, a user and a service.
+          printf '%s\n' '[libdefaults]' ' default_realm = WINDOWCAST.TEST' ' dns_lookup_kdc = false' \
+            ' dns_lookup_realm = false' ' rdns = false' '[realms]' \
+            ' WINDOWCAST.TEST = {' '  kdc = 127.0.0.1' '  admin_server = 127.0.0.1' ' }' \
+            | sudo tee /etc/krb5.conf > /dev/null
+          sudo kdb5_util create -s -r WINDOWCAST.TEST -P master-password
+          sudo kadmin.local -q 'addprinc -pw alice-password alice'
+          sudo kadmin.local -q 'addprinc -randkey host/localhost'
+          sudo kadmin.local -q 'ktadd -k /tmp/windowcast.keytab host/localhost'
+          sudo chmod 644 /tmp/windowcast.keytab
+          sudo systemctl restart krb5-kdc
+          export KRB5CCNAME=FILE:/tmp/windowcast-ccache
+          echo alice-password | kinit alice
+          # PAM: a local user, checked through a service file of our own.
+          sudo useradd -m wcpam
+          echo 'wcpam:Wc-pam-test-1' | sudo chpasswd
+          printf '%s\n' '@include common-auth' '@include common-account' \
+            | sudo tee /etc/pam.d/windowcast > /dev/null
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:5556/dex/.well-known/openid-configuration > /dev/null && break
+            sleep 1
+          done
+
+          cargo test -p windowcast-accounts --all-features --no-run --message-format=json \
+            | jq -r 'select(.profile.test == true and .target.name == "windowcast_accounts") | .executable' \
+            > accounts-test-path
+          WINDOWCAST_TEST_LDAP=ldap://127.0.0.1:389 \
+          WINDOWCAST_TEST_KERBEROS_SERVICE=host/localhost@WINDOWCAST.TEST \
+          WINDOWCAST_TEST_KERBEROS_USER=alice@WINDOWCAST.TEST \
+          KRB5_KTNAME=/tmp/windowcast.keytab \
+            "$(cat accounts-test-path)" --nocapture
+          # pam_unix reads /etc/shadow for another user's password: root.
+          sudo WINDOWCAST_TEST_OS_USER=wcpam WINDOWCAST_TEST_OS_PASSWORD=Wc-pam-test-1 \
+            WINDOWCAST_TEST_PAM_SERVICE=windowcast "$(cat accounts-test-path)" os::tests --nocapture
+          WINDOWCAST_TEST_OIDC=http://127.0.0.1:5556/dex \
+            cargo test -p windowcast-cli-tools --test accounts -- --nocapture \
+            || { docker logs dex; exit 1; }
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
