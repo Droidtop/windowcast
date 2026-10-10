@@ -110,3 +110,12 @@ Until a backend is built, hosts do not list it as available, so every
 request falls back to `Native` and nothing breaks while the others arrive.
 Clients expose the user rules as options with these defaults; droidtop's
 Desktop mode is one such client.
+
+## Commands and terminals
+
+A shell, an application launch and other remote commands are not a
+backend of a window: they are channels of the command stream
+(docs/COMMAND-STREAM.md), on the session and to any SSH server. Selection
+never chooses them and no default rule leads to them; a launched
+application's windows appear in the window list and are then chosen a
+backend like any other.
