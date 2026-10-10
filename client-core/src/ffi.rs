@@ -13,7 +13,10 @@ use std::time::Duration;
 
 use windowcast_protocol::{VideoCodec, WindowId};
 
-use crate::{Client, ClientSession, FramePoll};
+use windowcast_accounts::oidc::BrowserSignIn;
+use windowcast_protocol::OidcProviderInfo;
+
+use crate::{Client, ClientSession, FramePoll, SignIn};
 
 pub const WINDOWCAST_TIMEOUT: i64 = 0;
 pub const WINDOWCAST_ENDED: i64 = -1;
@@ -560,6 +563,180 @@ pub unsafe extern "C" fn windowcast_session_next_audio(
     }
     std::ptr::copy_nonoverlapping(packet.data.as_ptr(), out, packet.data.len());
     packet.data.len() as i64
+}
+
+/// Asks the host at `address` which account sign-ins it takes, without
+/// signing in, and writes them into `out` as JSON (`host_id`,
+/// `fingerprint`, `trusted`, `methods`, `providers`, `kerberos_service`).
+/// Returns the JSON's length, [`WINDOWCAST_BUFFER_TOO_SMALL`], or
+/// [`WINDOWCAST_ERROR`] with the reason in `out`.
+///
+/// # Safety
+/// `client` must be valid; `address` NUL-terminated; `out` valid for `cap`
+/// bytes.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_sign_in_options(
+    client: *const Client,
+    address: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+) -> i64 {
+    let (Some(client), Some(address)) = (client.as_ref(), str_arg(address)) else {
+        write_text("invalid arguments", out, cap);
+        return WINDOWCAST_ERROR;
+    };
+    match client.sign_in_options(address) {
+        Ok(options) => {
+            let json = serde_json::to_string(&options).unwrap_or_default();
+            if json.len() >= cap {
+                return WINDOWCAST_BUFFER_TOO_SMALL;
+            }
+            write_text(&json, out, cap);
+            json.len() as i64
+        }
+        Err(e) => {
+            write_text(&e.to_string(), out, cap);
+            WINDOWCAST_ERROR
+        }
+    }
+}
+
+/// Signs in to the host at `address` with an account and connects.
+/// `sign_in` is JSON: `{"password":{"username":"..","password":".."}}`,
+/// `{"oidc":{"provider":"..","id_token":".."}}` or `"kerberos"`. The
+/// credential goes only to a host this client trusts or whose identity
+/// (64 hex digits) the user confirmed as `accept_host` (may be null);
+/// otherwise this fails with an error naming the host's identity. Returns
+/// null on failure, with the reason in `error`.
+///
+/// # Safety
+/// As [`windowcast_connect`]; `accept_host` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_connect_account(
+    client: *const Client,
+    address: *const c_char,
+    sign_in: *const c_char,
+    accept_host: *const c_char,
+    error: *mut c_char,
+    error_cap: usize,
+) -> *mut ClientSession {
+    let (Some(client), Some(address), Some(sign_in)) =
+        (client.as_ref(), str_arg(address), str_arg(sign_in))
+    else {
+        write_text("invalid arguments", error, error_cap);
+        return std::ptr::null_mut();
+    };
+    let sign_in: SignIn = match serde_json::from_str(sign_in) {
+        Ok(sign_in) => sign_in,
+        Err(e) => {
+            write_text(&format!("sign-in: {e}"), error, error_cap);
+            return std::ptr::null_mut();
+        }
+    };
+    match client.connect_account(address, &sign_in, str_arg(accept_host)) {
+        Ok(session) => Box::into_raw(Box::new(session)),
+        Err(e) => {
+            write_text(&e.to_string(), error, error_cap);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Starts signing in with an OpenID Connect provider in the user's
+/// browser. `provider` is one of the providers
+/// [`windowcast_sign_in_options`] listed, as JSON. Writes the page to open
+/// into `url` and returns a handle for [`windowcast_oidc_browser_finish`];
+/// null on failure, with the reason in `url`.
+///
+/// # Safety
+/// `client` must be valid; `provider` NUL-terminated; `url` valid for
+/// `url_cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_oidc_browser_start(
+    client: *const Client,
+    provider: *const c_char,
+    url: *mut c_char,
+    url_cap: usize,
+) -> *mut BrowserSignIn {
+    let (Some(client), Some(provider)) = (client.as_ref(), str_arg(provider)) else {
+        write_text("invalid arguments", url, url_cap);
+        return std::ptr::null_mut();
+    };
+    let provider: OidcProviderInfo = match serde_json::from_str(provider) {
+        Ok(provider) => provider,
+        Err(e) => {
+            write_text(&format!("provider: {e}"), url, url_cap);
+            return std::ptr::null_mut();
+        }
+    };
+    match client.oidc_browser(&provider) {
+        Ok(sign_in) if sign_in.url().len() < url_cap => {
+            write_text(sign_in.url(), url, url_cap);
+            Box::into_raw(Box::new(sign_in))
+        }
+        Ok(_) => {
+            write_text("the URL does not fit", url, url_cap);
+            std::ptr::null_mut()
+        }
+        Err(e) => {
+            write_text(&e.to_string(), url, url_cap);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Waits up to `timeout_ms` for the browser to come back and writes the ID
+/// token into `token` (for the `oidc` sign-in). Frees `sign_in` whatever
+/// happens. Returns the token's length, [`WINDOWCAST_BUFFER_TOO_SMALL`],
+/// or [`WINDOWCAST_ERROR`] with the reason in `token`.
+///
+/// # Safety
+/// `sign_in` must come from [`windowcast_oidc_browser_start`] and not be
+/// used again; `token` valid for `token_cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_oidc_browser_finish(
+    sign_in: *mut BrowserSignIn,
+    timeout_ms: u32,
+    token: *mut c_char,
+    token_cap: usize,
+) -> i64 {
+    if sign_in.is_null() {
+        write_text("invalid arguments", token, token_cap);
+        return WINDOWCAST_ERROR;
+    }
+    let sign_in = Box::from_raw(sign_in);
+    match sign_in.finish(Duration::from_millis(u64::from(timeout_ms))) {
+        Ok(id_token) if id_token.len() < token_cap => {
+            write_text(&id_token, token, token_cap);
+            id_token.len() as i64
+        }
+        Ok(_) => WINDOWCAST_BUFFER_TOO_SMALL,
+        Err(e) => {
+            write_text(&e.to_string(), token, token_cap);
+            WINDOWCAST_ERROR
+        }
+    }
+}
+
+/// Asks the host for an SSH user certificate for `public_key` (an OpenSSH
+/// public key line), for the account this client signed in with; it
+/// arrives as an `ssh_certificate` event. Returns 0, or
+/// [`WINDOWCAST_ERROR`] if the session is gone.
+///
+/// # Safety
+/// `session` must be valid; `public_key` NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_request_ssh_certificate(
+    session: *const ClientSession,
+    public_key: *const c_char,
+) -> i64 {
+    match (session.as_ref(), str_arg(public_key)) {
+        (Some(session), Some(key)) => match session.request_ssh_certificate(key) {
+            Ok(()) => 0,
+            Err(_) => WINDOWCAST_ERROR,
+        },
+        _ => WINDOWCAST_ERROR,
+    }
 }
 
 #[cfg(test)]

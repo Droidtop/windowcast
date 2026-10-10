@@ -137,6 +137,44 @@ int64_t windowcast_session_next_audio(const WindowcastSession *session, uint64_t
                                       uint32_t timeout_ms, uint8_t *out, size_t cap,
                                       uint32_t *rtp_timestamp);
 
+/* Account sign-in (docs/ACCOUNTS.md). */
+typedef struct WindowcastOidcSignIn WindowcastOidcSignIn;
+
+/* Asks the host at "HOST:PORT" which sign-ins it takes, without signing
+ * in: JSON in out ({"host_id", "fingerprint", "trusted", "methods",
+ * "providers", "kerberos_service"}). Returns its length,
+ * WINDOWCAST_BUFFER_TOO_SMALL, or WINDOWCAST_ERROR with the reason in out. */
+int64_t windowcast_sign_in_options(const WindowcastClient *client, const char *address,
+                                   char *out, size_t cap);
+/* Signs in with an account and connects. sign_in is JSON:
+ * {"password":{"username":"..","password":".."}},
+ * {"oidc":{"provider":"..","id_token":".."}} or "kerberos". The credential
+ * goes only to a trusted host or to the one accept_host (64 hex digits,
+ * may be NULL) names after the user confirmed its fingerprint; otherwise
+ * this fails with an error naming the host's identity. Null on failure,
+ * with the reason in error. Later connections resume with
+ * windowcast_connect and no PIN while the host keeps the registration. */
+WindowcastSession *windowcast_connect_account(const WindowcastClient *client,
+                                              const char *address, const char *sign_in,
+                                              const char *accept_host, char *error,
+                                              size_t error_cap);
+/* Starts an OpenID Connect sign-in in the user's browser with one of the
+ * providers windowcast_sign_in_options listed (as JSON): writes the page
+ * to open into url. Null on failure, with the reason in url. */
+WindowcastOidcSignIn *windowcast_oidc_browser_start(const WindowcastClient *client,
+                                                    const char *provider, char *url,
+                                                    size_t url_cap);
+/* Waits for the browser to come back and writes the ID token into token;
+ * frees sign_in. Returns the token's length, WINDOWCAST_BUFFER_TOO_SMALL,
+ * or WINDOWCAST_ERROR with the reason in token. */
+int64_t windowcast_oidc_browser_finish(WindowcastOidcSignIn *sign_in, uint32_t timeout_ms,
+                                       char *token, size_t token_cap);
+/* Asks the host for an SSH user certificate for public_key (an OpenSSH
+ * public key line), for the signed-in account; it arrives as an
+ * "ssh_certificate" event. */
+int64_t windowcast_session_request_ssh_certificate(const WindowcastSession *session,
+                                                   const char *public_key);
+
 #ifdef __cplusplus
 }
 #endif

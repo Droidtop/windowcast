@@ -22,13 +22,17 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
-use windowcast_identity::{Identity, TrustStore};
+use windowcast_accounts::oidc::{BrowserSignIn, DeviceSignIn, OidcError};
+use windowcast_identity::{Identity, PeerId, TrustStore};
 use windowcast_protocol::selection::{self, BackendRule};
 use windowcast_protocol::{
     BackendKind, ControlMessage, HandoffTarget, InputEvent, StreamBackend, StreamLimits,
     StreamOptions, StreamQuality, StreamTarget, VideoCodec, WindowId, WindowInfo,
+    AccountCredential, AccountOffer, BackendKind, ControlMessage, InputEvent, OidcProviderInfo,
+    SignInMethod, StreamLimits, StreamOptions, StreamQuality, StreamTarget, VideoCodec, WindowId,
+    WindowInfo,
 };
 use windowcast_rdp::client::RdpStream;
 pub use windowcast_rdp::client::RgbaPicture;
@@ -64,6 +68,96 @@ pub enum ClientError {
     /// Discovery has no address for the host, or none answered.
     #[error("{0} was not found away from the LAN ({1})")]
     NotFound(String, String),
+    /// Signing in: the host's identity (hex) is not trusted yet. Show its
+    /// fingerprint ([`fingerprint`]) and connect again with it accepted
+    /// if the user confirms it.
+    #[error("the host's identity {0} is not trusted yet")]
+    HostNotTrusted(String),
+    #[error("OpenID Connect: {0}")]
+    Oidc(#[from] OidcError),
+}
+
+/// How a client signs in to a host with an account (docs/ACCOUNTS.md).
+/// In JSON (the C interface): `{"password":{"username":"..","password":".."}}`,
+/// `{"oidc":{"provider":"..","id_token":".."}}` or `"kerberos"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignIn {
+    Password {
+        username: String,
+        password: String,
+    },
+    /// An ID token from [`Client::oidc_browser`] or [`Client::oidc_device`]
+    /// with the provider the host named.
+    Oidc {
+        provider: String,
+        id_token: String,
+    },
+    /// The user's current Kerberos tickets, for the service the host names.
+    Kerberos,
+}
+
+impl SignIn {
+    fn credential(&self, offer: &AccountOffer) -> Result<AccountCredential, String> {
+        Ok(match self {
+            SignIn::Password { username, password } => AccountCredential::Password {
+                username: username.clone(),
+                password: password.clone(),
+            },
+            SignIn::Oidc { provider, id_token } => AccountCredential::Oidc {
+                provider: provider.clone(),
+                id_token: id_token.clone(),
+            },
+            SignIn::Kerberos => {
+                let service = offer
+                    .kerberos_service
+                    .as_deref()
+                    .ok_or("the host takes no Kerberos sign-in")?;
+                AccountCredential::Kerberos {
+                    token: kerberos_token(service)?,
+                }
+            }
+        })
+    }
+}
+
+#[cfg(feature = "kerberos")]
+fn kerberos_token(service: &str) -> Result<Vec<u8>, String> {
+    windowcast_accounts::kerberos::initiate(service)
+}
+
+#[cfg(not(feature = "kerberos"))]
+fn kerberos_token(_service: &str) -> Result<Vec<u8>, String> {
+    Err("this client has no Kerberos support".into())
+}
+
+/// What a host offers a client that wants to sign in.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SignInOptions {
+    /// The host's identity, hex.
+    pub host_id: String,
+    /// Its fingerprint, for the user to compare with the one the host
+    /// shows ([`fingerprint`]).
+    pub fingerprint: String,
+    /// Whether this client already trusts it; until it does, the
+    /// providers below are only the host's claim.
+    pub trusted: bool,
+    pub methods: Vec<SignInMethod>,
+    pub providers: Vec<OidcProviderInfo>,
+    pub kerberos_service: Option<String>,
+}
+
+/// An identity as people compare it: the first 16 bytes of its key in
+/// groups of four hex digits (`1a2b-3c4d-...`), as host and client both
+/// show it.
+pub fn fingerprint(peer_hex: &str) -> String {
+    peer_hex
+        .as_bytes()
+        .chunks(4)
+        .take(8)
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// 20 ms of interleaved stereo at 48 kHz: one Opus packet's worth.
@@ -174,6 +268,89 @@ impl Client {
             },
             host_ip,
         )
+    }
+
+    /// Asks the host at `address` which account sign-ins it takes, without
+    /// signing in.
+    pub fn sign_in_options(&self, address: &str) -> Result<SignInOptions, ClientError> {
+        let identity = Arc::clone(&self.identity);
+        let (host, offer) = self.runtime.block_on(async {
+            let stream = tokio::net::TcpStream::connect(address)
+                .await
+                .map_err(|e| ClientError::Unreachable(address.to_owned(), e))?;
+            Ok::<_, ClientError>(windowcast_transport::sign_in_offer(stream, &identity).await?)
+        })?;
+        let host_id = host.to_hex();
+        Ok(SignInOptions {
+            fingerprint: fingerprint(&host_id),
+            trusted: self.trust.lock().expect("trust store").is_pinned(&host),
+            host_id,
+            methods: offer.methods,
+            providers: offer.providers,
+            kerberos_service: offer.kerberos_service,
+        })
+    }
+
+    /// Signs in to the host at `address` with an account, and connects.
+    /// The credential goes only to a host this client trusts, or whose
+    /// identity (hex) the user confirmed as `accept_host`; any other fails
+    /// with [`ClientError::HostNotTrusted`]. On success the host is
+    /// trusted from then on, and later connections resume with
+    /// [`Self::connect`] (no PIN) while the host keeps the registration.
+    pub fn connect_account(
+        &self,
+        address: &str,
+        sign_in: &SignIn,
+        accept_host: Option<&str>,
+    ) -> Result<ClientSession, ClientError> {
+        let trusted = self.trust.lock().expect("trust store").clone();
+        let accept = accept_host.map(PeerId::from_hex).transpose()?;
+        let identity = Arc::clone(&self.identity);
+        let make = |offer: &AccountOffer| sign_in.credential(offer);
+        let established = self.runtime.block_on(async {
+            let stream = tokio::net::TcpStream::connect(address)
+                .await
+                .map_err(|e| ClientError::Unreachable(address.to_owned(), e))?;
+            let local = stream.peer_addr().is_ok_and(|peer| peer.ip().is_loopback());
+            let session = if local {
+                Session::local_only().await?
+            } else {
+                Session::new().await?
+            };
+            let credential = ClientCredential::Account {
+                trusted: &trusted,
+                accept,
+                credential: &make,
+            };
+            match connect(stream, session, &identity, credential).await {
+                Ok(established) => Ok(established),
+                Err(TransportError::HostNotTrusted(host)) => {
+                    Err(ClientError::HostNotTrusted(host.to_hex()))
+                }
+                Err(e) => Err(e.into()),
+            }
+        })?;
+        if established.signed_in {
+            let mut trust = self.trust.lock().expect("trust store");
+            trust.pin(established.peer);
+            trust.save(&self.trust_path)?;
+        }
+        Ok(self.started(established))
+    }
+
+    /// Starts signing in with an OpenID Connect provider in the user's
+    /// browser: open [`BrowserSignIn::url`], then [`BrowserSignIn::finish`]
+    /// gives the ID token for [`SignIn::Oidc`]. The token is bound to this
+    /// client's identity. Blocks while it fetches the provider's metadata.
+    pub fn oidc_browser(&self, provider: &OidcProviderInfo) -> Result<BrowserSignIn, ClientError> {
+        Ok(BrowserSignIn::start(provider, &self.identity.peer_id())?)
+    }
+
+    /// Starts signing in with an OpenID Connect provider on another device
+    /// (no browser here): show the code and page it gives, then
+    /// [`DeviceSignIn::finish`] waits for the ID token.
+    pub fn oidc_device(&self, provider: &OidcProviderInfo) -> Result<DeviceSignIn, ClientError> {
+        Ok(DeviceSignIn::start(provider)?)
     }
 
     /// Whether `host_id` (hex) can be looked for away from the LAN: it is
@@ -316,6 +493,12 @@ pub enum Event {
     /// The host's clipboard text changed.
     Clipboard {
         text: String,
+    },
+    /// The answer to [`ClientSession::request_ssh_certificate`]: an
+    /// OpenSSH certificate line, or why there is none.
+    SshCertificate {
+        certificate: Option<String>,
+        error: Option<String>,
     },
     /// What a stream is sent at now and the network the host sees: on
     /// every change and every few seconds.
@@ -665,6 +848,15 @@ impl ClientSession {
     }
 
     /// Gives the host this client's clipboard text.
+    /// Asks the host to sign an SSH user certificate for `public_key` (an
+    /// OpenSSH public key line), for the account this client signed in
+    /// with; it arrives as an [`Event::SshCertificate`].
+    pub fn request_ssh_certificate(&self, public_key: &str) -> Result<(), ClientError> {
+        self.send(ControlMessage::SshCertificateRequest {
+            public_key: public_key.to_owned(),
+        })
+    }
+
     pub fn set_clipboard(&self, text: &str) -> Result<(), ClientError> {
         self.send(ControlMessage::Clipboard(text.to_owned()))
     }
@@ -1018,6 +1210,16 @@ async fn pump_events(
             },
             ControlMessage::WindowFocused(window) => Event::WindowFocused { window: window.0 },
             ControlMessage::Clipboard(text) => Event::Clipboard { text },
+            ControlMessage::SshCertificateResponse(answer) => match answer {
+                Ok(certificate) => Event::SshCertificate {
+                    certificate: Some(certificate),
+                    error: None,
+                },
+                Err(error) => Event::SshCertificate {
+                    certificate: None,
+                    error: Some(error),
+                },
+            },
             ControlMessage::Pong => {
                 let mut ping = shared.ping.lock().expect("ping");
                 if let Some(sent) = ping.0.take() {

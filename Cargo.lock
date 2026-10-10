@@ -6914,6 +6914,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "windowcast-accounts",
  "windowcast-identity",
  "windowcast-protocol",
  "windowcast-rdp",
