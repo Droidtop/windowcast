@@ -10,6 +10,7 @@
 //! (docs/ACCOUNTS.md), who is connected and what each stream is doing.
 
 pub mod audio;
+pub mod command;
 pub mod gamepad;
 pub mod quality;
 pub mod remote;
@@ -322,7 +323,10 @@ pub struct HostControl {
     pairing: Arc<Pairing>,
     clients: std::sync::Mutex<HashMap<u64, ClientStatus>>,
     streams: std::sync::Mutex<HashMap<u64, StreamStatus>>,
+    commands: command::StatusMap,
+    command_authorizer: std::sync::RwLock<Arc<dyn command::CommandAuthorizer>>,
     serial: AtomicU64,
+    command_serial: Arc<AtomicU64>,
     /// The clients' discovery IDs, for reaching them away from the LAN.
     remote_peers: RemotePeers,
     /// This host's own; `None` if its certificate could not be made.
@@ -428,7 +432,10 @@ impl HostControl {
             pairing: Pairing::new(config.pairing),
             clients: Default::default(),
             streams: Default::default(),
+            commands: Default::default(),
+            command_authorizer: std::sync::RwLock::new(Arc::new(command::PairedDevices)),
             serial: AtomicU64::new(1),
+            command_serial: Arc::new(AtomicU64::new(1)),
             remote_peers: RemotePeers::load(&config.data_dir.join("remote-peers.json")),
             discovery_id,
             accounts: std::sync::RwLock::new(None),
@@ -621,6 +628,22 @@ impl HostControl {
             .values()
             .cloned()
             .collect()
+    }
+
+    /// The shells, commands and launches clients have open now.
+    pub fn commands(&self) -> Vec<command::CommandStatus> {
+        self.commands
+            .lock()
+            .expect("commands")
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Replaces the check every command channel passes. The default lets
+    /// any paired device in; the account layer (#443) installs its own.
+    pub fn set_command_authorizer(&self, authorizer: Arc<dyn command::CommandAuthorizer>) {
+        *self.command_authorizer.write().expect("authorizer") = authorizer;
     }
 
     fn next_serial(&self) -> u64 {
@@ -872,6 +895,16 @@ impl Host {
         };
 
         let session = Arc::new(established.session);
+        let mut channels = command::Channels::new(
+            Arc::clone(&session),
+            command::Principal {
+                peer,
+                account: None,
+            },
+            Arc::clone(&control.command_authorizer.read().expect("authorizer")),
+            Arc::clone(&control.commands),
+            Arc::clone(&control.command_serial),
+        );
         let mut streams = std::collections::HashMap::<WindowId, Stream>::new();
         let input = deliver_input(Arc::clone(&self.source));
         let mut focus: Option<WindowId> = None;
@@ -991,6 +1024,7 @@ impl Host {
                         .send_control(&ControlMessage::SshCertificateResponse(issued))
                         .await?;
                 }
+                ControlMessage::Command(message) => channels.handle(message).await?,
                 ControlMessage::Ping => session.send_control(&ControlMessage::Pong).await?,
                 ControlMessage::Pong => rtt.answered(),
                 ControlMessage::Rendezvous { discovery_id } => {

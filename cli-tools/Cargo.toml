@@ -40,6 +40,7 @@ windowcast-accounts = { path = "../accounts" }
 ureq = { version = "2", default-features = false }
 url = "2"
 windowcast-transport = { path = "../transport" }
+windowcast-terminal = { path = "../terminal" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # setns, for the test that runs host and client in network namespaces.

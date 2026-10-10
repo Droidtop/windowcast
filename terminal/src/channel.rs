@@ -4,6 +4,7 @@
 //! and moves [`Command`]s onto the wire and wire events into
 //! [`ChannelEvent`]s.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -36,7 +37,8 @@ pub enum ChannelEvent {
 pub struct Channel {
     commands: UnboundedSender<Command>,
     events: Mutex<mpsc::Receiver<ChannelEvent>>,
-    pid: Option<u32>,
+    /// 0 until known.
+    pid: AtomicU32,
 }
 
 /// The transport's half.
@@ -55,14 +57,19 @@ impl Channel {
             Channel {
                 commands: command_tx,
                 events: Mutex::new(event_rx),
-                pid,
+                pid: AtomicU32::new(pid.unwrap_or(0)),
             },
             ChannelEnd { commands, events },
         )
     }
 
     pub fn pid(&self) -> Option<u32> {
-        self.pid
+        Some(self.pid.load(Ordering::SeqCst)).filter(|pid| *pid != 0)
+    }
+
+    /// Transport side: the process id the host reported.
+    pub fn set_pid(&self, pid: Option<u32>) {
+        self.pid.store(pid.unwrap_or(0), Ordering::SeqCst);
     }
 
     /// Sends input. Never blocks; an ended channel ignores it.

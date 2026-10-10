@@ -12,6 +12,7 @@ windowcast-transport = { path = "../transport" }
 windowcast-rendezvous = { path = "../rendezvous" }
 windowcast-accounts = { path = "../accounts" }
 async-trait = "0.1"
+windowcast-pty = { path = "../pty" }
 tokio = { workspace = true, features = ["net"] }
 tracing.workspace = true
 bytes = "1"

@@ -13,6 +13,7 @@
 //! window the host hands to RDP comes out as RGBA pictures instead
 //! ([`ClientSession::next_picture`]), and its input goes over RDP.
 
+mod command;
 pub mod ffi;
 
 use std::collections::HashMap;
@@ -156,6 +157,12 @@ pub fn fingerprint(peer_hex: &str) -> String {
         .map(|c| String::from_utf8_lossy(c).into_owned())
         .collect::<Vec<_>>()
         .join("-")
+    /// A host or server did not open a command channel; the reason is
+    /// for the user.
+    #[error("{0}")]
+    Refused(String),
+    #[error("{0}")]
+    Ssh(#[from] windowcast_terminal::SshError),
 }
 
 /// 20 ms of interleaved stereo at 48 kHz: one Opus packet's worth.
@@ -185,6 +192,8 @@ pub struct Client {
     /// The hosts' discovery IDs, learned on sessions, for reaching them
     /// away from the LAN.
     remote_hosts: Arc<RemotePeers>,
+    /// The SSH servers' pinned host keys.
+    host_keys: Arc<windowcast_terminal::HostKeyStore>,
 }
 
 impl Client {
@@ -205,6 +214,9 @@ impl Client {
             trust: Mutex::new(trust),
             trust_path,
             remote_hosts: Arc::new(RemotePeers::load(&data_dir.join("remote-hosts.json"))),
+            host_keys: windowcast_terminal::HostKeyStore::open(
+                &data_dir.join("ssh-known-hosts.json"),
+            )?,
         })
     }
 
@@ -578,6 +590,8 @@ struct Shared {
     /// A picture a caller could not take (its buffer was too small),
     /// handed out again first.
     held_pictures: Mutex<HashMap<WindowId, RgbaPicture>>,
+    /// The command stream's channels (shells, commands, launches).
+    channels: Arc<command::Routes>,
 }
 
 impl Shared {
@@ -675,6 +689,7 @@ impl ClientSession {
             rdp: Mutex::default(),
             focus: Mutex::default(),
             held_pictures: Mutex::default(),
+            channels: Arc::default(),
         });
         let windows = Arc::new(Mutex::new(Vec::new()));
 
@@ -1130,11 +1145,16 @@ async fn pump_events(
         let message = match session.recv_control().await {
             Ok(message) => message,
             Err(_) => {
+                shared.channels.close_all();
                 let _ = events.send(Event::Closed);
                 return;
             }
         };
         let event = match message {
+            ControlMessage::Command(message) => {
+                shared.channels.handle(message);
+                continue;
+            }
             ControlMessage::ListWindowsResponse(list) => {
                 *windows.lock().expect("windows") = list.clone();
                 Event::Windows { windows: list }
