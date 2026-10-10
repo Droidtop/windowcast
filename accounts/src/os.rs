@@ -226,11 +226,99 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
-    use windows::core::HSTRING;
+    use windows::core::{HSTRING, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::Security::{LogonUserW, LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT};
+    use windows::Win32::Security::{
+        GetTokenInformation, LogonUserW, LookupAccountSidW, TokenGroups, LOGON32_LOGON_NETWORK,
+        LOGON32_PROVIDER_DEFAULT, PSID, SID_NAME_USE, TOKEN_GROUPS,
+    };
 
     use crate::CheckError;
+
+    /// A token group that is the logon session itself, not a group.
+    const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
+
+    /// The names of the groups in a logon token, each as its bare name
+    /// (`Remote Desktop Users`) and, when it has a domain, also as
+    /// `DOMAIN\name` (`BUILTIN\Remote Desktop Users`), so policy rules may
+    /// use either. A group whose SID has no name (a capability, say) is
+    /// left out.
+    fn token_groups(token: HANDLE) -> Vec<String> {
+        let mut needed = 0u32;
+        // SAFETY: a size query, then a buffer of that size (aligned for
+        // TOKEN_GROUPS) that the entries are read from while it lives.
+        unsafe {
+            let _ = GetTokenInformation(token, TokenGroups, None, 0, &mut needed);
+            if needed == 0 {
+                return Vec::new();
+            }
+            let mut buffer = vec![0u64; (needed as usize).div_ceil(8)];
+            if GetTokenInformation(
+                token,
+                TokenGroups,
+                Some(buffer.as_mut_ptr().cast()),
+                needed,
+                &mut needed,
+            )
+            .is_err()
+            {
+                return Vec::new();
+            }
+            let groups = &*(buffer.as_ptr() as *const TOKEN_GROUPS);
+            let entries =
+                std::slice::from_raw_parts(groups.Groups.as_ptr(), groups.GroupCount as usize);
+            let mut names = Vec::new();
+            for entry in entries {
+                if entry.Attributes & SE_GROUP_LOGON_ID == SE_GROUP_LOGON_ID {
+                    continue;
+                }
+                if let Some((domain, name)) = account_name(entry.Sid) {
+                    if !domain.is_empty() {
+                        names.push(format!("{domain}\\{name}"));
+                    }
+                    names.push(name);
+                }
+            }
+            names
+        }
+    }
+
+    /// The domain and name of a SID, as Windows shows them.
+    ///
+    /// # Safety
+    /// `sid` must be a valid SID.
+    unsafe fn account_name(sid: PSID) -> Option<(String, String)> {
+        let (mut name_len, mut domain_len) = (0u32, 0u32);
+        let mut kind = SID_NAME_USE::default();
+        let _ = LookupAccountSidW(
+            PCWSTR::null(),
+            sid,
+            None,
+            &mut name_len,
+            None,
+            &mut domain_len,
+            &mut kind,
+        );
+        if name_len == 0 {
+            return None;
+        }
+        let mut name = vec![0u16; name_len as usize];
+        let mut domain = vec![0u16; domain_len.max(1) as usize];
+        LookupAccountSidW(
+            PCWSTR::null(),
+            sid,
+            Some(PWSTR(name.as_mut_ptr())),
+            &mut name_len,
+            Some(PWSTR(domain.as_mut_ptr())),
+            &mut domain_len,
+            &mut kind,
+        )
+        .ok()?;
+        Some((
+            String::from_utf16_lossy(&domain[..domain_len as usize]),
+            String::from_utf16_lossy(&name[..name_len as usize]),
+        ))
+    }
 
     /// `DOMAIN\user` or `user@domain` signs in to that domain; a bare name
     /// is a local account.
@@ -270,13 +358,12 @@ mod imp {
         };
         match result {
             Ok(()) => {
+                let groups = token_groups(token);
                 // SAFETY: a token LogonUserW returned.
                 unsafe {
                     let _ = CloseHandle(token);
                 }
-                // Group names from the token are not read yet: policy
-                // reaches Windows accounts by user name.
-                Ok(Vec::new())
+                Ok(groups)
             }
             Err(e) => Err(Some(CheckError::Refused(e.message()))),
         }
@@ -302,9 +389,10 @@ mod imp {
 mod tests {
     use super::*;
 
-    /// Against a user the CI makes on the runner, through a PAM service
-    /// file of its own (`/etc/pam.d/windowcast`); run as root, as
-    /// pam_unix needs to read /etc/shadow for another user's password.
+    /// Against a user the CI makes on the runner: on Linux through a PAM
+    /// service file of its own (`/etc/pam.d/windowcast`), run as root, as
+    /// pam_unix needs to read /etc/shadow for another user's password; on
+    /// Windows a local user in a local group, through `LogonUserW`.
     #[test]
     fn checks_an_os_account() {
         let (Ok(user), Ok(password)) = (
@@ -316,10 +404,16 @@ mod tests {
         };
         let service = std::env::var("WINDOWCAST_TEST_PAM_SERVICE").unwrap_or("login".into());
         let account = check_password(&service, &user, &password).unwrap();
+        eprintln!("signed in as {account:?}");
         assert_eq!(account.name, user);
         assert_eq!(account.provider, "os");
         #[cfg(target_os = "linux")]
         assert!(account.groups.contains(&user), "{:?}", account.groups);
+        // A group the CI put the user in (on Windows, read from the
+        // logon token).
+        if let Ok(group) = std::env::var("WINDOWCAST_TEST_OS_GROUP") {
+            assert!(account.groups.contains(&group), "{:?}", account.groups);
+        }
         assert!(matches!(
             check_password(&service, &user, "not the password"),
             Err(Some(CheckError::Refused(_)))

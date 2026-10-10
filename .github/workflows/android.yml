@@ -94,7 +94,23 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Clippy
-        run: cargo clippy -p windowcast-agent-windows -p windowcast-client-windows -p windowcast-app -p windowcast-rdp --all-targets -- -D warnings
+        run: cargo clippy -p windowcast-agent-windows -p windowcast-client-windows -p windowcast-app -p windowcast-rdp -p windowcast-accounts --all-targets -- -D warnings
+
+      - name: Windows accounts and their groups through LogonUserW
+        # A local user in a local group, made on this runner only; the
+        # account check logs it on and reads its groups from the token.
+        shell: pwsh
+        run: |
+          $password = "Wc-" + [guid]::NewGuid().ToString("N") + "-7b"
+          Write-Output "::add-mask::$password"
+          New-LocalGroup -Name "windowcast-testers" | Out-Null
+          New-LocalUser -Name "wcos" -Password (ConvertTo-SecureString $password -AsPlainText -Force) -PasswordNeverExpires | Out-Null
+          Add-LocalGroupMember -Group "windowcast-testers" -Member "wcos"
+          $env:WINDOWCAST_TEST_OS_USER = "wcos"
+          $env:WINDOWCAST_TEST_OS_PASSWORD = $password
+          $env:WINDOWCAST_TEST_OS_GROUP = "windowcast-testers"
+          cargo test -p windowcast-accounts os::tests -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test the agent (capture, encode, stream, decode)
         env:

@@ -94,7 +94,10 @@ identity provider of its choosing.
 - **The host OS's accounts** (`password`): PAM on Linux (service name
   configurable, default `login`; `pam_authenticate` then `pam_acct_mgmt`),
   `LogonUserW` (network logon) on Windows. Group membership from the OS
-  (`getgrouplist`; the token's groups on Windows).
+  (`getgrouplist`; on Windows the logon token's groups, each by its bare
+  name and, when it has a domain, also as `DOMAIN\name`, so a rule may
+  say `group:Remote Desktop Users` or `group:BUILTIN\Remote Desktop
+  Users`; the logon session's own SID is left out).
 - **LDAP / Active Directory** (`password`): `ldap3` (rustls). Either a
   bind DN template (`uid={user},ou=people,dc=example,dc=org`, or
   `{user}@example.org` for AD's UPN bind) or search-then-bind with a
