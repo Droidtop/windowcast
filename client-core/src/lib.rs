@@ -754,6 +754,12 @@ pub struct ClientSession {
     windows: Arc<Mutex<Vec<WindowInfo>>>,
     /// The microphone track and its encoder, while the microphone is on.
     microphone: Mutex<Option<Microphone>>,
+    /// The windows this client shows (asked for, or followed), with the
+    /// codecs each was asked for in.
+    shown: Mutex<HashMap<WindowId, Vec<VideoCodec>>>,
+    /// Whether the dialogs, popups and menus a shown window owns are shown
+    /// too, as they open ([`Self::set_follow_popups`]).
+    follow_popups: AtomicBool,
 }
 
 impl ClientSession {
@@ -813,6 +819,8 @@ impl ClientSession {
             pictures: AtomicBool::new(false),
             windows,
             microphone: Mutex::new(None),
+            shown: Mutex::default(),
+            follow_popups: AtomicBool::new(true),
         }
     }
 
@@ -832,6 +840,33 @@ impl ClientSession {
         self.pictures.store(on, Ordering::SeqCst);
     }
 
+    /// Whether the dialogs, popups and menus a shown window owns are shown
+    /// too, each as its own window, as they open (on by default). Off, they
+    /// are still in the window list for the user to pick.
+    pub fn set_follow_popups(&self, on: bool) {
+        self.follow_popups.store(on, Ordering::SeqCst);
+    }
+
+    /// Starts showing the windows owned by shown windows that are not
+    /// shown yet, and forgets shown windows no longer listed.
+    fn follow(&self, windows: &[WindowInfo]) {
+        let starts: Vec<(WindowId, Vec<VideoCodec>)> = {
+            let mut shown = self.shown.lock().expect("shown");
+            shown.retain(|id, _| windows.iter().any(|w| w.id == *id));
+            if !self.follow_popups.load(Ordering::SeqCst) {
+                return;
+            }
+            windows
+                .iter()
+                .filter(|w| !shown.contains_key(&w.id))
+                .filter_map(|w| Some((w.id, shown.get(&w.owner?)?.clone())))
+                .collect()
+        };
+        for (window, codecs) in starts {
+            let _ = self.start_window(window, &codecs);
+        }
+    }
+
     /// Replaces the user's backend rules (per-app overrides and the like).
     pub fn set_rules(&self, rules: Vec<BackendRule>) {
         *self.rules.lock().expect("rules") = rules;
@@ -847,6 +882,10 @@ impl ClientSession {
     /// the answer arrives as [`Event::StreamStarted`] or
     /// [`Event::StreamRefused`], and frames through [`Self::next_frame`].
     pub fn start_window(&self, window: WindowId, codecs: &[VideoCodec]) -> Result<(), ClientError> {
+        self.shown
+            .lock()
+            .expect("shown")
+            .insert(window, codecs.to_vec());
         if remote_app::split(window).is_some() {
             self.start_remote_window(window);
             return Ok(());
@@ -992,6 +1031,20 @@ impl ClientSession {
     }
 
     pub fn stop_window(&self, window: WindowId) -> Result<(), ClientError> {
+        // The windows it owns go with it.
+        let owned: Vec<WindowId> = {
+            let mut shown = self.shown.lock().expect("shown");
+            shown.remove(&window);
+            let listed = self.windows.lock().expect("windows");
+            listed
+                .iter()
+                .filter(|w| w.owner == Some(window) && shown.contains_key(&w.id))
+                .map(|w| w.id)
+                .collect()
+        };
+        for popup in owned {
+            let _ = self.stop_window(popup);
+        }
         if remote_app::split(window).is_some() {
             self.stop_remote_window(window);
             return Ok(());
@@ -1012,7 +1065,18 @@ impl ClientSession {
             .expect("events")
             .recv_timeout(timeout)
         {
-            Ok(event) => Some(event),
+            Ok(event) => {
+                match &event {
+                    Event::Windows { windows } => self.follow(windows),
+                    // A refused window stays counted, so it is not followed
+                    // again at every list.
+                    Event::StreamStopped { window } => {
+                        self.shown.lock().expect("shown").remove(&WindowId(*window));
+                    }
+                    _ => {}
+                }
+                Some(event)
+            }
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => Some(Event::Closed),
         }

@@ -38,6 +38,8 @@ impl WindowSource for Busy {
             width: SIZE.0 as u32,
             height: SIZE.1 as u32,
             focused: true,
+            owner: None,
+            kind: windowcast_protocol::WindowKind::Normal,
             content: ContentHint::General,
         }]
     }

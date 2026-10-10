@@ -20,6 +20,8 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Mutex};
 
+use windowcast_protocol::WindowKind;
+
 use ironrdp_pdu::gcc::{ChannelName, ChannelOptions, ConferenceCreateRequest};
 use ironrdp_pdu::mcs::{ConnectInitial, SendDataRequest};
 use ironrdp_pdu::rdp::capability_sets::CapabilitySet;
@@ -356,6 +358,7 @@ pub struct RemoteWindow {
     pub owner: u32,
     pub title: String,
     pub style: u32,
+    pub ex_style: u32,
     pub show: u8,
     /// Its top-left corner on the desktop and its size.
     pub offset: (i32, i32),
@@ -371,8 +374,12 @@ pub enum WindowOrder {
         window: RemoteWindow,
     },
     Deleted(u32),
-    /// An Actively Monitored or Non-Monitored Desktop order, by its fields.
-    Desktop(u32),
+    /// An Actively Monitored or Non-Monitored Desktop order: its fields,
+    /// and the window active now when it says.
+    Desktop {
+        fields: u32,
+        active: Option<u32>,
+    },
 }
 
 // MS-RDPERP 2.2.1.3.1 FieldsPresentFlags.
@@ -381,6 +388,11 @@ const ORDER_TYPE_DESKTOP: u32 = 0x0400_0000;
 /// MS-RDPERP 2.2.1.3.3.1: the server's desktop is being monitored and
 /// described in full.
 pub const DESKTOP_ARC_COMPLETED: u32 = 0x0000_0004;
+/// The order names the active window.
+const DESKTOP_ACTIVE_WND: u32 = 0x0000_0020;
+// Window styles a listing tells windows apart by.
+const WS_CAPTION: u32 = 0x00C0_0000;
+const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
 const STATE_NEW: u32 = 0x1000_0000;
 const STATE_DELETED: u32 = 0x2000_0000;
 const FIELD_APPBAR_EDGE: u32 = 0x0000_0001;
@@ -543,7 +555,11 @@ fn orders(reader: &mut Reader<'_>, count: u16, out: &mut Vec<WindowOrder>) {
 fn window_order(r: &mut Reader<'_>) -> Option<WindowOrder> {
     let fields = r.u32()?;
     if fields & ORDER_TYPE_DESKTOP != 0 {
-        return Some(WindowOrder::Desktop(fields));
+        // ActiveWindowId comes first, when present (2.2.1.3.3.2.1).
+        let active = (fields & DESKTOP_ACTIVE_WND != 0)
+            .then(|| r.u32())
+            .flatten();
+        return Some(WindowOrder::Desktop { fields, active });
     }
     if fields & ORDER_TYPE_WINDOW == 0 {
         return None; // notification icon orders
@@ -564,7 +580,7 @@ fn window_order(r: &mut Reader<'_>) -> Option<WindowOrder> {
     }
     if fields & FIELD_STYLE != 0 {
         window.style = r.u32()?;
-        r.u32()?; // extended style
+        window.ex_style = r.u32()?;
     }
     if fields & FIELD_SHOW != 0 {
         window.show = r.u8()?;
@@ -636,12 +652,18 @@ pub struct Windows {
     windows: BTreeMap<u32, RemoteWindow>,
     /// The order windows were first seen in.
     order: Vec<u32>,
+    /// The window the server last said is active.
+    active: Option<u32>,
 }
 
 impl Windows {
     pub fn apply(&mut self, order: WindowOrder) {
         match order {
-            WindowOrder::Desktop(_) => {}
+            WindowOrder::Desktop { active, .. } => {
+                if active.is_some() {
+                    self.active = active;
+                }
+            }
             WindowOrder::Deleted(id) => {
                 self.windows.remove(&id);
                 self.order.retain(|w| *w != id);
@@ -659,6 +681,7 @@ impl Windows {
                 }
                 if fields & FIELD_STYLE != 0 {
                     entry.style = window.style;
+                    entry.ex_style = window.ex_style;
                 }
                 if fields & FIELD_SHOW != 0 {
                     entry.show = window.show;
@@ -676,43 +699,41 @@ impl Windows {
         }
     }
 
-    /// The windows a client lists, in the order they appeared: every
-    /// shown window with a size that is unowned (or owned by a window not
-    /// described) or has a title, such as a program's main window and its
-    /// dialogs. Shown windows without a title owned by one of them (menus,
-    /// tooltips, drop-downs) widen their owner's rectangle instead, so they
-    /// show in its picture.
+    /// The windows a client lists, in the order they appeared: every shown
+    /// window with a size is its own entry (docs/BACKENDS.md, "Window by
+    /// window, always"), naming its owner. A menu, tooltip or drop-down
+    /// (an untitled tool window) that Windows describes without an owner
+    /// is owned by the window active when it opened.
     pub fn listed(&self) -> Vec<ListedWindow> {
         let shown = |w: &RemoteWindow| w.show != 0 && w.size.0 > 0 && w.size.1 > 0;
-        let is_root = |w: &RemoteWindow| {
-            shown(w) && (!w.title.is_empty() || !self.windows.contains_key(&w.owner))
-        };
-        let mut listed: Vec<ListedWindow> = self
-            .order
+        self.order
             .iter()
             .filter_map(|id| self.windows.get(id))
-            .filter(|w| is_root(w))
-            .map(|w| ListedWindow {
-                id: w.id,
-                title: w.title.clone(),
-                rect: Rect::of(w),
+            .filter(|w| shown(w))
+            .map(|w| {
+                let popup = w.title.is_empty() && w.ex_style & WS_EX_TOOLWINDOW != 0;
+                let owner = if self.windows.contains_key(&w.owner) {
+                    Some(w.owner)
+                } else if popup {
+                    self.active
+                        .filter(|a| *a != w.id && self.windows.contains_key(a))
+                } else {
+                    None
+                };
+                let kind = match owner {
+                    None => WindowKind::Normal,
+                    Some(_) if !popup && w.style & WS_CAPTION == WS_CAPTION => WindowKind::Dialog,
+                    Some(_) => WindowKind::Popup,
+                };
+                ListedWindow {
+                    id: w.id,
+                    title: w.title.clone(),
+                    rect: Rect::of(w),
+                    owner,
+                    kind,
+                }
             })
-            .collect();
-        for popup in self.windows.values().filter(|w| shown(w) && !is_root(w)) {
-            // Its nearest listed owner, following the owner chain.
-            let mut owner = popup.owner;
-            for _ in 0..8 {
-                if let Some(root) = listed.iter_mut().find(|l| l.id == owner) {
-                    root.rect = root.rect.union(Rect::of(popup));
-                    break;
-                }
-                match self.windows.get(&owner) {
-                    Some(next) => owner = next.owner,
-                    None => break,
-                }
-            }
-        }
-        listed
+            .collect()
     }
 }
 
@@ -734,21 +755,6 @@ impl Rect {
             height: window.size.1,
         }
     }
-
-    fn union(self, other: Rect) -> Rect {
-        let x = self.x.min(other.x);
-        let y = self.y.min(other.y);
-        let right = (i64::from(self.x) + i64::from(self.width))
-            .max(i64::from(other.x) + i64::from(other.width));
-        let bottom = (i64::from(self.y) + i64::from(self.height))
-            .max(i64::from(other.y) + i64::from(other.height));
-        Rect {
-            x,
-            y,
-            width: (right - i64::from(x)) as u32,
-            height: (bottom - i64::from(y)) as u32,
-        }
-    }
 }
 
 /// One window of a RemoteApp session as a client lists it.
@@ -757,9 +763,11 @@ pub struct ListedWindow {
     /// The server's window id.
     pub id: u32,
     pub title: String,
-    /// The window, with the menus and popups it owns, on the session's
-    /// desktop.
+    /// The window on the session's desktop.
     pub rect: Rect,
+    /// The server's id of the window that owns it.
+    pub owner: Option<u32>,
+    pub kind: WindowKind,
 }
 
 #[cfg(test)]
@@ -817,63 +825,80 @@ mod tests {
     }
 
     #[test]
-    fn a_window_is_listed_with_its_menus_and_its_dialog_on_its_own() {
-        let window = |id, owner, title: &str, offset, size| RemoteWindow {
+    fn every_window_is_listed_on_its_own_with_its_owner() {
+        let window = |id, owner, title: &str, style, ex_style, offset, size| RemoteWindow {
             id,
             owner,
             title: title.into(),
-            style: 0,
+            style,
+            ex_style,
             show: 5,
             offset,
             size,
         };
         let mut windows = Windows::default();
+        windows.apply(WindowOrder::Desktop {
+            fields: ORDER_TYPE_DESKTOP | DESKTOP_ACTIVE_WND,
+            active: Some(1),
+        });
         for w in [
-            window(1, 0, "Notepad", (100, 100), (400, 300)),
-            // A menu below it, wider than it.
-            window(2, 1, "", (90, 380), (500, 100)),
+            window(1, 0, "Notepad", WS_CAPTION, 0, (100, 100), (400, 300)),
+            // A menu: untitled, a tool window, no owner given.
+            window(2, 0, "", 0, WS_EX_TOOLWINDOW, (90, 380), (500, 100)),
             // A dialog it owns.
-            window(3, 1, "Save as", (150, 150), (200, 100)),
+            window(3, 1, "Save as", WS_CAPTION, 0, (150, 150), (200, 100)),
             // A shell helper with no size, and a hidden window.
-            window(4, 0, "", (0, 0), (0, 0)),
+            window(4, 0, "", 0, 0, (0, 0), (0, 0)),
             RemoteWindow {
                 show: 0,
-                ..window(5, 0, "Program Manager", (0, 0), (1280, 720))
+                ..window(5, 0, "Program Manager", 0, 0, (0, 0), (1280, 720))
             },
         ] {
             windows.apply(WindowOrder::Window {
                 new: true,
-                fields: FIELD_OWNER | FIELD_TITLE | FIELD_SHOW | FIELD_WNDOFFSET | FIELD_WNDSIZE,
+                fields: FIELD_OWNER
+                    | FIELD_TITLE
+                    | FIELD_STYLE
+                    | FIELD_SHOW
+                    | FIELD_WNDOFFSET
+                    | FIELD_WNDSIZE,
                 window: w,
             });
         }
-        let listed = windows.listed();
+        let rect = |x, y, width, height| Rect {
+            x,
+            y,
+            width,
+            height,
+        };
         assert_eq!(
-            listed,
+            windows.listed(),
             vec![
                 ListedWindow {
                     id: 1,
                     title: "Notepad".into(),
-                    rect: Rect {
-                        x: 90,
-                        y: 100,
-                        width: 500,
-                        height: 380
-                    },
+                    rect: rect(100, 100, 400, 300),
+                    owner: None,
+                    kind: WindowKind::Normal,
+                },
+                ListedWindow {
+                    id: 2,
+                    title: String::new(),
+                    rect: rect(90, 380, 500, 100),
+                    owner: Some(1),
+                    kind: WindowKind::Popup,
                 },
                 ListedWindow {
                     id: 3,
                     title: "Save as".into(),
-                    rect: Rect {
-                        x: 150,
-                        y: 150,
-                        width: 200,
-                        height: 100
-                    },
+                    rect: rect(150, 150, 200, 100),
+                    owner: Some(1),
+                    kind: WindowKind::Dialog,
                 },
             ]
         );
         windows.apply(WindowOrder::Deleted(3));
+        windows.apply(WindowOrder::Deleted(2));
         assert_eq!(windows.listed().len(), 1);
     }
 
@@ -888,7 +913,13 @@ mod tests {
         order.extend_from_slice(&((3 + body.len()) as u16).to_le_bytes());
         order.extend_from_slice(&body);
         let frame = fast_path_orders(&[order]);
-        assert_eq!(window_orders(&frame), vec![WindowOrder::Desktop(fields)]);
+        assert_eq!(
+            window_orders(&frame),
+            vec![WindowOrder::Desktop {
+                fields,
+                active: Some(7)
+            }]
+        );
     }
 
     #[test]

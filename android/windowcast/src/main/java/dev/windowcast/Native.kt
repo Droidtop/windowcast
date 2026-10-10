@@ -42,6 +42,7 @@ internal object Native {
         info: IntArray,
     ): Long
     @JvmStatic external fun acceptPictures(session: Long, on: Boolean): Long
+    @JvmStatic external fun followPopups(session: Long, on: Boolean): Long
     /** The next RGBA picture of an RDP window into [buffer]; size gets its width and height. */
     @JvmStatic external fun nextPicture(
         session: Long,

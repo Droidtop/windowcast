@@ -105,6 +105,13 @@ int64_t windowcast_session_next_frame(const WindowcastSession *session, uint64_t
  * out of windowcast_session_next_picture. Returns 0 or WINDOWCAST_ERROR. */
 int64_t windowcast_session_accept_pictures(const WindowcastSession *session, uint32_t on);
 
+/* Whether the dialogs, popups and menus a shown window owns are shown too,
+ * each as its own window, as they open (on non-zero, the default; 0 only
+ * lists them). A followed window arrives as a stream_started event for its
+ * id; its "owner" and "kind" in the window list say what it belongs to.
+ * Returns 0 or WINDOWCAST_ERROR. */
+int64_t windowcast_session_follow_popups(const WindowcastSession *session, uint32_t on);
+
 /* Next picture of a window streamed over RDP (stream_started with backend
  * "Rdp"): RGBA, rows from the top, width * 4 bytes each. Returns its
  * length, WINDOWCAST_TIMEOUT when the window has not changed,

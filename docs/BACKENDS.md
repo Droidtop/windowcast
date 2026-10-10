@@ -123,14 +123,30 @@ its own entry in the window list, with its owner named, and a client
 chooses and shows each one on its own. A client never gets a whole-desktop
 picture unless it asks for the desktop.
 
-Where that stands: the Windows agent lists only visible top-level windows
-without an owner (no dialogs, popups or menus), and the Linux agent the
-compositor's top-level windows; a RemoteApp connection lists its
-top-level windows and dialogs and draws a menu inside its owner's
-picture. Part (a) makes every owned window, popup and menu an entry of
-its own, with its owner, on Windows hosts and in RemoteApp sessions; on
-Wayland a popup belongs to its top-level window's surface and is captured
-with it.
+How it works:
+
+- `WindowInfo` names each window's `owner` and `kind` (normal, dialog,
+  popup, menu).
+- The Windows agent lists, besides the Alt+Tab windows, every shown
+  window they own (dialogs, drop-downs) and the menus, tooltips and
+  drop-downs their threads show (owned by the window active in that
+  thread, or the one the menu is for). Windows.Graphics.Capture will not
+  capture an owned window, a menu or a tooltip on its own ("Could not
+  capture the given window", 0x80070057, for a dialog and a drop-down on
+  the CI runner), so such a window is captured from its part of the
+  screen, which shows it as it is drawn, on top.
+- A RemoteApp connection lists every window Windows describes, a menu or
+  tooltip owned by the window active when it opened.
+- The host sends the window list again whenever it changes, once a client
+  has asked for it, so a popup reaches the client while it is open.
+- A client shows the dialogs, popups and menus a shown window owns, each
+  as its own window, as they open, and stops them with their owner
+  (`ClientSession::set_follow_popups`, on by default; the Windows app's
+  "Open a streamed window's dialogs, popups and menus"; the Android viewer
+  in floating windows). Off, they are only listed, for the user to pick.
+- On Wayland (the Linux agent) a popup is part of its top-level window's
+  surface: the compositor lists top-level windows only, and a popup or
+  menu shows inside its window's picture.
 
 ### How a launch becomes a RemoteApp
 

@@ -174,6 +174,10 @@ pub struct ClientSettings {
     pub saved: Vec<SavedHost>,
     /// The user's backend rules (per-app overrides), before the defaults.
     pub rules: Vec<BackendRule>,
+    /// Show a streamed window's dialogs, popups and menus as they open,
+    /// each in its own window.
+    #[serde(default = "on")]
+    pub follow_popups: bool,
     /// Send pointer and keys from the stream windows to the host.
     pub send_input: bool,
     /// Stream windows open borderless, covering their display.
@@ -243,4 +247,8 @@ impl Store {
             eprintln!("could not save {}: {e}", self.path.display());
         }
     }
+}
+
+fn on() -> bool {
+    true
 }

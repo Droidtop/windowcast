@@ -31,6 +31,10 @@ data class WindowInfo(
     val height: Int,
     val focused: Boolean,
     val content: String,
+    /** The window that owns this one (a dialog's, popup's or menu's program window), or null. */
+    val owner: Long? = null,
+    /** "normal", "dialog", "popup" or "menu". */
+    val kind: String = "normal",
 )
 
 /** Session events, as client-core reports them. */
@@ -60,6 +64,8 @@ sealed interface Event {
                             height = w.getInt("height"),
                             focused = w.getBoolean("focused"),
                             content = w.getString("content"),
+                            owner = if (w.isNull("owner")) null else w.getLong("owner"),
+                            kind = w.optString("kind", "normal"),
                         )
                     })
                 }
@@ -208,6 +214,15 @@ class WindowcastSession internal constructor(handle: Long) : Closeable {
      */
     fun acceptPictures(on: Boolean) {
         withHandle(Unit) { Native.acceptPictures(it, on) }
+    }
+
+    /**
+     * Whether the dialogs, popups and menus a shown window owns are shown too, each as its own
+     * window, as they open (on by default): each arrives as a [Event.StreamStarted] for its own
+     * id, and its [WindowInfo.owner] names the window it belongs to.
+     */
+    fun followPopups(on: Boolean) {
+        withHandle(Unit) { Native.followPopups(it, on) }
     }
 
     /** Asks to stream [window], decodable in [codecs], most preferred first. */

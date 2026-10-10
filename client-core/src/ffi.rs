@@ -405,6 +405,26 @@ pub unsafe extern "C" fn windowcast_session_accept_pictures(
     0
 }
 
+/// Whether the dialogs, popups and menus a shown window owns are shown too,
+/// each as its own window, as they open (non-zero, the default) or only
+/// listed (0). A followed window arrives as any other: a "stream_started"
+/// event for its id; its "owner" in the window list names the window it
+/// belongs to. Returns 0 or WINDOWCAST_ERROR.
+///
+/// # Safety
+/// `session` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_follow_popups(
+    session: *const ClientSession,
+    on: u32,
+) -> i64 {
+    let Some(session) = session.as_ref() else {
+        return WINDOWCAST_ERROR;
+    };
+    session.set_follow_popups(on != 0);
+    0
+}
+
 /// Waits up to `timeout_ms` for the next picture of a window streamed over
 /// RDP (a "stream_started" event with backend "Rdp") and copies it into
 /// `out`: RGBA, rows from the top, `width * 4` bytes each. Returns its

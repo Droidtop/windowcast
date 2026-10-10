@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped on any incompatible change to the message shapes below. A peer
 /// that receives a mismatched version should refuse the session rather
 /// than guess at how to interpret an unknown wire format.
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
@@ -29,6 +29,28 @@ pub struct WindowInfo {
     /// What the host thinks the window shows ([`selection::classify`]);
     /// selection rules key on it.
     pub content: ContentHint,
+    /// The window that owns this one: a dialog's, popup's or menu's
+    /// program window. `None` for a top-level window. Every window,
+    /// owned or not, is its own entry and is shown on its own
+    /// (docs/BACKENDS.md, "Window by window, always").
+    pub owner: Option<WindowId>,
+    pub kind: WindowKind,
+}
+
+/// What a window is, as far as a client shows it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowKind {
+    /// A program's own window.
+    #[default]
+    Normal,
+    /// A dialog a window owns (a Save As box, a settings window).
+    Dialog,
+    /// A short-lived window a window owns: a drop-down, a tooltip, a
+    /// completion list.
+    Popup,
+    /// A menu.
+    Menu,
 }
 
 /// What kind of content a window shows, as far as choosing a backend goes.
@@ -620,6 +642,8 @@ mod tests {
             width: 800,
             height: 600,
             focused: true,
+            owner: None,
+            kind: WindowKind::Normal,
             content: ContentHint::Text,
         }]);
         let bytes = encode(&msg).unwrap();

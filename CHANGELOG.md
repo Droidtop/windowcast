@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Window by window, always (docs/BACKENDS.md): every dialog, popup and menu is its own window-list entry. `WindowInfo` gains `owner` and `kind` (normal, dialog, popup, menu); protocol version 9. The Windows agent lists the windows the Alt+Tab ones own and the menus, tooltips and drop-downs their threads show, and captures a window Windows.Graphics.Capture refuses (menus, tooltips) from its part of the screen. RemoteApp sessions list each window too.
+- The host sends the window list again when it changes, once a client has asked for it.
+- A client shows a shown window's dialogs, popups and menus, each as its own window, as they open, and stops them with it (`ClientSession::set_follow_popups`, C `windowcast_session_follow_popups`, Kotlin `followPopups`; on by default). The Windows app has the switch and lists owned windows under their owner; the Android viewer shows them in floating windows.
+
+### Changed
+- A RemoteApp connection no longer draws a menu inside its owner's picture: the menu is a window of its own.
+
 ## [0.24.1] - 2026-10-10
 
 ### Changed

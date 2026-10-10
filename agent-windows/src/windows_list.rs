@@ -1,10 +1,15 @@
-//! The windows a user would see in Alt+Tab: visible, unowned, not tool
-//! windows, not cloaked (other virtual desktops, suspended UWP frames),
-//! with a title. A window's id is its HWND.
+//! The windows a client may stream, each its own entry (docs/BACKENDS.md,
+//! "Window by window, always"): the windows a user would see in Alt+Tab
+//! (visible, unowned, not tool windows, with a title), and the dialogs,
+//! popups and menus they own, each naming its owner. Cloaked windows
+//! (other virtual desktops, suspended UWP frames), minimized ones and ones
+//! without a size are left out, and so is a tool window or menu that no
+//! listed window owns (the shell's own). A window's id is its HWND.
 
+use std::collections::HashMap;
 use std::path::Path;
 
-use windowcast_protocol::{selection, WindowId, WindowInfo};
+use windowcast_protocol::{selection, ContentHint, WindowId, WindowInfo, WindowKind};
 use windows::core::{BOOL, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{
@@ -14,13 +19,37 @@ use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_EXSTYLE, GW_OWNER,
-    WS_EX_TOOLWINDOW,
+    EnumWindows, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindow, GetWindowLongW,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GUITHREADINFO,
+    GWL_EXSTYLE, GWL_STYLE, GW_OWNER, WS_CAPTION, WS_EX_TOOLWINDOW,
 };
 
 pub fn hwnd(window: WindowId) -> HWND {
     HWND(window.0 as usize as *mut core::ffi::c_void)
+}
+
+/// A visible top-level window, before it is placed in the list.
+struct Candidate {
+    hwnd: HWND,
+    title: Option<String>,
+    class: String,
+    owner: Option<HWND>,
+    tool: bool,
+    caption: bool,
+    thread: u32,
+}
+
+impl Candidate {
+    fn menu(&self) -> bool {
+        // The system's menu window class.
+        self.class == "#32768"
+    }
+
+    /// A window of a program's own: unowned, not a tool window or menu,
+    /// with a title.
+    fn normal(&self) -> bool {
+        self.owner.is_none() && !self.tool && !self.menu() && self.title.is_some()
+    }
 }
 
 pub fn list() -> Vec<WindowInfo> {
@@ -29,29 +58,75 @@ pub fn list() -> Vec<WindowInfo> {
         let _ = EnumWindows(Some(collect), LPARAM(&mut found as *mut Vec<HWND> as isize));
     }
     let foreground = unsafe { GetForegroundWindow() };
-    found
+    let candidates: Vec<Candidate> = found.into_iter().map(candidate).collect();
+
+    let mut listed: Vec<WindowInfo> = Vec::new();
+    let mut index: HashMap<usize, usize> = HashMap::new();
+    for c in candidates.iter().filter(|c| c.normal()) {
+        let info = describe(c, foreground, None, WindowKind::Normal, None);
+        index.insert(c.hwnd.0 as usize, listed.len());
+        listed.push(info);
+    }
+    // Owned windows next, until none is added: a dialog may own a popup.
+    let mut placed = true;
+    while placed {
+        placed = false;
+        for c in candidates.iter().filter(|c| !c.normal()) {
+            if index.contains_key(&(c.hwnd.0 as usize)) {
+                continue;
+            }
+            let Some(owner) = owner_of(c).filter(|o| index.contains_key(&(o.0 as usize))) else {
+                continue;
+            };
+            let owner_info = listed[index[&(owner.0 as usize)]].clone();
+            let kind = if c.menu() {
+                WindowKind::Menu
+            } else if c.owner.is_some() && c.caption {
+                WindowKind::Dialog
+            } else {
+                WindowKind::Popup
+            };
+            let info = describe(c, foreground, Some(&owner_info), kind, Some(owner));
+            index.insert(c.hwnd.0 as usize, listed.len());
+            listed.push(info);
+            placed = true;
+        }
+    }
+    listed
+}
+
+/// Who owns a window: its owner window, or for a menu or an unowned
+/// popup (tooltips, drop-downs) the window its thread has active or
+/// shows the menu for.
+fn owner_of(c: &Candidate) -> Option<HWND> {
+    if let Some(owner) = c.owner {
+        return Some(owner);
+    }
+    if !(c.tool || c.menu()) {
+        return None;
+    }
+    let mut info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetGUIThreadInfo(c.thread, &mut info) }.ok()?;
+    [info.hwndMenuOwner, info.hwndActive]
         .into_iter()
-        .filter_map(|hwnd| describe(hwnd, hwnd == foreground))
-        .collect()
+        .find(|h| !h.is_invalid() && *h != c.hwnd)
 }
 
 unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let found = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
-    if unsafe { is_user_window(hwnd) } {
+    if unsafe { shown(hwnd) } {
         found.push(hwnd);
     }
     BOOL(1)
 }
 
-unsafe fn is_user_window(hwnd: HWND) -> bool {
+/// Visible, not minimized, not cloaked, with a size.
+unsafe fn shown(hwnd: HWND) -> bool {
     unsafe {
         if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
-            return false;
-        }
-        if GetWindow(hwnd, GW_OWNER).is_ok_and(|owner| !owner.is_invalid()) {
-            return false;
-        }
-        if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0 {
             return false;
         }
         let mut cloaked = 0u32;
@@ -66,23 +141,65 @@ unsafe fn is_user_window(hwnd: HWND) -> bool {
         {
             return false;
         }
-        GetWindowTextLengthW(hwnd) > 0
+    }
+    size(hwnd).is_some_and(|(w, h)| w > 0 && h > 0)
+}
+
+fn candidate(hwnd: HWND) -> Candidate {
+    let owner = unsafe { GetWindow(hwnd, GW_OWNER) }
+        .ok()
+        .filter(|owner| !owner.is_invalid());
+    let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
+    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
+    let mut class = [0u16; 64];
+    let len = unsafe { GetClassNameW(hwnd, &mut class) };
+    Candidate {
+        hwnd,
+        title: title(hwnd),
+        class: String::from_utf16_lossy(&class[..len.max(0) as usize]),
+        owner,
+        tool: ex_style & WS_EX_TOOLWINDOW.0 != 0,
+        caption: style & WS_CAPTION.0 == WS_CAPTION.0,
+        thread: unsafe { GetWindowThreadProcessId(hwnd, None) },
     }
 }
 
-fn describe(hwnd: HWND, focused: bool) -> Option<WindowInfo> {
-    let title = title(hwnd)?;
-    let app_id = executable(hwnd).unwrap_or_default();
-    let (width, height) = size(hwnd).unwrap_or((0, 0));
-    Some(WindowInfo {
-        id: WindowId(hwnd.0 as usize as u64),
-        content: selection::classify(&app_id, &title),
+fn describe(
+    c: &Candidate,
+    foreground: HWND,
+    owner_info: Option<&WindowInfo>,
+    kind: WindowKind,
+    owner: Option<HWND>,
+) -> WindowInfo {
+    let app_id = executable(c.hwnd).unwrap_or_default();
+    let (width, height) = size(c.hwnd).unwrap_or((0, 0));
+    // An untitled popup or menu is named after its owner.
+    let title = c.title.clone().unwrap_or_else(|| {
+        let what = match kind {
+            WindowKind::Menu => "menu",
+            WindowKind::Dialog => "dialog",
+            _ => "popup",
+        };
+        match owner_info {
+            Some(o) => format!("{} {what}", o.title),
+            None => what.to_owned(),
+        }
+    });
+    // Owned windows take their owner's content, so the rules give them the
+    // same backend.
+    let content: ContentHint =
+        owner_info.map_or_else(|| selection::classify(&app_id, &title), |o| o.content);
+    WindowInfo {
+        id: WindowId(c.hwnd.0 as usize as u64),
         title,
         app_id,
         width,
         height,
-        focused,
-    })
+        focused: c.hwnd == foreground,
+        content,
+        owner: owner.map(|o| WindowId(o.0 as usize as u64)),
+        kind,
+    }
 }
 
 fn title(hwnd: HWND) -> Option<String> {

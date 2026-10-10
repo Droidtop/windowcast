@@ -26,7 +26,7 @@ use windowcast_protocol::{InputEvent, PointerButton};
 
 use crate::remoteapp::{
     slow_path_window_orders, window_orders, ListedWindow, RailChannel, RailStatus, RailTap, Rect,
-    RemoteApp, WindowOrder, Windows,
+    RemoteApp, Windows,
 };
 use crate::tls::{self, Pinned};
 use crate::RdpError;
@@ -448,9 +448,6 @@ fn run(
             };
             for order in orders {
                 tracing::debug!(?order, "RemoteApp: window order");
-                if let WindowOrder::Desktop(_) = order {
-                    continue;
-                }
                 windows.apply(order);
                 moved = true;
             }

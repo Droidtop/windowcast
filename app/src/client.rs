@@ -401,6 +401,7 @@ impl ClientRole {
             }
         };
         session.set_rules(self.store.get().client.rules);
+        session.set_follow_popups(self.store.get().client.follow_popups);
         // The Windows stream window shows RDP windows' pictures.
         session.accept_pictures(cfg!(windows));
         state.generation += 1;
@@ -749,6 +750,19 @@ impl ClientRole {
         if let Ok(session) = self.session() {
             session.set_rules(self.store.get().client.rules);
         }
+    }
+
+    /// Whether a streamed window's dialogs, popups and menus open in
+    /// windows of their own as they appear: kept, and applied now.
+    pub fn set_follow_popups(&self, on: bool) {
+        self.store.update(|config| config.client.follow_popups = on);
+        if let Ok(session) = self.session() {
+            session.set_follow_popups(on);
+        }
+    }
+
+    pub fn follow_popups(&self) -> bool {
+        self.store.get().client.follow_popups
     }
 
     /// Whether this client sends its microphone.

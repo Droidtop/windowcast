@@ -197,6 +197,12 @@ Java_dev_windowcast_Native_acceptPictures(JNIEnv *env, jclass cls, jlong session
     return windowcast_session_accept_pictures(SESSION(session), on ? 1u : 0u);
 }
 
+/* Whether a shown window's dialogs, popups and menus are shown too. */
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_followPopups(JNIEnv *env, jclass cls, jlong session, jboolean on) {
+    return windowcast_session_follow_popups(SESSION(session), on ? 1u : 0u);
+}
+
 /* Next RGBA picture of an RDP window into a direct buffer; size[0] and
  * size[1] get its width and height. Returns the length or a WINDOWCAST_*
  * status. */

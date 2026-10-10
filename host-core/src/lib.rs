@@ -945,6 +945,14 @@ impl Host {
         )));
         let rtt = Arc::new(RoundTrip::default());
         let _ping_task = AbortOnDrop(tokio::spawn(ping(Arc::clone(&session), Arc::clone(&rtt))));
+        // The window list as last sent; `None` until the client asks for it.
+        let listed = Arc::new(tokio::sync::Mutex::new(None::<Vec<WindowInfo>>));
+        let _windows_task = AbortOnDrop(tokio::spawn(push_windows(
+            Arc::clone(&self.source),
+            Arc::clone(&session),
+            decision.clone(),
+            Arc::clone(&listed),
+        )));
         if let Some(discovery_id) = control.discovery_id.clone() {
             session
                 .send_control(&ControlMessage::Rendezvous { discovery_id })
@@ -970,14 +978,13 @@ impl Host {
                     tokio::task::spawn_blocking(move || source.set_clipboard(&text));
                 }
                 ControlMessage::ListWindowsRequest => {
-                    let source = Arc::clone(&self.source);
-                    let mut windows = tokio::task::spawn_blocking(move || source.list_windows())
-                        .await
-                        .unwrap_or_default();
-                    windows.retain(|w| decision.window_allowed(&w.app_id, &w.title));
+                    let windows = allowed_windows(&self.source, &decision).await;
+                    // Held while sending, so a push cannot overtake it.
+                    let mut last = listed.lock().await;
                     session
-                        .send_control(&ControlMessage::ListWindowsResponse(windows))
+                        .send_control(&ControlMessage::ListWindowsResponse(windows.clone()))
                         .await?;
+                    *last = Some(windows);
                 }
                 ControlMessage::StreamStartRequest {
                     target: StreamTarget::Window(window),
@@ -1304,6 +1311,50 @@ const CLIPBOARD_POLL: Duration = Duration::from_millis(500);
 
 /// Sends the host's clipboard text to the client whenever it changes,
 /// except when the change is the client's own text coming back.
+/// How often a session's window list is looked at for changes.
+const WINDOWS_POLL: Duration = Duration::from_millis(400);
+
+/// The host's windows this session's policy lets it see.
+async fn allowed_windows(source: &Arc<dyn WindowSource>, decision: &Decision) -> Vec<WindowInfo> {
+    let source = Arc::clone(source);
+    let mut windows = tokio::task::spawn_blocking(move || source.list_windows())
+        .await
+        .unwrap_or_default();
+    windows.retain(|w| decision.window_allowed(&w.app_id, &w.title));
+    windows
+}
+
+/// Sends the window list again whenever it changes, once the client has
+/// asked for it: a dialog, popup or menu a program opens reaches the
+/// client as its own entry while it is open (docs/BACKENDS.md, "Window by
+/// window, always").
+async fn push_windows(
+    source: Arc<dyn WindowSource>,
+    session: Arc<Session>,
+    decision: Decision,
+    listed: Arc<tokio::sync::Mutex<Option<Vec<WindowInfo>>>>,
+) {
+    loop {
+        tokio::time::sleep(WINDOWS_POLL).await;
+        if listed.lock().await.is_none() {
+            continue;
+        }
+        let windows = allowed_windows(&source, &decision).await;
+        let mut last = listed.lock().await;
+        if last.as_ref() == Some(&windows) {
+            continue;
+        }
+        if session
+            .send_control(&ControlMessage::ListWindowsResponse(windows.clone()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        *last = Some(windows);
+    }
+}
+
 async fn share_clipboard(
     source: Arc<dyn WindowSource>,
     session: Arc<Session>,

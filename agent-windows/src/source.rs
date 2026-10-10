@@ -338,7 +338,7 @@ impl windowcast_host::PictureSource for WindowPictures {
         capture::init_thread();
         let hwnd = windows_list::hwnd(self.window);
         if self.capture.is_none() {
-            match Capture::new(hwnd) {
+            match Capture::window(hwnd) {
                 Ok(mut capture) => {
                     capture.set_bgra_output();
                     self.capture = Some(capture);
@@ -448,7 +448,7 @@ impl FrameSource for WindowStream {
             let capture = if self.desktop {
                 Capture::desktop(hwnd)
             } else {
-                Capture::new(hwnd)
+                Capture::window(hwnd)
             };
             let capture = match capture {
                 Ok(mut capture) => {

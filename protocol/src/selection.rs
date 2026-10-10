@@ -179,6 +179,8 @@ mod tests {
             width: 800,
             height: 600,
             focused: false,
+            owner: None,
+            kind: crate::WindowKind::Normal,
             content: classify(app_id, title),
         }
     }

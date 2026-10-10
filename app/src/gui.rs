@@ -725,6 +725,13 @@ impl App {
                     if snapshot.address.is_some() && ui.button("Refresh").clicked() {
                         let _ = client.refresh();
                     }
+                    let mut follow = client.follow_popups();
+                    if ui
+                        .checkbox(&mut follow, "Open a streamed window's dialogs, popups and menus")
+                        .changed()
+                    {
+                        client.set_follow_popups(follow);
+                    }
                 });
                 if snapshot.address.is_none() {
                     ui.label(RichText::new("Connect to a host to see its windows.").weak());
@@ -734,8 +741,18 @@ impl App {
                         ui.strong(heading);
                     }
                     ui.end_row();
-                    for window in &snapshot.windows {
-                        ui.label(clip(&window.info.title, 50));
+                    for (depth, window) in grouped(&snapshot.windows) {
+                        // A window another owns sits under it, with its kind.
+                        let title = clip(&window.info.title, 50);
+                        if depth == 0 {
+                            ui.label(title);
+                        } else {
+                            ui.label(format!(
+                                "{}- {title} ({})",
+                                "    ".repeat(depth),
+                                kind_name(window.info.kind)
+                            ));
+                        }
                         ui.label(&window.info.app_id);
                         ui.label(content_name(window.info.content));
                         let mut rule = window.rule;
@@ -1126,4 +1143,45 @@ fn remote_apps_ui(
             .weak(),
         );
     }
+}
+
+fn kind_name(kind: windowcast_protocol::WindowKind) -> &'static str {
+    match kind {
+        windowcast_protocol::WindowKind::Normal => "window",
+        windowcast_protocol::WindowKind::Dialog => "dialog",
+        windowcast_protocol::WindowKind::Popup => "popup",
+        windowcast_protocol::WindowKind::Menu => "menu",
+    }
+}
+
+/// The windows in list order, each followed by the windows it owns (and
+/// theirs), with how deep it sits. A window whose owner is not listed
+/// stands at the top.
+fn grouped(windows: &[crate::client::ClientWindow]) -> Vec<(usize, &crate::client::ClientWindow)> {
+    fn under<'a>(
+        windows: &'a [crate::client::ClientWindow],
+        owner: Option<windowcast_protocol::WindowId>,
+        depth: usize,
+        out: &mut Vec<(usize, &'a crate::client::ClientWindow)>,
+    ) {
+        if depth > 8 {
+            return;
+        }
+        for window in windows.iter().filter(|w| match owner {
+            None => w
+                .info
+                .owner
+                .is_none_or(|o| !windows.iter().any(|x| x.info.id == o)),
+            Some(_) => w.info.owner == owner,
+        }) {
+            if out.iter().any(|(_, w)| w.info.id == window.info.id) {
+                continue;
+            }
+            out.push((depth, window));
+            under(windows, Some(window.info.id), depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    under(windows, None, 0, &mut out);
+    out
 }

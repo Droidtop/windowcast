@@ -2,6 +2,7 @@ package dev.windowcast.viewer
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.Dialog
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -100,6 +101,12 @@ class MainActivity : Activity() {
     private var client: WindowcastClient? = null
     @Volatile private var session: WindowcastSession? = null
     private var decoder: WindowRenderer? = null
+
+    /** A shown window's dialog, popup or menu, in a floating window of its own. */
+    private class PopupView(val dialog: Dialog, var renderer: WindowRenderer?)
+
+    /** The open popups, by window id. */
+    private val popups = mutableMapOf<Long, PopupView>()
     private var audio: AudioPlayer? = null
     @Volatile private var soundPackets = 0L
     private var windows: List<WindowInfo> = emptyList()
@@ -534,9 +541,21 @@ class MainActivity : Activity() {
             while (listener === me && s.isOpen) {
                 when (val event = s.nextEvent(500) ?: continue) {
                     is Event.Windows -> main.post { showWindows(event.windows) }
-                    is Event.StreamStarted -> main.post { startDecoding(event) }
-                    is Event.StreamRefused -> main.post { status.text = "Refused: ${event.reason}"; showForm() }
-                    is Event.StreamStopped -> main.post { stopDecoding() }
+                    is Event.StreamStarted -> main.post {
+                        // The window being watched, or one it owns that the
+                        // library opened as it appeared.
+                        if (event.window == watching?.id) startDecoding(event) else openPopup(event)
+                    }
+                    is Event.StreamRefused -> main.post {
+                        if (event.window == watching?.id) {
+                            status.text = "Refused: ${event.reason}"
+                            showForm()
+                        }
+                    }
+                    is Event.StreamStopped -> main.post {
+                        if (popups.containsKey(event.window)) closePopup(event.window)
+                        else if (event.window == watching?.id) stopDecoding()
+                    }
                     is Event.Clipboard -> main.post {
                         fromHost = event.text
                         clipboard.setPrimaryClip(ClipData.newPlainText("windowcast", event.text))
@@ -766,6 +785,11 @@ class MainActivity : Activity() {
     /** Every finger, as touches on the streamed window. */
     private fun touch(view: View, event: MotionEvent): Boolean {
         val window = watching?.id ?: return false
+        return touchWindow(window, view, event)
+    }
+
+    /** Every finger on [view], as touches on [window]. */
+    private fun touchWindow(window: Long, view: View, event: MotionEvent): Boolean {
         fun put(index: Int, phase: Input.Touch) {
             val x = event.getX(index) / view.width.coerceAtLeast(1)
             val y = event.getY(index) / view.height.coerceAtLeast(1)
@@ -801,7 +825,65 @@ class MainActivity : Activity() {
         return super.dispatchGenericMotionEvent(event)
     }
 
+    /**
+     * Shows a window the watched one owns (a dialog, popup or menu) in a floating window of
+     * its own, at its own size as far as the screen allows; taps on it go to it.
+     */
+    private fun openPopup(event: Event.StreamStarted) {
+        val s = session ?: return
+        val info = windows.firstOrNull { it.id == event.window } ?: return
+        if (popups.containsKey(event.window)) return
+        val view = SurfaceView(this)
+        val dialog = Dialog(this)
+        val popup = PopupView(dialog, null)
+        popups[event.window] = popup
+        dialog.setTitle("${info.title} (${info.kind})")
+        dialog.setContentView(view)
+        val screen = resources.displayMetrics
+        val scale = minOf(
+            1f,
+            screen.widthPixels * 0.9f / info.width.coerceAtLeast(1),
+            screen.heightPixels * 0.8f / info.height.coerceAtLeast(1),
+        )
+        dialog.window?.setLayout(
+            (info.width * scale).toInt().coerceAtLeast(64),
+            (info.height * scale).toInt().coerceAtLeast(64),
+        )
+        view.setOnTouchListener { v, e -> touchWindow(event.window, v, e) }
+        dialog.setOnDismissListener {
+            // Closed here (Back, a tap outside): the host stops sending it.
+            if (popups.remove(event.window) != null) {
+                popup.renderer?.let { r -> worker.execute { r.stop() } }
+                worker.execute { s.stopWindow(event.window) }
+            }
+        }
+        view.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                popup.renderer = (if (event.backend == "Rdp") {
+                    WindowPictures(s, event.window, holder)
+                } else {
+                    WindowDecoder(s, event.window, holder.surface, info.width, info.height)
+                }).also { it.start() }
+            }
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                popup.renderer?.let { r -> worker.execute { r.stop() } }
+                popup.renderer = null
+            }
+        })
+        dialog.show()
+    }
+
+    /** The host stopped a popup (it closed): its floating window goes. */
+    private fun closePopup(window: Long) {
+        val popup = popups.remove(window) ?: return
+        popup.renderer?.let { r -> worker.execute { r.stop() } }
+        popup.dialog.dismiss()
+    }
+
     private fun stopDecoding() {
+        // A watched window's popups go with it.
+        for (window in popups.keys.toList()) closePopup(window)
         gamepads.releaseAll()
         decoder?.let { d -> worker.execute { d.stop() } }
         decoder = null

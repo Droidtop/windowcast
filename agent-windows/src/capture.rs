@@ -114,6 +114,18 @@ impl Capture {
         Self::start(unsafe { interop.CreateForWindow(window)? }, None)
     }
 
+    /// Captures one window: its own surface, or, for a window
+    /// Windows.Graphics.Capture will not take on its own (menus, tooltips,
+    /// drop-downs and other tool or no-activate windows refuse with
+    /// "Could not capture the given window"), its part of the screen
+    /// ([`Self::desktop`]), which shows it as it is drawn, on top.
+    pub fn window(window: HWND) -> windows::core::Result<Self> {
+        Self::new(window).or_else(|e| {
+            eprintln!("window capture refused ({e}); capturing its part of the screen");
+            Self::desktop(window)
+        })
+    }
+
     /// Captures the whole screen `window` is on; [`Self::picture`] is the
     /// window's bounds cut out of it, with whatever covers the window.
     pub fn desktop(window: HWND) -> windows::core::Result<Self> {

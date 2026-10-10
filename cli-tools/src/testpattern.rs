@@ -28,6 +28,8 @@ impl WindowSource for TestPatternSource {
             width: WIDTH as u32,
             height: HEIGHT as u32,
             focused: true,
+            owner: None,
+            kind: windowcast_protocol::WindowKind::Normal,
             content: ContentHint::General,
         }]
     }

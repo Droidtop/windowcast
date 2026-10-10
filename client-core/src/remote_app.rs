@@ -75,18 +75,29 @@ pub(crate) fn infos(shared: &Shared) -> Vec<WindowInfo> {
     conns
         .iter()
         .flat_map(|conn| {
-            conn.listed.iter().map(|w| WindowInfo {
-                id: window_id(conn.key, w.id),
-                title: if w.title.is_empty() {
-                    conn.app_id.clone()
-                } else {
-                    w.title.clone()
-                },
-                app_id: conn.app_id.clone(),
-                width: w.rect.width,
-                height: w.rect.height,
-                focused: false,
-                content: ContentHint::Text,
+            conn.listed.iter().map(|w| {
+                // An untitled window is named after its owner, or its program.
+                let owner_title = w
+                    .owner
+                    .and_then(|o| conn.listed.iter().find(|l| l.id == o))
+                    .map(|o| o.title.as_str())
+                    .filter(|t| !t.is_empty());
+                let title = match (w.title.is_empty(), owner_title) {
+                    (false, _) => w.title.clone(),
+                    (true, Some(owner)) => format!("{owner} popup"),
+                    (true, None) => conn.app_id.clone(),
+                };
+                WindowInfo {
+                    id: window_id(conn.key, w.id),
+                    title,
+                    app_id: conn.app_id.clone(),
+                    width: w.rect.width,
+                    height: w.rect.height,
+                    focused: false,
+                    owner: w.owner.map(|o| window_id(conn.key, o)),
+                    kind: w.kind,
+                    content: ContentHint::Text,
+                }
             })
         })
         .collect()
@@ -121,6 +132,8 @@ impl ClientSession {
             width: 0,
             height: 0,
             focused: false,
+            owner: None,
+            kind: windowcast_protocol::WindowKind::Normal,
         };
         let rules = self.rules.lock().expect("rules");
         selection::choose_backend(&window, &rules) == BackendKind::Rdp
