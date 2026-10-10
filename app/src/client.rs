@@ -194,7 +194,7 @@ impl ClientRole {
             .ok_or_else(|| "not connected to a host".to_owned())
     }
 
-    fn log(&self, line: String) {
+    pub(crate) fn log(&self, line: String) {
         let mut state = self.state.lock().expect("state");
         state.log.push_back(line);
         while state.log.len() > LOG_LINES {
@@ -521,6 +521,46 @@ impl ClientRole {
                     drop(state);
                     self.log(line);
                 }
+                Event::CarrierStarted {
+                    window,
+                    generation,
+                    backend,
+                    codec,
+                } => {
+                    // The stream window shows it beside the current carrier
+                    // and swaps on its first picture.
+                    let source = match (backend, codec) {
+                        (BackendKind::Rdp, _) => Some(StreamSource::Pictures),
+                        (_, Some(codec)) => Some(StreamSource::Video(codec)),
+                        _ => None,
+                    };
+                    if let (Some(stream), Some(source)) = (state.streams.get_mut(&window), source) {
+                        #[cfg(windows)]
+                        if let Some(view) = &stream.window {
+                            view.switch_to(source, generation);
+                        }
+                        #[cfg(not(windows))]
+                        let _ = (source, generation);
+                        stream.backend = Some(backend);
+                        stream.codec = codec;
+                    }
+                    drop(state);
+                    self.log(format!("window {window}: switching to {backend:?}"));
+                }
+                Event::CarrierRefused {
+                    window,
+                    generation,
+                    reason,
+                } => {
+                    #[cfg(windows)]
+                    if let Some(view) = state.streams.get(&window).and_then(|s| s.window.as_ref()) {
+                        view.cancel_switch(generation);
+                    }
+                    #[cfg(not(windows))]
+                    let _ = generation;
+                    drop(state);
+                    self.log(format!("window {window}: no switch: {reason}"));
+                }
                 Event::StreamRefused { window, reason } => {
                     if let Some(stream) = state.streams.get_mut(&window) {
                         stream.refused = Some(reason.clone());
@@ -714,6 +754,16 @@ impl ClientRole {
         if let Ok(session) = self.session() {
             let _ = session.set_stream_limits(WindowId(window), limits);
         }
+    }
+
+    /// Switches a streaming window to `backend` without closing its
+    /// window (docs/BACKENDS.md, "One window, any carrier").
+    pub fn switch_stream(&self, window: u64, backend: BackendKind) -> Result<(), String> {
+        let codecs = self.codecs();
+        self.session()?
+            .switch_window(WindowId(window), backend, &codecs)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     pub fn stop_stream(&self, window: u64) -> Result<(), String> {

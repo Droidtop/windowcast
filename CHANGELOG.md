@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Switching a window's carrier without a break, by hand (docs/BACKENDS.md, "One window, any carrier"; Droidtop/tracker#457 step 2): `ClientSession::switch_window` starts the new carrier beside the one on screen, `Event::CarrierStarted` hands it to the app, which swaps to it on its first picture and calls `carrier_shown`; the old carrier then stops. A switch the host refuses, or whose carrier shows nothing within 5 s, is given up (`Event::CarrierRefused`) and the window stays as it was. C: `windowcast_session_switch_window`, `windowcast_session_carrier_shown`; Kotlin `switchWindow`, `carrierShown`.
+- The Windows client shows video and RDP pictures through one presenter and swaps carriers in one present; the app's Streams panel has "Switch to video / RDP pictures". The Android viewer shows the new carrier on a second surface and swaps on its first picture; its menu has "Show as video / Show as RDP pictures".
+
 ## [0.26.0] - 2026-10-10
 
 ### Added

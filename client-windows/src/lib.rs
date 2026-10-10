@@ -99,6 +99,11 @@ pub struct Shared {
     pub send_input: AtomicBool,
     /// The window's sound is silenced while this is set.
     pub muted: AtomicBool,
+    /// A switch's new carrier to show beside the current one, swapped to
+    /// on its first picture (docs/BACKENDS.md, "One window, any carrier").
+    pub switch: Mutex<Option<(StreamSource, u32)>>,
+    /// A switch that did not happen, by generation.
+    pub cancel_switch: Mutex<Option<u32>>,
 }
 
 pub type SharedStats = Arc<Shared>;

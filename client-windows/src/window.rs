@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use windowcast_client::{ClientSession, FramePoll};
-use windowcast_protocol::{InputEvent, PointerButton, VideoCodec, WindowId};
+use windowcast_protocol::{InputEvent, PointerButton, WindowId};
 use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -51,6 +51,18 @@ impl StreamWindow {
 
     pub fn is_closed(&self) -> bool {
         self.shared.stats.lock().expect("stats").closed
+    }
+
+    /// Shows a switch's new carrier beside the current one and swaps to it
+    /// on its first picture, telling client-core
+    /// (`ClientSession::carrier_shown`).
+    pub fn switch_to(&self, source: StreamSource, generation: u32) {
+        *self.shared.switch.lock().expect("switch") = Some((source, generation));
+    }
+
+    /// A switch that did not happen: its carrier is no longer waited for.
+    pub fn cancel_switch(&self, generation: u32) {
+        *self.shared.cancel_switch.lock().expect("switch") = Some(generation);
     }
 }
 
@@ -242,10 +254,7 @@ fn run(
             &mut *state as *mut WindowState as isize,
         );
     }
-    let result = match source {
-        StreamSource::Video(codec) => stream(session, codec, title, shared, hwnd, &mut state, stop),
-        StreamSource::Pictures => stream_pictures(session, title, shared, hwnd, &mut state, stop),
-    };
+    let result = show(session, source, title, shared, hwnd, &mut state, stop);
     unsafe {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         let _ = DestroyWindow(hwnd);
@@ -265,9 +274,168 @@ fn client_size(hwnd: HWND) -> (u32, u32) {
     )
 }
 
-fn stream(
+/// One way a window's pictures arrive: decoded video from the session, or
+/// RDP's RGBA pictures.
+enum Path {
+    Video {
+        decoder: Decoder,
+        waiting_for_keyframe: bool,
+    },
+    Pictures {
+        last: Option<windowcast_client::RgbaPicture>,
+    },
+}
+
+/// What one poll of a path did.
+enum Polled {
+    Shown,
+    Nothing,
+    Ended,
+}
+
+impl Path {
+    /// The path for `source`, with its decoder's name for the statistics.
+    fn open(
+        source: StreamSource,
+        device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        session: &ClientSession,
+        window: WindowId,
+    ) -> Result<(Path, String), String> {
+        Ok(match source {
+            StreamSource::Video(codec) => {
+                let decoder = Decoder::new(codec, device)?;
+                let name = decoder.name.clone();
+                session.request_keyframe(window);
+                (
+                    Path::Video {
+                        decoder,
+                        waiting_for_keyframe: true,
+                    },
+                    name,
+                )
+            }
+            StreamSource::Pictures => (Path::Pictures { last: None }, "RDP pictures".into()),
+        })
+    }
+
+    /// Takes what the path has, waiting at most `wait`, and presents it.
+    fn poll(
+        &mut self,
+        session: &ClientSession,
+        presenter: &mut Presenter,
+        state: &mut WindowState,
+        shared: &Shared,
+        (wait, resized): (Duration, bool),
+    ) -> Result<Polled, String> {
+        let window = state.window;
+        match self {
+            Path::Video {
+                decoder,
+                waiting_for_keyframe,
+            } => {
+                let frame = match session.next_frame(window, wait) {
+                    FramePoll::Frame(frame) => frame,
+                    FramePoll::Timeout => return Ok(Polled::Nothing),
+                    FramePoll::Ended => return Ok(Polled::Ended),
+                };
+                let arrived = Instant::now();
+                {
+                    let mut stats = shared.stats.lock().expect("stats");
+                    stats.frames_received += 1;
+                    stats.bytes += frame.data.len() as u64;
+                    stats.keyframes += u64::from(frame.keyframe);
+                }
+                if *waiting_for_keyframe && !frame.keyframe {
+                    return Ok(Polled::Nothing);
+                }
+                *waiting_for_keyframe = false;
+                match decoder.decode(&frame.data) {
+                    Ok(pictures) => {
+                        let mut shown = false;
+                        for picture in pictures {
+                            state.picture = (picture.width, picture.height);
+                            presenter.present(&picture)?;
+                            shown = true;
+                            let mut stats = shared.stats.lock().expect("stats");
+                            stats.frames_shown += 1;
+                            stats.size = Some(state.picture);
+                            let ms = arrived.elapsed().as_secs_f64() * 1000.0;
+                            stats.latency_ms = if stats.latency_ms == 0.0 {
+                                ms
+                            } else {
+                                stats.latency_ms * 0.9 + ms * 0.1
+                            };
+                        }
+                        Ok(if shown {
+                            Polled::Shown
+                        } else {
+                            Polled::Nothing
+                        })
+                    }
+                    Err(e) => {
+                        eprintln!("window {}: {e}; asking for a keyframe", window.0);
+                        shared.stats.lock().expect("stats").resets += 1;
+                        *waiting_for_keyframe = true;
+                        session.request_keyframe(window);
+                        Ok(Polled::Nothing)
+                    }
+                }
+            }
+            Path::Pictures { last } => {
+                // A window that does not change sends nothing: begin with
+                // the newest picture there is.
+                let first = if last.is_none() {
+                    session.latest_picture(window)
+                } else {
+                    None
+                };
+                let picture = match first {
+                    Some(picture) => picture,
+                    None => match session.next_picture(window, wait) {
+                        windowcast_client::PicturePoll::Picture(picture) => picture,
+                        windowcast_client::PicturePoll::Timeout => {
+                            if let (true, Some(picture)) = (resized, &*last) {
+                                presenter.present_rgba(
+                                    picture.width,
+                                    picture.height,
+                                    &picture.data,
+                                )?;
+                            }
+                            return Ok(Polled::Nothing);
+                        }
+                        windowcast_client::PicturePoll::Ended => return Ok(Polled::Ended),
+                    },
+                };
+                let arrived = Instant::now();
+                state.picture = (picture.width, picture.height);
+                presenter.present_rgba(picture.width, picture.height, &picture.data)?;
+                let mut stats = shared.stats.lock().expect("stats");
+                stats.frames_received += 1;
+                stats.frames_shown += 1;
+                stats.bytes += picture.data.len() as u64;
+                stats.size = Some(state.picture);
+                let ms = arrived.elapsed().as_secs_f64() * 1000.0;
+                stats.latency_ms = if stats.latency_ms == 0.0 {
+                    ms
+                } else {
+                    stats.latency_ms * 0.9 + ms * 0.1
+                };
+                drop(stats);
+                *last = Some(picture);
+                Ok(Polled::Shown)
+            }
+        }
+    }
+}
+
+/// Shows the window's pictures as they come, on whichever carrier: one
+/// presenter, fed by the active path; a switch's new carrier (`switch` in
+/// [`Shared`]) runs beside it and takes over on its first picture, in one
+/// present, so the window never goes blank (docs/BACKENDS.md, "One window,
+/// any carrier").
+fn show(
     session: &ClientSession,
-    codec: VideoCodec,
+    source: StreamSource,
     title: &str,
     shared: &Shared,
     hwnd: HWND,
@@ -275,13 +443,11 @@ fn stream(
     stop: &AtomicBool,
 ) -> Result<(), String> {
     let device = present::create_device()?;
-    let mut decoder = Decoder::new(codec, &device)?;
     let mut presenter = Presenter::new(&device, hwnd, client_size(hwnd))?;
-    shared.stats.lock().expect("stats").decoder = decoder.name.clone();
     let window = state.window;
-    session.request_keyframe(window);
-
-    let mut waiting_for_keyframe = true;
+    let (mut active, name) = Path::open(source, &device, session, window)?;
+    shared.stats.lock().expect("stats").decoder = name;
+    let mut pending: Option<(Path, u32, String)> = None;
     let mut second = Instant::now();
     let (mut shown_then, mut bytes_then) = (0u64, 0u64);
     loop {
@@ -305,146 +471,52 @@ fn stream(
             let _ = session.send_input(event);
         }
         let size = client_size(hwnd);
-        state.client = size;
-        presenter.resize(size)?;
-
-        let frame = match session.next_frame(window, Duration::from_millis(4)) {
-            FramePoll::Frame(frame) => frame,
-            FramePoll::Timeout => {
-                tick(
-                    shared,
-                    hwnd,
-                    title,
-                    state,
-                    &mut second,
-                    &mut shown_then,
-                    &mut bytes_then,
-                );
-                continue;
-            }
-            FramePoll::Ended => return Ok(()),
-        };
-        let arrived = Instant::now();
-        {
-            let mut stats = shared.stats.lock().expect("stats");
-            stats.frames_received += 1;
-            stats.bytes += frame.data.len() as u64;
-            stats.keyframes += u64::from(frame.keyframe);
-        }
-        if waiting_for_keyframe && !frame.keyframe {
-            continue;
-        }
-        waiting_for_keyframe = false;
-        match decoder.decode(&frame.data) {
-            Ok(pictures) => {
-                for picture in pictures {
-                    state.picture = (picture.width, picture.height);
-                    presenter.present(&picture)?;
-                    let mut stats = shared.stats.lock().expect("stats");
-                    stats.frames_shown += 1;
-                    stats.size = Some(state.picture);
-                    let ms = arrived.elapsed().as_secs_f64() * 1000.0;
-                    stats.latency_ms = if stats.latency_ms == 0.0 {
-                        ms
-                    } else {
-                        stats.latency_ms * 0.9 + ms * 0.1
-                    };
-                }
-            }
-            Err(e) => {
-                eprintln!("window {}: {e}; asking for a keyframe", window.0);
-                shared.stats.lock().expect("stats").resets += 1;
-                waiting_for_keyframe = true;
-                session.request_keyframe(window);
-            }
-        }
-        tick(
-            shared,
-            hwnd,
-            title,
-            state,
-            &mut second,
-            &mut shown_then,
-            &mut bytes_then,
-        );
-    }
-}
-
-/// Shows a window streamed over RDP: each RGBA picture as it comes.
-fn stream_pictures(
-    session: &ClientSession,
-    title: &str,
-    shared: &Shared,
-    hwnd: HWND,
-    state: &mut WindowState,
-    stop: &AtomicBool,
-) -> Result<(), String> {
-    let device = present::create_device()?;
-    let mut presenter = Presenter::new(&device, hwnd, client_size(hwnd))?;
-    shared.stats.lock().expect("stats").decoder = "RDP pictures".into();
-    let window = state.window;
-    let mut second = Instant::now();
-    let (mut shown_then, mut bytes_then) = (0u64, 0u64);
-    // A window that does not change sends nothing: start from the newest
-    // picture there is.
-    let mut last = session.latest_picture(window);
-    if let Some(picture) = &last {
-        state.picture = (picture.width, picture.height);
-        presenter.present_rgba(picture.width, picture.height, &picture.data)?;
-        let mut stats = shared.stats.lock().expect("stats");
-        stats.frames_shown += 1;
-        stats.size = Some(state.picture);
-    }
-    loop {
-        let mut message = MSG::default();
-        while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
-            unsafe {
-                let _ = TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
-        }
-        if state.closed || stop.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-        if state.toggle_fullscreen {
-            state.toggle_fullscreen = false;
-            toggle_fullscreen(hwnd, state);
-        }
-        state.send_input = shared.send_input.load(Ordering::SeqCst);
-        for event in state.input.drain(..) {
-            let _ = session.send_input(event);
-        }
-        let size = client_size(hwnd);
         let resized = size != state.client;
         state.client = size;
         presenter.resize(size)?;
-        match session.next_picture(window, Duration::from_millis(8)) {
-            windowcast_client::PicturePoll::Picture(picture) => {
-                let arrived = Instant::now();
-                state.picture = (picture.width, picture.height);
-                presenter.present_rgba(picture.width, picture.height, &picture.data)?;
-                let mut stats = shared.stats.lock().expect("stats");
-                stats.frames_received += 1;
-                stats.frames_shown += 1;
-                stats.bytes += picture.data.len() as u64;
-                stats.size = Some(state.picture);
-                let ms = arrived.elapsed().as_secs_f64() * 1000.0;
-                stats.latency_ms = if stats.latency_ms == 0.0 {
-                    ms
-                } else {
-                    stats.latency_ms * 0.9 + ms * 0.1
-                };
-                drop(stats);
-                last = Some(picture);
+
+        // A switch asked for, or given up.
+        if let Some((source, generation)) = shared.switch.lock().expect("switch").take() {
+            match Path::open(source, &device, session, window) {
+                Ok((path, name)) => pending = Some((path, generation, name)),
+                Err(e) => eprintln!("window {}: cannot show the new carrier: {e}", window.0),
             }
-            windowcast_client::PicturePoll::Timeout => {
-                // A window that does not change sends nothing; redraw the
-                // last picture when the window is resized.
-                if let (true, Some(picture)) = (resized, &last) {
-                    presenter.present_rgba(picture.width, picture.height, &picture.data)?;
+        }
+        if let Some(generation) = shared.cancel_switch.lock().expect("switch").take() {
+            if pending.as_ref().is_some_and(|(_, g, _)| *g == generation) {
+                pending = None;
+            }
+        }
+
+        let wait = Duration::from_millis(if pending.is_some() { 2 } else { 6 });
+        let polled = active.poll(session, &mut presenter, state, shared, (wait, resized))?;
+        if matches!(polled, Polled::Ended) && pending.is_none() {
+            return Ok(());
+        }
+        let swapped = match pending.as_mut() {
+            Some((path, _, _)) => {
+                match path.poll(
+                    session,
+                    &mut presenter,
+                    state,
+                    shared,
+                    (Duration::from_millis(4), false),
+                )? {
+                    Polled::Shown => true,
+                    Polled::Ended => {
+                        pending = None;
+                        false
+                    }
+                    Polled::Nothing => false,
                 }
             }
-            windowcast_client::PicturePoll::Ended => return Ok(()),
+            None => false,
+        };
+        if swapped {
+            let (path, generation, name) = pending.take().expect("pending");
+            active = path;
+            shared.stats.lock().expect("stats").decoder = name;
+            let _ = session.carrier_shown(window, generation);
         }
         tick(
             shared,

@@ -43,6 +43,8 @@ sealed interface Event {
     data class StreamStarted(val window: Long, val backend: String, val codec: Codec?) : Event
     data class StreamRefused(val window: Long, val reason: String) : Event
     data class StreamStopped(val window: Long) : Event
+    data class CarrierStarted(val window: Long, val generation: Int, val backend: String, val codec: Codec?) : Event
+    data class CarrierRefused(val window: Long, val generation: Int, val reason: String) : Event
     data class WindowResized(val window: Long, val width: Int, val height: Int) : Event
     data class WindowFocused(val window: Long) : Event
     data class Clipboard(val text: String) : Event
@@ -76,6 +78,13 @@ sealed interface Event {
                 )
                 "stream_refused" -> StreamRefused(o.getLong("window"), o.getString("reason"))
                 "stream_stopped" -> StreamStopped(o.getLong("window"))
+                "carrier_started" -> CarrierStarted(
+                    o.getLong("window"),
+                    o.getInt("generation"),
+                    o.getString("backend"),
+                    Codec.fromName(o.optString("codec").takeIf { o.has("codec") && !o.isNull("codec") }),
+                )
+                "carrier_refused" -> CarrierRefused(o.getLong("window"), o.getInt("generation"), o.getString("reason"))
                 "window_resized" -> WindowResized(o.getLong("window"), o.getInt("width"), o.getInt("height"))
                 "window_focused" -> WindowFocused(o.getLong("window"))
                 "clipboard" -> Clipboard(o.getString("text"))
@@ -228,6 +237,25 @@ class WindowcastSession internal constructor(handle: Long) : Closeable {
     /** Asks to stream [window], decodable in [codecs], most preferred first. */
     fun startWindow(window: Long, codecs: List<Codec>) {
         withHandle(Unit) { Native.startWindow(it, window, codecs.map { c -> c.id }.toIntArray()) }
+    }
+
+    /**
+     * Switches a streamed window to [backend] ("Native", "Rdp", ...) without a break: the new
+     * carrier arrives as [Event.CarrierStarted]; show it beside the old one, swap on its first
+     * picture and call [carrierShown]. [Event.CarrierRefused] says it did not happen. Returns the
+     * new generation.
+     */
+    fun switchWindow(window: Long, backend: String, codecs: List<Codec>): Int {
+        val generation = withHandle(Native.ERROR) {
+            Native.switchWindow(it, window, backend, codecs.map { c -> c.id }.toIntArray())
+        }
+        if (generation < 0) throw IOException(if (isOpen) Native.lastError() else "the session is closed")
+        return generation.toInt()
+    }
+
+    /** The first picture of carrier [generation] was shown: it replaces the old one. */
+    fun carrierShown(window: Long, generation: Int) {
+        withHandle(Unit) { Native.carrierShown(it, window, generation) }
     }
 
     fun stopWindow(window: Long) {

@@ -11,7 +11,7 @@ use std::ffi::{c_char, CStr};
 use std::path::Path;
 use std::time::Duration;
 
-use windowcast_protocol::{VideoCodec, WindowId};
+use windowcast_protocol::{BackendKind, VideoCodec, WindowId};
 
 use windowcast_accounts::oidc::{BrowserSignIn, DeviceSignIn};
 use windowcast_protocol::OidcProviderInfo;
@@ -254,6 +254,73 @@ pub unsafe extern "C" fn windowcast_session_start_window(
     match session.start_window(WindowId(window), &codecs) {
         Ok(()) => 0,
         Err(_) => WINDOWCAST_ERROR,
+    }
+}
+
+/// Switches a streamed window to the carrier named `backend` ("Native",
+/// "Rdp", ...) without a break (docs/BACKENDS.md, "One window, any
+/// carrier"). The new carrier arrives as a `carrier_started` event, to be
+/// shown beside the old one and swapped to on its first picture, then
+/// [`windowcast_session_carrier_shown`]; `carrier_refused` says the switch
+/// did not happen. Returns the new carrier's generation, or
+/// WINDOWCAST_ERROR with the reason in `error`.
+///
+/// # Safety
+/// `session` valid; `backend` NUL-terminated; `codecs` valid for `count`
+/// values; `error` null or valid for `error_cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_switch_window(
+    session: *const ClientSession,
+    window: u64,
+    backend: *const c_char,
+    codecs: *const u32,
+    count: usize,
+    error: *mut c_char,
+    error_cap: usize,
+) -> i64 {
+    let (Some(session), Some(name)) = (session.as_ref(), str_arg(backend)) else {
+        write_text("invalid arguments", error, error_cap);
+        return WINDOWCAST_ERROR;
+    };
+    let Ok(backend) = serde_json::from_value::<BackendKind>(serde_json::Value::String(name.into()))
+    else {
+        write_text(&format!("unknown backend {name}"), error, error_cap);
+        return WINDOWCAST_ERROR;
+    };
+    let codecs: Vec<VideoCodec> = if codecs.is_null() {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(codecs, count)
+            .iter()
+            .filter_map(|id| codec_from_id(*id))
+            .collect()
+    };
+    match session.switch_window(WindowId(window), backend, &codecs) {
+        Ok(generation) => i64::from(generation),
+        Err(e) => {
+            write_text(&e.to_string(), error, error_cap);
+            WINDOWCAST_ERROR
+        }
+    }
+}
+
+/// The app showed the first picture of the carrier `generation` a switch
+/// started: it replaces the old one. Returns 0 or WINDOWCAST_ERROR.
+///
+/// # Safety
+/// `session` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_carrier_shown(
+    session: *const ClientSession,
+    window: u64,
+    generation: u32,
+) -> i64 {
+    match session
+        .as_ref()
+        .map(|s| s.carrier_shown(WindowId(window), generation))
+    {
+        Some(Ok(())) => 0,
+        _ => WINDOWCAST_ERROR,
     }
 }
 

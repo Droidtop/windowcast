@@ -17,6 +17,8 @@ import java.util.concurrent.atomic.AtomicInteger
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
+import android.view.Menu
+import android.view.MenuItem
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
@@ -76,6 +78,20 @@ class MainActivity : Activity() {
     /** One row per window the host listed. */
     private lateinit var list: LinearLayout
     private lateinit var surface: SurfaceView
+
+    /**
+     * A second surface stacked with [surface]: a carrier switch shows the new carrier here and
+     * swaps the two on its first picture (docs/BACKENDS.md, "One window, any carrier").
+     */
+    private lateinit var spare: SurfaceView
+
+    /** A switch under way: the new carrier's generation and renderer. */
+    private class Switch(val generation: Int, val backend: String, var renderer: WindowRenderer? = null)
+
+    private var switching: Switch? = null
+
+    /** The carrier the watched window is on ("Native", "Rdp"), for the switch menu. */
+    private var carrier: String? = null
     private lateinit var terminalView: TerminalView
     private lateinit var launchLine: EditText
     private lateinit var sshUser: EditText
@@ -217,6 +233,10 @@ class MainActivity : Activity() {
             visibility = View.GONE
             setOnTouchListener { view, event -> touch(view, event) }
         }
+        spare = SurfaceView(this).apply {
+            visibility = View.GONE
+            setOnTouchListener { view, event -> touch(view, event) }
+        }
         clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
             val text = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()
@@ -226,6 +246,7 @@ class MainActivity : Activity() {
         setContentView(FrameLayout(this).apply {
             addView(form, MATCH_PARENT, MATCH_PARENT)
             addView(surface, MATCH_PARENT, MATCH_PARENT)
+            addView(spare, MATCH_PARENT, MATCH_PARENT)
             addView(terminalView, MATCH_PARENT, MATCH_PARENT)
         })
 
@@ -546,6 +567,15 @@ class MainActivity : Activity() {
                         // library opened as it appeared.
                         if (event.window == watching?.id) startDecoding(event) else openPopup(event)
                     }
+                    is Event.CarrierStarted -> main.post {
+                        if (event.window == watching?.id) switchCarrier(event)
+                    }
+                    is Event.CarrierRefused -> main.post {
+                        if (event.window == watching?.id && switching?.generation == event.generation) {
+                            cancelSwitch()
+                            status.text = "No switch: ${event.reason}"
+                        }
+                    }
                     is Event.StreamRefused -> main.post {
                         if (event.window == watching?.id) {
                             status.text = "Refused: ${event.reason}"
@@ -600,7 +630,41 @@ class MainActivity : Activity() {
         worker.execute { s.startWindow(window.id, codecs) }
     }
 
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menu.add(Menu.NONE, MENU_VIDEO, Menu.NONE, "Show as video")
+        menu.add(Menu.NONE, MENU_PICTURES, Menu.NONE, "Show as RDP pictures")
+        return true
+    }
+
+    override fun onPrepareOptionsMenu(menu: Menu): Boolean {
+        val on = streaming() && switching == null
+        menu.findItem(MENU_VIDEO)?.isVisible = on && carrier != "Native"
+        menu.findItem(MENU_PICTURES)?.isVisible = on && carrier != "Rdp"
+        return true
+    }
+
+    /** Switches the watched window's carrier, keeping it on screen until the new one shows. */
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        val backend = when (item.itemId) {
+            MENU_VIDEO -> "Native"
+            MENU_PICTURES -> "Rdp"
+            else -> return super.onOptionsItemSelected(item)
+        }
+        val s = session ?: return true
+        val window = watching ?: return true
+        val codecs = WindowDecoder.decodableCodecs()
+        worker.execute {
+            try {
+                s.switchWindow(window.id, backend, codecs)
+            } catch (e: Exception) {
+                main.post { status.text = "No switch: ${e.message}" }
+            }
+        }
+        return true
+    }
+
     private fun startDecoding(event: Event.StreamStarted) {
+        carrier = event.backend
         val window = watching ?: return
         val s = session ?: return
         form.visibility = View.GONE
@@ -881,7 +945,91 @@ class MainActivity : Activity() {
         popup.dialog.dismiss()
     }
 
+    /**
+     * Shows a switch's new carrier on the spare surface, beside the one on screen, and swaps the
+     * two on its first picture; then the old carrier's renderer stops and the library is told.
+     */
+    private fun switchCarrier(event: Event.CarrierStarted) {
+        val s = session ?: return
+        val window = watching ?: return
+        cancelSwitch()
+        val pending = Switch(event.generation, event.backend)
+        switching = pending
+        val view = spare
+        view.visibility = View.VISIBLE
+        val begin = { holder: SurfaceHolder ->
+            var first = true
+            val onShown = {
+                if (first) {
+                    first = false
+                    main.post { finishSwitch(pending, view) }
+                }
+            }
+            // Once swapped in, it reports as the first carrier's renderer did.
+            val report = { line: String, ended: Boolean, error: String? ->
+                main.post {
+                    if (decoder === pending.renderer) {
+                        if (surface.visibility == View.VISIBLE) title = "${window.title}: $line"
+                        if (ended) {
+                            status.text = "Stream ended" + (error?.let { ": $it" } ?: "")
+                            showForm()
+                        }
+                    }
+                }
+            }
+            pending.renderer = (if (event.backend == "Rdp") {
+                WindowPictures(s, event.window, holder) { stats ->
+                    if (stats.pictures > 0) onShown()
+                    report("${stats.pictures} pictures over RDP, ${stats.width}x${stats.height}", stats.ended, stats.error)
+                }
+            } else {
+                WindowDecoder(s, event.window, holder.surface, window.width, window.height) { stats ->
+                    if (stats.frames > 0) onShown()
+                    report("${stats.frames} frames (${stats.codec ?: event.codec})", stats.ended, stats.error)
+                }
+            }).also { it.start() }
+        }
+        if (view.holder.surface?.isValid == true) {
+            begin(view.holder)
+        } else {
+            view.holder.addCallback(object : SurfaceHolder.Callback {
+                override fun surfaceCreated(holder: SurfaceHolder) {
+                    holder.removeCallback(this)
+                    if (switching === pending) begin(holder)
+                }
+                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+                override fun surfaceDestroyed(holder: SurfaceHolder) {}
+            })
+        }
+    }
+
+    /** The new carrier showed its first picture: it takes the screen, the old one stops. */
+    private fun finishSwitch(pending: Switch, view: SurfaceView) {
+        if (switching !== pending) return
+        val s = session ?: return
+        val window = watching ?: return
+        switching = null
+        carrier = pending.backend
+        val old = decoder
+        decoder = pending.renderer
+        old?.let { d -> worker.execute { d.stop() } }
+        val shown = surface
+        surface = view
+        spare = shown
+        shown.visibility = View.GONE
+        worker.execute { s.carrierShown(window.id, pending.generation) }
+    }
+
+    /** A switch that will not happen: its renderer stops and its surface goes. */
+    private fun cancelSwitch() {
+        val pending = switching ?: return
+        switching = null
+        pending.renderer?.let { r -> worker.execute { r.stop() } }
+        spare.visibility = View.GONE
+    }
+
     private fun stopDecoding() {
+        cancelSwitch()
         // A watched window's popups go with it.
         for (window in popups.keys.toList()) closePopup(window)
         gamepads.releaseAll()
@@ -948,6 +1096,8 @@ class MainActivity : Activity() {
 
     companion object {
         private const val RECORD_REQUEST = 1
+        private const val MENU_VIDEO = 1
+        private const val MENU_PICTURES = 2
         /** The activity's label in the manifest: the title when no stream is showing. */
         private const val APP_TITLE = "windowcast viewer"
         /** How long a browser sign-in may take before it is given up. */

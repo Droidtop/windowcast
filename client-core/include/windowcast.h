@@ -73,6 +73,21 @@ int64_t windowcast_session_start_window(const WindowcastSession *session, uint64
                                         const uint32_t *codecs, size_t count);
 int64_t windowcast_session_stop_window(const WindowcastSession *session, uint64_t window);
 
+/* Switches a streamed window to the carrier named backend ("Native", "Rdp",
+ * ...) without a break: the new carrier arrives as a "carrier_started"
+ * event (window, generation, backend, codec), to be shown beside the old
+ * one and swapped to on its first picture, then
+ * windowcast_session_carrier_shown; "carrier_refused" says it did not
+ * happen. Returns the new generation, or WINDOWCAST_ERROR with the reason
+ * in error. */
+int64_t windowcast_session_switch_window(const WindowcastSession *session, uint64_t window,
+                                         const char *backend, const uint32_t *codecs,
+                                         size_t count, char *error, size_t error_cap);
+/* The first picture of carrier `generation` was shown: it replaces the old
+ * one. Returns 0 or WINDOWCAST_ERROR. */
+int64_t windowcast_session_carrier_shown(const WindowcastSession *session, uint64_t window,
+                                         uint32_t generation);
+
 /* Sends one input event as JSON (serde's form of windowcast_protocol's
  * InputEvent; examples in client-core/src/ffi.rs), e.g.
  * {"Touch":{"window":7,"id":0,"x":0.5,"y":0.5,"phase":"Start"}}.

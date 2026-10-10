@@ -565,6 +565,25 @@ pub enum Event {
     StreamStopped {
         window: u64,
     },
+    /// A switch's new carrier is up ([`ClientSession::switch_window`]):
+    /// show it beside the one on screen, and swap to it on its first
+    /// picture, then call [`ClientSession::carrier_shown`]. Its frames
+    /// come through [`ClientSession::next_frame`] (a backend with a codec)
+    /// or [`ClientSession::next_picture`] (RDP), as for a start.
+    CarrierStarted {
+        window: u64,
+        generation: u32,
+        backend: BackendKind,
+        codec: Option<VideoCodec>,
+    },
+    /// A switch did not happen (the host refused it, it could not
+    /// connect, or it showed nothing in time): the window stays on the
+    /// carrier it is on.
+    CarrierRefused {
+        window: u64,
+        generation: u32,
+        reason: String,
+    },
     WindowResized {
         window: u64,
         width: u32,
@@ -676,9 +695,81 @@ struct Shared {
     sign_in_password: Mutex<Option<String>>,
     /// The last carrier generation asked for, per window.
     generations: Mutex<HashMap<WindowId, u32>>,
+    /// Each window's carrier on screen and, during a switch, the next.
+    carriers: Mutex<HashMap<WindowId, Carriers>>,
 }
 
+/// One carrier of a window's stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Carrier {
+    generation: u32,
+    backend: BackendKind,
+}
+
+#[derive(Debug, Default)]
+struct Carriers {
+    shown: Option<Carrier>,
+    next: Option<Carrier>,
+}
+
+/// How long a switch's new carrier has to show its first picture.
+const SWITCH_WITHIN: Duration = Duration::from_secs(5);
+
 impl Shared {
+    /// Whether `generation` is the carrier a switch of `window` waits for.
+    fn switching(&self, window: WindowId, generation: u32) -> bool {
+        self.carriers
+            .lock()
+            .expect("carriers")
+            .get(&window)
+            .and_then(|c| c.next)
+            .is_some_and(|next| next.generation == generation)
+    }
+
+    /// A window's first carrier is up.
+    fn started(&self, window: WindowId, generation: u32, backend: BackendKind) {
+        self.carriers
+            .lock()
+            .expect("carriers")
+            .entry(window)
+            .or_default()
+            .shown = Some(Carrier {
+            generation,
+            backend,
+        });
+    }
+
+    /// Ends a switch that did not happen: its carrier stops and the window
+    /// stays on the one shown.
+    fn abandon_switch(
+        &self,
+        (runtime, session): (&tokio::runtime::Handle, &Session),
+        window: WindowId,
+        generation: u32,
+        reason: String,
+    ) {
+        let next = {
+            let mut carriers = self.carriers.lock().expect("carriers");
+            let Some(entry) = carriers.get_mut(&window) else {
+                return;
+            };
+            if entry.next.is_none_or(|n| n.generation != generation) {
+                return;
+            }
+            entry.next.take()
+        };
+        if next.is_some_and(|n| n.backend == BackendKind::Rdp) {
+            self.rdp.lock().expect("rdp").remove(&window);
+        }
+        let stop = ControlMessage::CarrierStop { window, generation };
+        let _ = runtime.block_on(session.send_control(&stop));
+        self.emit(Event::CarrierRefused {
+            window: window.0,
+            generation,
+            reason,
+        });
+    }
+
     /// The next carrier generation of `window`'s stream.
     fn next_generation(&self, window: WindowId) -> u32 {
         let mut generations = self.generations.lock().expect("generations");
@@ -808,6 +899,7 @@ impl ClientSession {
             remote_viewing: Mutex::default(),
             sign_in_password: Mutex::default(),
             generations: Mutex::default(),
+            carriers: Mutex::default(),
         });
         let windows = Arc::new(Mutex::new(Vec::new()));
 
@@ -939,6 +1031,116 @@ impl ClientSession {
                 limits,
             },
         })
+    }
+
+    /// Switches a streamed window to `backend` without a break
+    /// (docs/BACKENDS.md, "One window, any carrier"): the new carrier
+    /// starts beside the one on screen, arrives as
+    /// [`Event::CarrierStarted`], and replaces it once the app has shown its
+    /// first picture ([`Self::carrier_shown`]); [`Event::CarrierRefused`]
+    /// says it did not happen. Returns the new carrier's generation.
+    pub fn switch_window(
+        &self,
+        window: WindowId,
+        backend: BackendKind,
+        codecs: &[VideoCodec],
+    ) -> Result<u32, ClientError> {
+        if remote_app::split(window).is_some() {
+            return Err(ClientError::Refused(
+                "a RemoteApp window has only its RDP connection".into(),
+            ));
+        }
+        if backend == BackendKind::Rdp
+            && (self.shared.host_ip.is_none() || !self.pictures.load(Ordering::SeqCst))
+        {
+            return Err(ClientError::Refused(
+                "RDP needs the host on this network and a client that shows pictures".into(),
+            ));
+        }
+        let generation = {
+            let mut carriers = self.shared.carriers.lock().expect("carriers");
+            let entry = carriers.entry(window).or_default();
+            let Some(shown) = entry.shown else {
+                return Err(ClientError::Refused("that window is not streaming".into()));
+            };
+            if entry.next.is_some() {
+                return Err(ClientError::Refused(
+                    "that window is already switching".into(),
+                ));
+            }
+            if shown.backend == backend {
+                return Err(ClientError::Refused(format!(
+                    "that window is already on {backend:?}"
+                )));
+            }
+            let generation = self.shared.next_generation(window);
+            entry.next = Some(Carrier {
+                generation,
+                backend,
+            });
+            generation
+        };
+        let limits = self
+            .shared
+            .limits
+            .lock()
+            .expect("limits")
+            .get(&window)
+            .copied()
+            .unwrap_or_default();
+        self.send(ControlMessage::StreamStartRequest {
+            target: StreamTarget::Window(window),
+            options: StreamOptions {
+                backend,
+                codecs: codecs.to_vec(),
+                limits,
+            },
+            generation,
+        })?;
+        // A carrier that shows nothing in time is given up.
+        let shared = Arc::downgrade(&self.shared);
+        let session = Arc::clone(&self.session);
+        let runtime = self.runtime.handle().clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(SWITCH_WITHIN);
+            if let Some(shared) = shared.upgrade() {
+                shared.abandon_switch(
+                    (&runtime, &session),
+                    window,
+                    generation,
+                    format!("no picture within {} s", SWITCH_WITHIN.as_secs()),
+                );
+            }
+        });
+        Ok(generation)
+    }
+
+    /// The app showed the first picture of the carrier a switch started
+    /// ([`Event::CarrierStarted`]): it replaces the old one, which stops.
+    pub fn carrier_shown(&self, window: WindowId, generation: u32) -> Result<(), ClientError> {
+        let old = {
+            let mut carriers = self.shared.carriers.lock().expect("carriers");
+            let Some(entry) = carriers.get_mut(&window) else {
+                return Ok(());
+            };
+            match entry.next {
+                Some(next) if next.generation == generation => {
+                    entry.next = None;
+                    entry.shown.replace(next)
+                }
+                _ => return Ok(()),
+            }
+        };
+        if let Some(old) = old {
+            if old.backend == BackendKind::Rdp {
+                self.shared.rdp.lock().expect("rdp").remove(&window);
+            }
+            self.send(ControlMessage::CarrierStop {
+                window,
+                generation: old.generation,
+            })?;
+        }
+        Ok(())
     }
 
     /// Sets this client's ceilings for a window's stream: kept for its
@@ -1270,7 +1472,7 @@ fn connect_rdp(
     session: Arc<Session>,
     shared: Arc<Shared>,
     events: mpsc::Sender<Event>,
-    window: WindowId,
+    (window, generation): (WindowId, u32),
     target: HandoffTarget,
     size: (u16, u16),
 ) {
@@ -1295,6 +1497,7 @@ fn connect_rdp(
             .map_err(|e| e.to_string()),
             None => Err("the host's RDP address is not reachable from here".to_owned()),
         };
+        let switching = shared.switching(window, generation);
         let event = match result {
             Ok(stream) => {
                 shared
@@ -1302,11 +1505,30 @@ fn connect_rdp(
                     .lock()
                     .expect("rdp")
                     .insert(window, Arc::new(stream));
-                Event::StreamStarted {
-                    window: window.0,
-                    backend: BackendKind::Rdp,
-                    codec: None,
+                if switching {
+                    Event::CarrierStarted {
+                        window: window.0,
+                        generation,
+                        backend: BackendKind::Rdp,
+                        codec: None,
+                    }
+                } else {
+                    shared.started(window, generation, BackendKind::Rdp);
+                    Event::StreamStarted {
+                        window: window.0,
+                        backend: BackendKind::Rdp,
+                        codec: None,
+                    }
                 }
+            }
+            Err(reason) if switching => {
+                shared.abandon_switch(
+                    (&runtime, &session),
+                    window,
+                    generation,
+                    format!("RDP: {reason}"),
+                );
+                return;
             }
             Err(reason) => {
                 runtime.spawn(async move {
@@ -1355,6 +1577,7 @@ async fn pump_events(
             }
             ControlMessage::StreamStartResponse {
                 target: StreamTarget::Window(window),
+                generation,
                 accepted: true,
                 backend: StreamBackend::Rdp,
                 handoff: Some(target),
@@ -1372,7 +1595,7 @@ async fn pump_events(
                     Arc::clone(&session),
                     Arc::clone(&shared),
                     events.clone(),
-                    window,
+                    (window, generation),
                     target,
                     size,
                 );
@@ -1380,15 +1603,38 @@ async fn pump_events(
             }
             ControlMessage::StreamStartResponse {
                 target: StreamTarget::Window(window),
+                generation,
                 accepted,
                 backend,
                 reason,
                 ..
             } => {
-                if accepted {
+                let switching = shared.switching(window, generation);
+                if switching && !accepted {
+                    if let Some(entry) = shared.carriers.lock().expect("carriers").get_mut(&window)
+                    {
+                        entry.next = None;
+                    }
+                    Event::CarrierRefused {
+                        window: window.0,
+                        generation,
+                        reason: reason.unwrap_or_default(),
+                    }
+                } else if switching {
                     if backend.session_codec().is_some() {
                         shared.slot(window);
                     }
+                    Event::CarrierStarted {
+                        window: window.0,
+                        generation,
+                        backend: backend.kind(),
+                        codec: backend.session_codec(),
+                    }
+                } else if accepted {
+                    if backend.session_codec().is_some() {
+                        shared.slot(window);
+                    }
+                    shared.started(window, generation, backend.kind());
                     Event::StreamStarted {
                         window: window.0,
                         backend: backend.kind(),
@@ -1420,6 +1666,7 @@ async fn pump_events(
                     slot.sender.lock().expect("sender").take();
                 }
                 shared.rdp.lock().expect("rdp").remove(&window);
+                shared.carriers.lock().expect("carriers").remove(&window);
                 Event::StreamStopped { window: window.0 }
             }
             ControlMessage::WindowResized {

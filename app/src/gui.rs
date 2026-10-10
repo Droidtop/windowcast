@@ -835,6 +835,21 @@ impl App {
                     if let Some(quality) = &stream.quality {
                         ui.label(format!("Sent at: {}", network(quality)));
                     }
+                    // Changing the carrier keeps the window open.
+                    ui.horizontal(|ui| {
+                        ui.label("Switch to");
+                        for (backend, label) in [
+                            (windowcast_protocol::BackendKind::Native, "video"),
+                            (windowcast_protocol::BackendKind::Rdp, "RDP pictures"),
+                        ] {
+                            let current = stream.backend == Some(backend);
+                            if ui.add_enabled(!current, egui::Button::new(label)).clicked() {
+                                if let Err(e) = client.switch_stream(stream.window, backend) {
+                                    client.log(format!("no switch: {e}"));
+                                }
+                            }
+                        }
+                    });
                     ui.horizontal(|ui| {
                         let mut limits = stream.limits;
                         let mut changed = false;

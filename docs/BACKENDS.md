@@ -311,8 +311,15 @@ chain; the Android viewer keeps two stacked surfaces and swaps which one
 is visible on the new carrier's first picture. The window's size is the
 session's (`WindowGeometry`), and each carrier's picture is scaled to it,
 so a carrier sending a smaller picture does not resize the window. A
-switch is an event for statistics (`CarrierChanged { window, backend,
-codec }`), not something the user sees.
+switch is not something the user sees.
+
+Built (step 2): `ClientSession::switch_window` starts the new carrier and
+gives it up after 5 s without a picture; `Event::CarrierStarted` hands it
+to the app, which calls `carrier_shown` once it has shown its first
+picture, and the old carrier stops; `Event::CarrierRefused` says a switch
+did not happen. The Windows client and the Android viewer do this, by
+hand for now (the app's "Switch to", the viewer's menu); the automatic
+selector is the next step.
 
 ### Third-party clients and RemoteApp
 

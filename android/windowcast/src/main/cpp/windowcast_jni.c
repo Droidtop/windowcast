@@ -82,6 +82,32 @@ Java_dev_windowcast_Native_requestWindows(JNIEnv *env, jclass cls, jlong session
     return windowcast_session_request_windows(SESSION(session));
 }
 
+/* Switches a window's carrier; the new generation, or WINDOWCAST_ERROR with
+ * the reason in lastError. */
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_switchWindow(JNIEnv *env, jclass cls, jlong session, jlong window,
+                                        jstring backend, jintArray codecs) {
+    jsize count = (*env)->GetArrayLength(env, codecs);
+    jint *ids = (*env)->GetIntArrayElements(env, codecs, NULL);
+    uint32_t list[8];
+    size_t n = 0;
+    for (jsize i = 0; i < count && n < 8; i++) list[n++] = (uint32_t)ids[i];
+    (*env)->ReleaseIntArrayElements(env, codecs, ids, JNI_ABORT);
+    const char *name = (*env)->GetStringUTFChars(env, backend, NULL);
+    last_error[0] = 0;
+    int64_t result = windowcast_session_switch_window(SESSION(session), (uint64_t)window, name,
+                                                      list, n, last_error, sizeof last_error);
+    (*env)->ReleaseStringUTFChars(env, backend, name);
+    return result;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_carrierShown(JNIEnv *env, jclass cls, jlong session, jlong window,
+                                        jint generation) {
+    return windowcast_session_carrier_shown(SESSION(session), (uint64_t)window,
+                                            (uint32_t)generation);
+}
+
 JNIEXPORT jlong JNICALL
 Java_dev_windowcast_Native_startWindow(JNIEnv *env, jclass cls, jlong session, jlong window,
                                        jintArray codecs) {
