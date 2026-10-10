@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `windowcast-testhost`: input reaches the test pattern through `--content` (`WithContent`), the tone and the microphone wrappers, which dropped every event; the test pattern prints each event it gets (Droidtop/tracker#450).
+- A client given a PIN for a host that already paired it resumes with its device key first and uses the PIN only when the host does not know it, instead of being refused with "pairing is not open" (Droidtop/tracker#453). A forgotten device's resume attempt does not count toward the host's PIN lockout (refused as an unknown peer, not a failed authentication).
+- Viewer: the session and shell survive a screen size, density or rotation change; the stream's title is cleared after Back; a browser sign-in can be cancelled and times out after 2 minutes (Droidtop/tracker#451, #452, #454).
+
 ## [0.23.2] - 2026-10-10
 
 ### Fixed
