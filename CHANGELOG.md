@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.20.0] - 2026-10-09
 
 ### Added
 - RDP (Droidtop/tracker#111), on IronRDP's protocol crates (Devolutions, MIT or Apache-2.0; listed in the new `NOTICE`), as the owner decided: crates may carry a protocol, never an external program. The new `windowcast-rdp` crate serves one window of a host over RDP, so any RDP client shows that window and types into it (the desktop is the window; TLS with a certificate made per host, NLA with a login the host sets; RemoteFX or plain bitmaps as the client supports; keys and pointer to the window through the host's own input delivery), and is a client for RDP hosts, windowcast's or Windows' own Remote Desktop, with the picture as RGBA and windowcast's input as RDP input. `windowcast-rdp connect HOST USER` and `windowcast-rdp serve` try it. Tested in CI: our client against our host (the pattern moves, keys and pointer arrive, a wrong password is refused), stock FreeRDP (`wlfreerdp3`) against our host, and our client logging in to a Windows runner's own Remote Desktop.
