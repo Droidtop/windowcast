@@ -211,6 +211,8 @@ Java_dev_windowcast_Native_nextPicture(JNIEnv *env, jclass cls, jlong session, j
     jint values[2] = {(jint)width, (jint)height};
     (*env)->SetIntArrayRegion(env, size, 0, 2, values);
     return len;
+}
+
 /* ---- The command stream: terminals and launches (windowcast.h). ---- */
 
 #define TERMINAL(h) ((WindowcastTerminal *)(intptr_t)(h))
