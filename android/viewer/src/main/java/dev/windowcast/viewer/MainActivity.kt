@@ -12,6 +12,7 @@ import dev.windowcast.OidcProvider
 import dev.windowcast.SignIn
 import dev.windowcast.SignInOptions
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
@@ -85,6 +86,14 @@ class MainActivity : Activity() {
     /** The fingerprint of an SSH server the user was shown and has not trusted yet. */
     private var pendingFingerprint: String? = null
     private lateinit var form: ScrollView
+    /** Shown while a browser sign-in waits; gives it up. */
+    private lateinit var cancelBrowserSignIn: Button
+    private var clipboardListener: ClipboardManager.OnPrimaryClipChangedListener? = null
+    /** Counts browser sign-ins; a finished one acts only if it is still the latest, so Cancel can drop one. */
+    private val signInAttempt = AtomicInteger()
+    @Volatile private var browserSignInWaiting = false
+    /** Set once the system has asked for the state to keep across a recreation (onDestroy keeps the session then). */
+    private var keepSession = false
     private lateinit var sendMicrophone: CheckBox
     @Volatile private var microphone: Microphone? = null
 
@@ -124,6 +133,11 @@ class MainActivity : Activity() {
                 prefs.edit().putString("address", address.text.toString()).apply()
                 signIn(address.text.toString().trim())
             }
+        }
+        cancelBrowserSignIn = Button(this).apply {
+            text = "Cancel sign-in"
+            visibility = View.GONE
+            setOnClickListener { giveUpBrowserSignIn("Sign-in cancelled") }
         }
         status = TextView(this).apply { text = "Not connected" }
         sendMicrophone = CheckBox(this).apply {
@@ -177,6 +191,7 @@ class MainActivity : Activity() {
             addView(pin, MATCH_PARENT, WRAP_CONTENT)
             addView(connect, MATCH_PARENT, WRAP_CONTENT)
             addView(signInButton, MATCH_PARENT, WRAP_CONTENT)
+            addView(cancelBrowserSignIn, MATCH_PARENT, WRAP_CONTENT)
             addView(sendMicrophone, MATCH_PARENT, WRAP_CONTENT)
             addView(status, MATCH_PARENT, WRAP_CONTENT)
             addView(shell, MATCH_PARENT, WRAP_CONTENT)
@@ -196,19 +211,61 @@ class MainActivity : Activity() {
             setOnTouchListener { view, event -> touch(view, event) }
         }
         clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.addPrimaryClipChangedListener {
+        clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
             val text = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()
             val s = session
             if (text != null && text != fromHost && s != null) inputWorker.execute { s.setClipboard(text) }
-        }
+        }.also { clipboard.addPrimaryClipChangedListener(it) }
         setContentView(FrameLayout(this).apply {
             addView(form, MATCH_PARENT, MATCH_PARENT)
             addView(surface, MATCH_PARENT, MATCH_PARENT)
             addView(terminalView, MATCH_PARENT, MATCH_PARENT)
         })
 
-        client = WindowcastClient(File(filesDir, "windowcast"))
-        status.text = "This device: ${client?.peerId?.take(16)}…"
+        val kept = lastNonConfigurationInstance as? Kept
+        if (kept != null) {
+            // A recreation (a configuration change the manifest does not absorb): the
+            // connection and the shell carry on, only the screens are rebuilt.
+            client = kept.client
+            session = kept.session
+            val s = kept.session
+            if (s != null && s.isOpen) {
+                status.text = "Reconnected to the open session."
+                listen(s)
+                worker.execute { s.requestWindows() }
+                kept.terminal?.let { showTerminal(it) }
+            } else {
+                status.text = "Not connected"
+            }
+        } else {
+            client = WindowcastClient(File(filesDir, "windowcast"))
+            status.text = "This device: ${client?.peerId?.take(16)}…"
+        }
+    }
+
+    /** What survives the activity being recreated: the connection and the shell, not the stream. */
+    private class Kept(val client: WindowcastClient?, val session: WindowcastSession?, val terminal: TerminalSession?)
+
+    @Deprecated("Kept across a recreation")
+    override fun onRetainNonConfigurationInstance(): Any? {
+        keepSession = true
+        return Kept(client, session, terminalSession)
+    }
+
+    /** Back from the browser: if the sign-in there did not finish, say what is happening and how to stop it. */
+    override fun onResume() {
+        super.onResume()
+        if (browserSignInWaiting) {
+            status.text = "Still waiting for the sign-in in the browser. Finish it there, or press Cancel sign-in."
+        }
+    }
+
+    /** Gives up the browser sign-in that is waiting, if any; its result is ignored when it arrives or times out. */
+    private fun giveUpBrowserSignIn(message: String) {
+        signInAttempt.incrementAndGet()
+        browserSignInWaiting = false
+        cancelBrowserSignIn.visibility = View.GONE
+        status.text = message
     }
 
     private fun connect(address: String, pin: String?) {
@@ -338,6 +395,9 @@ class MainActivity : Activity() {
      */
     private fun browserSignIn(address: String, provider: OidcProvider, accept: String?) {
         val c = client ?: return
+        val attempt = signInAttempt.incrementAndGet()
+        browserSignInWaiting = true
+        cancelBrowserSignIn.visibility = View.VISIBLE
         status.text = "Opening ${provider.name}…"
         Thread({
             try {
@@ -351,11 +411,18 @@ class MainActivity : Activity() {
                 }
                 val token = signIn.finish(SIGN_IN_TIMEOUT_MS)
                 main.post {
+                    // Cancelled meanwhile: the token is dropped.
+                    if (signInAttempt.get() != attempt) return@post
+                    browserSignInWaiting = false
+                    cancelBrowserSignIn.visibility = View.GONE
                     backToFront()
                     connectAccount(address, SignIn.Oidc(provider, token), accept)
                 }
             } catch (e: Exception) {
-                main.post { status.text = "Could not sign in with ${provider.name}: ${e.message}" }
+                main.post {
+                    if (signInAttempt.get() != attempt) return@post
+                    giveUpBrowserSignIn("Could not sign in with ${provider.name}: ${e.message}")
+                }
             }
         }, "windowcast-sign-in").start()
     }
@@ -523,7 +590,9 @@ class MainActivity : Activity() {
             decoder = if (event.backend == "Rdp") {
                 WindowPictures(s, event.window, surface.holder) { stats ->
                     main.post {
-                        title = "${window.title}: ${stats.pictures} pictures over RDP, ${stats.width}x${stats.height}"
+                        if (surface.visibility == View.VISIBLE) {
+                            title = "${window.title}: ${stats.pictures} pictures over RDP, ${stats.width}x${stats.height}"
+                        }
                         if (stats.ended) {
                             status.text = "Stream ended after ${stats.pictures} pictures" +
                                 (stats.error?.let { ": $it" } ?: "")
@@ -534,7 +603,9 @@ class MainActivity : Activity() {
             } else {
                 WindowDecoder(s, event.window, surface.holder.surface, window.width, window.height) { stats ->
                     main.post {
-                        title = "${window.title}: ${stats.frames} frames (${stats.codec ?: event.codec}), sound $soundPackets packets"
+                        if (surface.visibility == View.VISIBLE) {
+                            title = "${window.title}: ${stats.frames} frames (${stats.codec ?: event.codec}), sound $soundPackets packets"
+                        }
                         if (stats.ended) {
                             status.text = "Stream ended after ${stats.frames} frames" +
                                 (stats.error?.let { ": $it" } ?: "")
@@ -725,6 +796,8 @@ class MainActivity : Activity() {
     private fun showForm() {
         surface.visibility = View.GONE
         form.visibility = View.VISIBLE
+        // The stream's title (window name and counters) goes with the stream.
+        title = APP_TITLE
     }
 
     @Deprecated("Activity back handling")
@@ -745,23 +818,36 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        clipboardListener?.let { clipboard.removePrimaryClipChangedListener(it) }
         inputWorker.shutdown()
+        val reader = listener
         stopListening(wait = false)
         terminalView.detach()
-        terminalSession?.close()
         decoder?.stop()
         audio?.stop()
         stopMicrophone()
-        session?.close()
-        client?.close()
+        if (keepSession && isChangingConfigurations) {
+            // Recreated, not finished: the next instance takes the session and the shell over.
+            // The stream does not survive its surface, so the host is told to stop it.
+            val s = session
+            val w = watching
+            if (decoder != null && s != null && w != null) worker.execute { s.stopWindow(w.id) }
+            reader?.join(1000)
+        } else {
+            terminalSession?.close()
+            session?.close()
+            client?.close()
+        }
         worker.shutdown()
         super.onDestroy()
     }
 
     companion object {
         private const val RECORD_REQUEST = 1
+        /** The activity's label in the manifest: the title when no stream is showing. */
+        private const val APP_TITLE = "windowcast viewer"
         /** How long a browser sign-in may take before it is given up. */
-        private const val SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000
+        private const val SIGN_IN_TIMEOUT_MS = 2 * 60 * 1000
         private val REFRESH_DELAYS_MS = longArrayOf(1000, 2500, 5000, 10000)
     }
 }
