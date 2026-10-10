@@ -236,9 +236,12 @@ fn the_stream_fits_a_bottleneck_and_recovers() {
     });
     let fitted = fitted.expect("the host never brought the stream under 600 kbit/s");
 
-    // Lifted: back up past the bottleneck's rate.
+    // Lifted: back up past the bottleneck's rate. Growth is 8% a second
+    // from wherever the cut left it, after the last of the queued pings
+    // (seconds late under the bottleneck) is answered; from a deep cut
+    // (150 kbit/s in run 38011225143) that is most of a minute.
     tc("qdisc del dev lo root");
-    let recovered = watch(&session, &control, Duration::from_secs(45), |q| {
+    let recovered = watch(&session, &control, Duration::from_secs(90), |q| {
         q.target_kbps.is_none_or(|t| t >= 1200) && q.sent_kbps >= 1000
     });
     let recovered = recovered.expect("the stream did not climb back after the bottleneck went");
