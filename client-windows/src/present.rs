@@ -2,6 +2,8 @@
 //! this use, a flip-model swap chain on the stream window, and the GPU's
 //! video processor, which converts NV12 to RGB and scales the picture into
 //! the window (letterboxed) in one pass. Nothing is copied to the CPU.
+//! RGBA pictures (an RDP window) are uploaded to a texture and scaled by
+//! the same processor.
 
 use windows::core::Interface;
 use windows::Win32::Foundation::{HMODULE, HWND, RECT};
@@ -45,6 +47,8 @@ pub fn create_device() -> Result<ID3D11Device, String> {
 struct Processor {
     input: (u32, u32),
     output: (u32, u32),
+    /// Full-range RGB input (uploaded pictures) rather than video.
+    rgb: bool,
     enumerator: ID3D11VideoProcessorEnumerator,
     processor: ID3D11VideoProcessor,
 }
@@ -57,6 +61,10 @@ pub struct Presenter {
     swap_chain: IDXGISwapChain1,
     size: (u32, u32),
     processor: Option<Processor>,
+    /// The texture RGBA pictures are uploaded to, and its size.
+    upload: Option<(ID3D11Texture2D, u32, u32)>,
+    /// A picture's rows in BGRA, the order the texture takes.
+    swizzled: Vec<u8>,
 }
 
 const BUFFERS: u32 = 2;
@@ -100,6 +108,8 @@ impl Presenter {
                 swap_chain,
                 size: (size.0.max(1), size.1.max(1)),
                 processor: None,
+                upload: None,
+                swizzled: Vec::new(),
             })
         }
     }
@@ -126,11 +136,11 @@ impl Presenter {
         Ok(())
     }
 
-    fn processor(&mut self, input: (u32, u32)) -> Result<&Processor, String> {
+    fn processor(&mut self, input: (u32, u32), rgb: bool) -> Result<&Processor, String> {
         let fresh = self
             .processor
             .as_ref()
-            .is_none_or(|p| p.input != input || p.output != self.size);
+            .is_none_or(|p| p.input != input || p.output != self.size || p.rgb != rgb);
         if fresh {
             unsafe {
                 let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
@@ -151,8 +161,11 @@ impl Presenter {
                     .CreateVideoProcessor(&enumerator, 0)
                     .map_err(err("video processor"))?;
                 // The host encodes BT.601 at studio range (agent-windows
-                // convert.rs); the window is full-range RGB.
-                let input_space = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 1 << 4 };
+                // convert.rs); the window is full-range RGB, as uploaded
+                // pictures are.
+                let input_space = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+                    _bitfield: if rgb { 0 } else { 1 << 4 },
+                };
                 let output_space = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 };
                 self.video_context
                     .VideoProcessorSetStreamColorSpace(&processor, 0, &input_space);
@@ -166,6 +179,7 @@ impl Presenter {
                 self.processor = Some(Processor {
                     input,
                     output: self.size,
+                    rgb,
                     enumerator,
                     processor,
                 });
@@ -174,20 +188,85 @@ impl Presenter {
         Ok(self.processor.as_ref().expect("processor"))
     }
 
-    /// Shows one picture, scaled to fit the window with black bars.
+    /// Shows one decoded picture, scaled to fit the window with black bars.
     pub fn present(&mut self, picture: &Picture) -> Result<(), String> {
+        self.blit(
+            &picture.texture.clone(),
+            picture.slice,
+            (picture.width, picture.height),
+            false,
+        )
+    }
+
+    /// Shows one RGBA picture (rows from the top, `width * 4` bytes each),
+    /// scaled to fit the window with black bars.
+    pub fn present_rgba(&mut self, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
+        let (width, height) = (width.max(1), height.max(1));
+        if self
+            .upload
+            .as_ref()
+            .is_none_or(|(_, w, h)| (*w, *h) != (width, height))
+        {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                ..Default::default()
+            };
+            let mut texture = None;
+            unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut texture)) }
+                .map_err(err("upload texture"))?;
+            self.upload = Some((texture.expect("texture"), width, height));
+        }
+        // RGBA to the BGRA the texture holds.
+        self.swizzled.clear();
+        self.swizzled.extend(
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|p| [p[2], p[1], p[0], 255]),
+        );
+        let texture = self.upload.as_ref().expect("upload").0.clone();
+        unsafe {
+            self.context.UpdateSubresource(
+                &texture,
+                0,
+                None,
+                self.swizzled.as_ptr().cast(),
+                width * 4,
+                0,
+            );
+        }
+        self.blit(&texture, 0, (width, height), true)
+    }
+
+    fn blit(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        slice: u32,
+        visible: (u32, u32),
+        rgb: bool,
+    ) -> Result<(), String> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
-        unsafe { picture.texture.GetDesc(&mut desc) };
+        unsafe { texture.GetDesc(&mut desc) };
         let input = (
-            picture.width.min(desc.Width).max(2),
-            picture.height.min(desc.Height).max(2),
+            visible.0.min(desc.Width).max(2),
+            visible.1.min(desc.Height).max(2),
         );
         let size = self.size;
         let video_device = self.video_device.clone();
         let video_context = self.video_context.clone();
         let back: ID3D11Texture2D =
             unsafe { self.swap_chain.GetBuffer(0) }.map_err(err("back buffer"))?;
-        let processor = self.processor((desc.Width, desc.Height))?;
+        let processor = self.processor((desc.Width, desc.Height), rgb)?;
         unsafe {
             let input_view_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
                 FourCC: 0,
@@ -195,14 +274,14 @@ impl Presenter {
                 Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
                     Texture2D: D3D11_TEX2D_VPIV {
                         MipSlice: 0,
-                        ArraySlice: picture.slice,
+                        ArraySlice: slice,
                     },
                 },
             };
             let mut input_view = None;
             video_device
                 .CreateVideoProcessorInputView(
-                    &picture.texture,
+                    texture,
                     &processor.enumerator,
                     &input_view_desc,
                     Some(&mut input_view),

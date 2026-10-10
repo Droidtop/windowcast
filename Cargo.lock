@@ -6300,6 +6300,7 @@ dependencies = [
  "vigem-client",
  "windowcast-cli-tools",
  "windowcast-client-core",
+ "windowcast-client-windows",
  "windowcast-host",
  "windowcast-identity",
  "windowcast-protocol",

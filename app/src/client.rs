@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use windowcast_client::{Client, ClientSession, Event};
-use windowcast_client_windows::{Placement, Shared, StreamStats};
+use windowcast_client_windows::{Placement, Shared, StreamSource, StreamStats};
 use windowcast_protocol::selection::{self, BackendRule, WindowMatch};
 use windowcast_protocol::{
     BackendKind, StreamLimits, StreamQuality, VideoCodec, WindowId, WindowInfo,
@@ -223,6 +223,8 @@ impl ClientRole {
             }
         };
         session.set_rules(self.store.get().client.rules);
+        // The Windows stream window shows RDP windows' pictures.
+        session.accept_pictures(cfg!(windows));
         state.generation += 1;
         state.session = Some(Arc::clone(&session));
         state.address = Some(address.to_owned());
@@ -326,8 +328,16 @@ impl ClientRole {
                         "{title}: streaming over {backend:?}{}",
                         codec.map(|c| format!(" in {c:?}")).unwrap_or_default()
                     );
-                    if let Some(codec) = codec {
-                        self.open_window(&session, stream, window, codec, title);
+                    if backend == BackendKind::Rdp {
+                        self.open_window(&session, stream, window, StreamSource::Pictures, title);
+                    } else if let Some(codec) = codec {
+                        self.open_window(
+                            &session,
+                            stream,
+                            window,
+                            StreamSource::Video(codec),
+                            title,
+                        );
                     }
                     drop(state);
                     self.log(line);
@@ -375,7 +385,7 @@ impl ClientRole {
         session: &Arc<ClientSession>,
         stream: &mut Stream,
         window: u64,
-        codec: VideoCodec,
+        source: StreamSource,
         title: String,
     ) {
         let config = self.settings();
@@ -392,7 +402,7 @@ impl ClientRole {
         stream.window = Some(windowcast_client_windows::open(
             Arc::clone(session),
             WindowId(window),
-            codec,
+            source,
             title,
             placement,
             Arc::clone(&stream.shared),
@@ -405,7 +415,7 @@ impl ClientRole {
         _: &Arc<ClientSession>,
         stream: &mut Stream,
         _: u64,
-        _: VideoCodec,
+        _: StreamSource,
         _: String,
     ) {
         let _ = (Placement::default(), Ordering::SeqCst);

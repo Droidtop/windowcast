@@ -67,3 +67,4 @@ tokio = { workspace = true, features = ["net"] }
 windowcast-client-core = { path = "../client-core" }
 windowcast-identity = { path = "../identity" }
 windowcast-cli-tools = { path = "../cli-tools" }
+windowcast-client-windows = { path = "../client-windows" }

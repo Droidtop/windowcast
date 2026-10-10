@@ -18,7 +18,6 @@ mod audio;
 #[cfg(windows)]
 mod decoder;
 #[cfg(windows)]
-#[cfg(windows)]
 mod microphone;
 #[cfg(windows)]
 mod present;
@@ -32,6 +31,14 @@ pub use window::{open, StreamWindow};
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+
+/// What a stream window shows: decoded video in a codec, or the RGBA
+/// pictures of a window on RDP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamSource {
+    Video(windowcast_protocol::VideoCodec),
+    Pictures,
+}
 
 /// How a stream window is placed.
 #[derive(Debug, Clone, Default)]

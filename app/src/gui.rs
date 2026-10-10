@@ -142,7 +142,11 @@ const BACKENDS: [(BackendKind, &str, bool); 6] = [
         true,
     ),
     (BackendKind::GameStream, "GameStream (not built yet)", false),
-    (BackendKind::Rdp, "RDP (not built yet)", false),
+    (
+        BackendKind::Rdp,
+        "RDP (sharp text; on the same network)",
+        true,
+    ),
     (BackendKind::Vnc, "VNC (not built yet)", false),
 ];
 

@@ -23,7 +23,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::decoder::Decoder;
 use crate::present::{self, Presenter};
-use crate::{Display, Placement, Shared, SharedStats};
+use crate::{Display, Placement, Shared, SharedStats, StreamSource};
 
 /// An open stream window. Dropping the handle leaves the window open;
 /// [`StreamWindow::close`] closes it.
@@ -54,11 +54,11 @@ impl StreamWindow {
     }
 }
 
-/// Opens a window showing `window`'s stream from `session`, in `codec`.
+/// Opens a window showing `window`'s stream from `session`.
 pub fn open(
     session: Arc<ClientSession>,
     window: WindowId,
-    codec: VideoCodec,
+    source: StreamSource,
     title: String,
     placement: Placement,
     shared: SharedStats,
@@ -75,7 +75,7 @@ pub fn open(
         let (hwnd, stop, shared) = (Arc::clone(&hwnd), Arc::clone(&stop), Arc::clone(&shared));
         std::thread::spawn(move || {
             let result = run(
-                &session, window, codec, &title, &placement, &shared, &hwnd, &stop,
+                &session, window, source, &title, &placement, &shared, &hwnd, &stop,
             );
             let mut stats = shared.stats.lock().expect("stats");
             stats.closed = true;
@@ -164,7 +164,7 @@ pub fn displays() -> Vec<Display> {
 fn run(
     session: &ClientSession,
     window: WindowId,
-    codec: VideoCodec,
+    source: StreamSource,
     title: &str,
     placement: &Placement,
     shared: &Shared,
@@ -242,7 +242,10 @@ fn run(
             &mut *state as *mut WindowState as isize,
         );
     }
-    let result = stream(session, codec, title, shared, hwnd, &mut state, stop);
+    let result = match source {
+        StreamSource::Video(codec) => stream(session, codec, title, shared, hwnd, &mut state, stop),
+        StreamSource::Pictures => stream_pictures(session, title, shared, hwnd, &mut state, stop),
+    };
     unsafe {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         let _ = DestroyWindow(hwnd);
@@ -354,6 +357,85 @@ fn stream(
                 waiting_for_keyframe = true;
                 session.request_keyframe(window);
             }
+        }
+        tick(
+            shared,
+            hwnd,
+            title,
+            state,
+            &mut second,
+            &mut shown_then,
+            &mut bytes_then,
+        );
+    }
+}
+
+/// Shows a window streamed over RDP: each RGBA picture as it comes.
+fn stream_pictures(
+    session: &ClientSession,
+    title: &str,
+    shared: &Shared,
+    hwnd: HWND,
+    state: &mut WindowState,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    let device = present::create_device()?;
+    let mut presenter = Presenter::new(&device, hwnd, client_size(hwnd))?;
+    shared.stats.lock().expect("stats").decoder = "RDP pictures".into();
+    let window = state.window;
+    let mut second = Instant::now();
+    let (mut shown_then, mut bytes_then) = (0u64, 0u64);
+    let mut last: Option<windowcast_client::RgbaPicture> = None;
+    loop {
+        let mut message = MSG::default();
+        while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+            unsafe {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+        if state.closed || stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        if state.toggle_fullscreen {
+            state.toggle_fullscreen = false;
+            toggle_fullscreen(hwnd, state);
+        }
+        state.send_input = shared.send_input.load(Ordering::SeqCst);
+        for event in state.input.drain(..) {
+            let _ = session.send_input(event);
+        }
+        let size = client_size(hwnd);
+        let resized = size != state.client;
+        state.client = size;
+        presenter.resize(size)?;
+        match session.next_picture(window, Duration::from_millis(8)) {
+            windowcast_client::PicturePoll::Picture(picture) => {
+                let arrived = Instant::now();
+                state.picture = (picture.width, picture.height);
+                presenter.present_rgba(picture.width, picture.height, &picture.data)?;
+                let mut stats = shared.stats.lock().expect("stats");
+                stats.frames_received += 1;
+                stats.frames_shown += 1;
+                stats.bytes += picture.data.len() as u64;
+                stats.size = Some(state.picture);
+                let ms = arrived.elapsed().as_secs_f64() * 1000.0;
+                stats.latency_ms = if stats.latency_ms == 0.0 {
+                    ms
+                } else {
+                    stats.latency_ms * 0.9 + ms * 0.1
+                };
+                drop(stats);
+                last = Some(picture);
+            }
+            windowcast_client::PicturePoll::Timeout => {
+                // A window that does not change sends nothing; redraw the
+                // last picture when the window is resized.
+                if let (true, Some(picture)) = (resized, &last) {
+                    presenter.present_rgba(picture.width, picture.height, &picture.data)?;
+                }
+            }
+            windowcast_client::PicturePoll::Ended => return Ok(()),
         }
         tick(
             shared,
