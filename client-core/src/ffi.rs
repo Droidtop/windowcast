@@ -381,6 +381,24 @@ pub unsafe extern "C" fn windowcast_session_next_frame(
     frame.data.len() as i64
 }
 
+/// Says this client shows RGBA pictures (non-zero) or not (0, the
+/// default): only then are windows its rules send to RDP streamed over
+/// RDP. Returns 0 or WINDOWCAST_ERROR.
+///
+/// # Safety
+/// `session` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_accept_pictures(
+    session: *const ClientSession,
+    on: u32,
+) -> i64 {
+    let Some(session) = session.as_ref() else {
+        return WINDOWCAST_ERROR;
+    };
+    session.accept_pictures(on != 0);
+    0
+}
+
 /// Waits up to `timeout_ms` for the next picture of a window streamed over
 /// RDP (a "stream_started" event with backend "Rdp") and copies it into
 /// `out`: RGBA, rows from the top, `width * 4` bytes each. Returns its

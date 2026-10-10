@@ -23,6 +23,8 @@ import dev.windowcast.AudioPlayer
 import dev.windowcast.Codec
 import dev.windowcast.Event
 import dev.windowcast.WindowDecoder
+import dev.windowcast.WindowPictures
+import dev.windowcast.WindowRenderer
 import dev.windowcast.WindowInfo
 import dev.windowcast.WindowcastClient
 import dev.windowcast.WindowcastSession
@@ -65,7 +67,7 @@ class MainActivity : Activity() {
 
     private var client: WindowcastClient? = null
     private var session: WindowcastSession? = null
-    private var decoder: WindowDecoder? = null
+    private var decoder: WindowRenderer? = null
     private var audio: AudioPlayer? = null
     @Volatile private var soundPackets = 0L
     private var windows: List<WindowInfo> = emptyList()
@@ -141,6 +143,8 @@ class MainActivity : Activity() {
                 stopMicrophone()
                 session?.close()
                 val s = client!!.connect(address, pin)
+                // Windows the rules send to RDP (text) come as pictures.
+                s.acceptPictures(true)
                 session = s
                 main.post {
                     status.text = (if (s.paired) "Paired with " else "Connected to ") + s.hostId.take(16) + "…"
@@ -225,13 +229,26 @@ class MainActivity : Activity() {
         form.visibility = View.GONE
         surface.visibility = View.VISIBLE
         val begin = {
-            decoder = WindowDecoder(s, event.window, surface.holder.surface, window.width, window.height) { stats ->
-                main.post {
-                    title = "${window.title}: ${stats.frames} frames (${stats.codec ?: event.codec}), sound $soundPackets packets"
-                    if (stats.ended) {
-                        status.text = "Stream ended after ${stats.frames} frames" +
-                            (stats.error?.let { ": $it" } ?: "")
-                        showForm()
+            decoder = if (event.backend == "Rdp") {
+                WindowPictures(s, event.window, surface.holder) { stats ->
+                    main.post {
+                        title = "${window.title}: ${stats.pictures} pictures over RDP, ${stats.width}x${stats.height}"
+                        if (stats.ended) {
+                            status.text = "Stream ended after ${stats.pictures} pictures" +
+                                (stats.error?.let { ": $it" } ?: "")
+                            showForm()
+                        }
+                    }
+                }
+            } else {
+                WindowDecoder(s, event.window, surface.holder.surface, window.width, window.height) { stats ->
+                    main.post {
+                        title = "${window.title}: ${stats.frames} frames (${stats.codec ?: event.codec}), sound $soundPackets packets"
+                        if (stats.ended) {
+                            status.text = "Stream ended after ${stats.frames} frames" +
+                                (stats.error?.let { ": $it" } ?: "")
+                            showForm()
+                        }
                     }
                 }
             }.also { it.start() }

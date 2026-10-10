@@ -454,6 +454,9 @@ pub struct ClientSession {
     paired: bool,
     /// The user's backend rules, checked before the defaults.
     rules: Mutex<Vec<BackendRule>>,
+    /// Whether this client shows RGBA pictures (an RDP window); until it
+    /// says so, windows the rules send to RDP are asked for natively.
+    pictures: AtomicBool,
     /// The last window list, for choosing backends by content.
     windows: Arc<Mutex<Vec<WindowInfo>>>,
     /// The microphone track and its encoder, while the microphone is on.
@@ -508,6 +511,7 @@ impl ClientSession {
             host: host.to_hex(),
             paired,
             rules: Mutex::new(Vec::new()),
+            pictures: AtomicBool::new(false),
             windows,
             microphone: Mutex::new(None),
         }
@@ -521,6 +525,12 @@ impl ClientSession {
     /// Whether this connection paired by PIN (the host is now pinned).
     pub fn paired(&self) -> bool {
         self.paired
+    }
+
+    /// Says this client shows windows as RGBA pictures ([`Self::next_picture`]),
+    /// so windows its rules send to RDP are asked for over RDP.
+    pub fn accept_pictures(&self, on: bool) {
+        self.pictures.store(on, Ordering::SeqCst);
     }
 
     /// Replaces the user's backend rules (per-app overrides and the like).
@@ -549,9 +559,14 @@ impl ClientSession {
                 })
         };
         // RDP is its own TCP connection to the host, which only a host on
-        // this network can take.
+        // this network can take, and its windows come as pictures, which
+        // the client must show.
         let backend = match backend {
-            BackendKind::Rdp if self.shared.host_ip.is_none() => BackendKind::Native,
+            BackendKind::Rdp
+                if self.shared.host_ip.is_none() || !self.pictures.load(Ordering::SeqCst) =>
+            {
+                BackendKind::Native
+            }
             other => other,
         };
         let limits = self

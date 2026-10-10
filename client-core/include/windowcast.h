@@ -97,6 +97,11 @@ int64_t windowcast_session_next_frame(const WindowcastSession *session, uint64_t
                                       uint32_t timeout_ms, uint8_t *out, size_t cap,
                                       WindowcastFrameInfo *info);
 
+/* Whether this client shows RGBA pictures (on non-zero; off by default):
+ * only then are windows its rules send to RDP streamed over RDP, coming
+ * out of windowcast_session_next_picture. Returns 0 or WINDOWCAST_ERROR. */
+int64_t windowcast_session_accept_pictures(const WindowcastSession *session, uint32_t on);
+
 /* Next picture of a window streamed over RDP (stream_started with backend
  * "Rdp"): RGBA, rows from the top, width * 4 bytes each. Returns its
  * length, WINDOWCAST_TIMEOUT when the window has not changed,

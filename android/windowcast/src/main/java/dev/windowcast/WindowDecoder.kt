@@ -23,15 +23,15 @@ class WindowDecoder(
     private val height: Int,
     /** Called on the decoder thread with frames rendered so far. */
     private val onProgress: (Stats) -> Unit = {},
-) {
+) : WindowRenderer {
     data class Stats(val frames: Long, val keyframes: Long, val codec: Codec?, val ended: Boolean, val error: String?)
 
     @Volatile private var running = true
     private val thread = Thread(::run, "windowcast-decoder-$window")
 
-    fun start() = thread.start()
+    override fun start() = thread.start()
 
-    fun stop() {
+    override fun stop() {
         running = false
         thread.join(2000)
     }

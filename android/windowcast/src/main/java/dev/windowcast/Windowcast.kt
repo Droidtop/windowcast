@@ -107,6 +107,12 @@ class WindowcastClient(dataDir: File) : Closeable {
     }
 }
 
+/** Shows one streamed window: [WindowDecoder] for video, [WindowPictures] for RDP. */
+interface WindowRenderer {
+    fun start()
+    fun stop()
+}
+
 /** A connected session. Every call blocks; none may run on the main thread. */
 class WindowcastSession internal constructor(internal val handle: Long) : Closeable {
     @Volatile private var closed = false
@@ -116,6 +122,15 @@ class WindowcastSession internal constructor(internal val handle: Long) : Closea
 
     fun requestWindows() {
         Native.requestWindows(handle)
+    }
+
+    /**
+     * Says this client shows windows as pictures ([WindowPictures]), so
+     * windows the rules send to RDP come over RDP (a stream_started with
+     * backend "Rdp").
+     */
+    fun acceptPictures(on: Boolean) {
+        Native.acceptPictures(handle, on)
     }
 
     /** Asks to stream [window], decodable in [codecs], most preferred first. */

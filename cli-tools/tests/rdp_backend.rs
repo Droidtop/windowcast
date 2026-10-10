@@ -101,6 +101,7 @@ fn a_window_streams_over_rdp_through_a_session() {
 
     let client = Client::new(&client_dir).unwrap();
     let session = client.connect(&address, None).unwrap();
+    session.accept_pictures(true);
     session.set_rules(vec![BackendRule {
         when: WindowMatch {
             app_id: Some("windowcast.testpattern".into()),

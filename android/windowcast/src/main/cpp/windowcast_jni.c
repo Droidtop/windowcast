@@ -188,3 +188,27 @@ JNIEXPORT jlong JNICALL
 Java_dev_windowcast_Native_stopMicrophone(JNIEnv *env, jclass cls, jlong session) {
     return windowcast_session_stop_microphone(SESSION(session));
 }
+
+/* Whether this client shows RGBA pictures (windows its rules send to RDP). */
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_acceptPictures(JNIEnv *env, jclass cls, jlong session, jboolean on) {
+    return windowcast_session_accept_pictures(SESSION(session), on ? 1u : 0u);
+}
+
+/* Next RGBA picture of an RDP window into a direct buffer; size[0] and
+ * size[1] get its width and height. Returns the length or a WINDOWCAST_*
+ * status. */
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_nextPicture(JNIEnv *env, jclass cls, jlong session, jlong window,
+                                       jint timeout_ms, jobject buffer, jintArray size) {
+    uint8_t *out = (*env)->GetDirectBufferAddress(env, buffer);
+    jlong cap = (*env)->GetDirectBufferCapacity(env, buffer);
+    if (!out || cap < 0) return WINDOWCAST_ERROR;
+    uint32_t width = 0, height = 0;
+    int64_t len = windowcast_session_next_picture(SESSION(session), (uint64_t)window,
+                                                  (uint32_t)timeout_ms, out, (size_t)cap, &width,
+                                                  &height);
+    jint values[2] = {(jint)width, (jint)height};
+    (*env)->SetIntArrayRegion(env, size, 0, 2, values);
+    return len;
+}

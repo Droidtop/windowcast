@@ -60,8 +60,10 @@ A backend with its own connection is negotiated over the session and
 keyed from it. For RDP:
 
 1. The client's rules choose `Rdp` for a window and it asks for the
-   stream as usual. Away from the LAN (a punched session) the client asks
-   for `Native` instead: RDP is a TCP connection of its own to the host.
+   stream as usual. It asks for `Native` instead when it has not said it
+   shows pictures (`accept_pictures`; the Android viewer does, the app's
+   own client not yet) and away from the LAN (a punched session): RDP is a
+   TCP connection of its own to the host.
 2. The host (any `WindowSource` wrapped in `rdp::host::WithRdp`, which the
    app, the agents and the test host do; the app's "Offer windows over RDP"
    setting switches it) starts an RDP server for that one window on a port
