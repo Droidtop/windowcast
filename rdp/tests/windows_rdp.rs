@@ -104,25 +104,33 @@ fn our_client_runs_notepad_as_a_remoteapp() {
         }),
     })
     .unwrap();
-    // The server describes Notepad's window, and its part of the
-    // session's picture is that window: smaller than the desktop.
+    // Windows starts Notepad, then describes its window (after any other
+    // window it shows a new user, such as "System Properties"), and its
+    // part of the session's picture is that window: smaller than the
+    // desktop.
     let deadline = Instant::now() + Duration::from_secs(90);
     let window = loop {
-        assert!(Instant::now() < deadline, "no RemoteApp window appeared");
+        assert!(Instant::now() < deadline, "no Notepad window appeared");
         assert!(
             !stream.ended.load(std::sync::atomic::Ordering::SeqCst),
             "the session ended"
         );
-        if let Some(window) = stream.windows().1.into_iter().next() {
+        if let Some(code) = stream.exec_result() {
+            assert_eq!(code, 0, "the program did not start");
+        }
+        // Its title comes in an order of its own, after the window.
+        if let Some(window) = stream.windows().1.into_iter().find(|w| {
+            w.title.to_lowercase().contains("notepad") && w.rect.width > 100 && w.rect.height > 100
+        }) {
             break window;
         }
         std::thread::sleep(Duration::from_millis(200));
     };
+    assert_eq!(stream.exec_result(), Some(0), "the program did not start");
     let (_, desktop) = stream
         .picture_after(0, Duration::from_secs(30))
         .expect("a picture of the session");
     let picture = desktop.cut(window.rect);
-    assert_eq!(stream.exec_result(), Some(0), "the program did not start");
     println!(
         "RemoteApp window {:?}: {}x{}",
         window.title, picture.width, picture.height
