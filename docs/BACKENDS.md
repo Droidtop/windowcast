@@ -98,9 +98,9 @@ with Remote Desktop Services licences. So:
   existing session on the host's desktop, on every system, like any other
   window; a window the rules give RDP, launched or already open, is served
   by windowcast's own one-window RDP server (`WithRdp`, "Handing a window
-  to RDP" above): its captured picture is the RDP desktop. That server
-  will also speak `rail`, so RemoteApp clients such as mstsc and FreeRDP
-  show the window seamlessly.
+  to RDP" above): its captured picture is the RDP desktop. (Speaking
+  `rail` on that server for mstsc and FreeRDP is dropped: see "One
+  window, any carrier" below.)
 - **(b) Windows RemoteApps, opt-in.** A Windows host's owner may turn on
   RemoteApp launches: a launched program the client's rules give RDP then
   runs as a RemoteApp of Windows' own Remote Desktop, in a Remote Desktop
@@ -204,6 +204,119 @@ Windows 10 and 11.
 - Remote Desktop must be on, and Windows must let the program run as a
   RemoteApp (an allow-list entry, or the allow list switched off); the
   host's settings say what is missing.
+
+## One window, any carrier: live switching (design, Droidtop/tracker#457)
+
+Decided 2026-10-10 by the owner: "That design is wrong. We want the same
+behavior for all protocols. That's kinda the point, seamless switching
+between protocols and bitrates and stuff to optimize connections". This
+section is the design; it replaces per-protocol window behaviour
+(including the planned rail on windowcast's own RDP server, now dropped).
+Not built yet: today (0.25.0) a window's backend is chosen once, when its
+stream starts.
+
+### The session owns the window
+
+A window is a session object, the same whatever carries its picture:
+
+| Owned by the session | Today | Under this design |
+|---|---|---|
+| Identity, title, owner and kind, popups | session (`WindowInfo`, 0.25.0) | unchanged |
+| Geometry and z-order | size only (`WindowResized`) | position, size and stacking per window (`WindowGeometry`), so a client can place popups and menus where they belong |
+| Focus | `WindowFocused`, input focus | unchanged |
+| Input (pointer, touch, keys, text) | session, except RDP: client-core sends a window's input over its RDP connection and the RDP server injects it | always the session (`ControlMessage::Input`), one set of rules (input gate, allowed windows, focus); a carrier never carries a windowcast client's input |
+| Gamepads | session (`GamepadSink`) | unchanged; a GameStream carrier's controller channel is not used by windowcast clients |
+| Audio | session audio track per window | unchanged; carriers carry pictures only (GameStream's own audio only for Moonlight) |
+| Clipboard | session | unchanged |
+| Cursor | not sent: whatever the capture draws | session `Cursor { window, shape, position, visible }`; the host captures without the cursor and the client draws it, so it looks the same on every carrier and moves at input latency |
+| Picture | the backend | the carrier: the only per-carrier part |
+
+A carrier is then any way of getting a window's pictures to the client:
+Native (video track on the session), Passthrough, Desktop cut-out,
+GameStream video, RDP pictures, VNC. Each is interchangeable per window.
+Bitrate, frame rate and resolution adapt continuously within a carrier
+(host-core `quality`, as today).
+
+On the host, one capture per window feeds every carrier of that window
+(a fan-out), so two carriers during a switch do not capture twice and
+both show the same picture.
+
+### Switching a carrier: make-before-break (protocol 10)
+
+A window's stream gets a generation number; two generations of one
+window may run at once.
+
+1. `CarrierSwitchRequest { window, generation: n+1, options }` (client to
+   host; `options` as `StreamOptions`: the carrier, codecs, limits).
+2. The host starts generation n+1 from the same capture and answers
+   `CarrierStarted { window, generation, backend, handoff }` (a handoff
+   for carriers with their own connection, such as RDP), or
+   `CarrierRefused { window, generation, reason }`.
+3. The client brings the new carrier up beside the old one, decodes it
+   off screen, and when it has a picture at the window's current size
+   swaps the view to it in one frame. Then it sends
+   `CarrierStop { window, generation: n }`.
+4. If generation n+1 shows no picture within 5 s, the client stops it
+   and keeps n (the switch failed; see backoff below).
+
+Input, audio, clipboard, cursor and the window's own events never move:
+they are the session's. The existing `StreamStartRequest` and
+`StreamStopRequest` become generation 1 and "every generation".
+
+### When a carrier switches, and why it does not flap
+
+The client's selector chooses (it knows its decoders, its screen and the
+user's rules); the host reports what only it sees.
+
+Signals, per window:
+- Content, measured on the host from the capture: share of the picture
+  changing per second (motion), video-like regions, text-like content
+  (the classifier and app hints as today), sent in `StreamQuality`.
+- Connection: round trip, loss, jitter and the bandwidth estimate (both
+  ends), and whether the network allows a carrier's own connection (RDP
+  and GameStream need a direct TCP/UDP path; away from the LAN only
+  session carriers qualify).
+- Cost: decoder and encoder availability and load on each end, battery
+  (a handheld on battery prefers hardware video decode).
+- The user: a per-window or per-app pinned carrier or quality turns
+  automatic switching off for it.
+
+Each candidate carrier gets a score from these; the current carrier is
+replaced only when another scores better by a margin (25%) for a dwell
+time (3 s), at most once per 15 s per window. After a failed or reverted
+switch, that carrier waits twice as long before it is tried again for
+that window (up to 5 min). Bitrate, frame rate and resolution adapt
+within the current carrier first; a carrier switch is for when
+adaptation alone cannot fit the content or the link (a text window on a
+link too thin for legible video goes to RDP pictures; a window that
+starts playing video goes back to video).
+
+### What the client shows
+
+The same window object throughout: the app's window or view, its title,
+size, position, popups and input stay put. The client keeps two picture
+paths per window (video decoding and RGBA pictures), each able to draw
+the same view: the Windows client presents either into the same swap
+chain; the Android viewer keeps two stacked surfaces and swaps which one
+is visible on the new carrier's first picture. The window's size is the
+session's (`WindowGeometry`), and each carrier's picture is scaled to it,
+so a carrier sending a smaller picture does not resize the window. A
+switch is an event for statistics (`CarrierChanged { window, backend,
+codec }`), not something the user sees.
+
+### Third-party clients and RemoteApp
+
+- Plain RDP, GameStream (Moonlight) and VNC clients are not windowcast
+  sessions: they have no session window model and cannot switch. The
+  host keeps compatibility endpoints for them (an RDP server for one
+  window as its desktop, the GameStream server's app list), each with its
+  own input and audio, gated by the same host rules. Seamless windows for
+  those clients (RDP rail) are not pursued: seamless windows are a
+  property of windowcast sessions, the same on every carrier.
+- Windows RemoteApp launches (opt-in, above) move to the host: the host
+  logs in to its own Remote Desktop as the RemoteApp client and serves
+  those windows as host windows, so they too are carried by any carrier
+  and switch like any other, instead of reaching the client over RDP only.
 
 ## Choosing a backend
 
