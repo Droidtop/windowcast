@@ -17,7 +17,9 @@
 //!    that identity already, answers with its credential sealed to the key
 //!    (`AccountProof`), and the host answers `AccountAccepted` or rejects.
 //!    A hash of offer and proof goes into the transcript below.
-//! 3. The client sends its offer, the host its answer. Each is signed with
+//! 3. The client sends its offer, the host its answer
+//!    (`windowcast_pairing::exchange`, the exchange droidtop-agent pairs with
+//!    too). Each is signed with
 //!    the sender's identity over a transcript binding the mode, both
 //!    nonces, both identities and the complete SDP (which carries the DTLS
 //!    fingerprint and the ICE credentials). While pairing, each is also
@@ -33,13 +35,12 @@
 //! each is sent); on a LAN that takes milliseconds and saves trickle
 //! messages.
 
-use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use windowcast_accounts::seal::HostKey;
 use windowcast_accounts::Account;
 use windowcast_identity::{Identity, PeerId, TrustStore};
-use windowcast_pairing::SessionKey;
+use windowcast_pairing::{exchange, SessionKey};
 use windowcast_protocol::{
     AccountCredential, AccountOffer, ConnectMode, OidcProviderInfo, SdpKind, SignInMethod,
     SignalMessage, PROTOCOL_VERSION,
@@ -126,6 +127,21 @@ struct Hello {
     mode: ConnectMode,
 }
 
+impl Hello {
+    /// The hello as the shared exchange signs it (`windowcast_pairing::exchange`).
+    fn shared(&self) -> exchange::Hello {
+        exchange::Hello {
+            peer: self.peer,
+            nonce: self.nonce,
+            mode: match self.mode {
+                ConnectMode::Pair => 0,
+                ConnectMode::Resume => 1,
+                ConnectMode::Account => 2,
+            },
+        }
+    }
+}
+
 /// Client side. `session` is a fresh [`Session`] (with or without a relay).
 pub async fn connect<S>(
     mut stream: S,
@@ -165,7 +181,7 @@ where
     tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
         let client = Hello {
             peer: identity.peer_id(),
-            nonce: fresh_nonce(),
+            nonce: exchange::fresh_nonce(),
             mode: ConnectMode::Account,
         };
         write_hello(&mut stream, &client).await?;
@@ -222,7 +238,7 @@ where
     };
     let client = Hello {
         peer: identity.peer_id(),
-        nonce: fresh_nonce(),
+        nonce: exchange::fresh_nonce(),
         mode,
     };
     write_hello(stream, &client).await?;
@@ -334,7 +350,7 @@ where
     }
     let host = Hello {
         peer: identity.peer_id(),
-        nonce: fresh_nonce(),
+        nonce: exchange::fresh_nonce(),
         mode: client.mode,
     };
     write_hello(stream, &host).await?;
@@ -499,24 +515,18 @@ fn transcript(
     binding: &[u8; 32],
     sdp: &str,
 ) -> Vec<u8> {
-    let mut t = Vec::with_capacity(TRANSCRIPT_LABEL.len() + 2 + 5 * 32 + sdp.len());
-    t.extend_from_slice(TRANSCRIPT_LABEL);
-    t.push(match kind {
+    let kind = match kind {
         SdpKind::Offer => 0,
         SdpKind::Answer => 1,
-    });
-    t.push(match client.mode {
-        ConnectMode::Pair => 0,
-        ConnectMode::Resume => 1,
-        ConnectMode::Account => 2,
-    });
-    t.extend_from_slice(&client.nonce);
-    t.extend_from_slice(&host.nonce);
-    t.extend_from_slice(&client.peer.0);
-    t.extend_from_slice(&host.peer.0);
-    t.extend_from_slice(binding);
-    t.extend_from_slice(sdp.as_bytes());
-    t
+    };
+    exchange::transcript(
+        TRANSCRIPT_LABEL,
+        kind,
+        &client.shared(),
+        &host.shared(),
+        binding,
+        sdp.as_bytes(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -534,10 +544,11 @@ where
     S: AsyncWrite + Unpin,
 {
     let t = transcript(kind, client, host, binding, &sdp);
+    let proof = exchange::prove(identity, key, &t);
     let message = SignalMessage::Description {
         kind,
-        signature: identity.sign(&t).to_bytes().to_vec(),
-        pin_tag: key.map(|key| windowcast_pairing::authenticate_fingerprint(key, &t)),
+        signature: proof.signature,
+        pin_tag: proof.pin_tag,
         sdp,
     };
     write_message(stream, &message).await
@@ -574,14 +585,8 @@ where
         SdpKind::Answer => &host.peer,
     };
     let t = transcript(kind, client, host, binding, &sdp);
-    if let Some(key) = key {
-        let tag = pin_tag.ok_or(TransportError::AuthenticationFailed)?;
-        windowcast_pairing::verify_fingerprint(key, &t, &tag)
-            .map_err(|_| TransportError::AuthenticationFailed)?;
-    }
-    if !windowcast_identity::verify_bytes(signer, &t, &signature) {
-        return Err(TransportError::AuthenticationFailed);
-    }
+    exchange::check(signer, key, &t, &exchange::Proof { signature, pin_tag })
+        .map_err(|_| TransportError::AuthenticationFailed)?;
     Ok(sdp)
 }
 
@@ -627,12 +632,6 @@ fn unexpected(message: SignalMessage, expected: &'static str) -> TransportError 
 /// Best effort: the peer may already be gone.
 async fn reject<S: AsyncWrite + Unpin>(stream: &mut S, reason: &str) {
     let _ = write_message(stream, &SignalMessage::Reject(reason.to_owned())).await;
-}
-
-fn fresh_nonce() -> [u8; 32] {
-    let mut nonce = [0u8; 32];
-    OsRng.fill_bytes(&mut nonce);
-    nonce
 }
 
 /// Writes one length-prefixed signaling frame. Public so a relay or a test

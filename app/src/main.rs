@@ -34,15 +34,6 @@ use std::time::Duration;
 
 use config::{Roles, Store};
 
-fn default_data_dir() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("windowcast").join("app")
-}
-
 fn usage() -> ! {
     eprintln!(
         "usage: windowcast-app [--role host|client|both] [--data-dir DIR] [--listen ADDR:PORT] [--no-window]\n\
@@ -100,7 +91,10 @@ fn parse() -> Args {
 fn main() {
     platform::init();
     let args = parse();
-    let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
+    let data_dir = args
+        .data_dir
+        .clone()
+        .unwrap_or_else(windowcast_identity::app_dir);
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         eprintln!("cannot use {}: {e}", data_dir.display());
         std::process::exit(1);

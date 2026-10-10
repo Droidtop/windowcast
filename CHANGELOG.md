@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `windowcast_pairing::exchange`: the pairing and resume exchange without
+  I/O. It covers the hellos, the transcript and each side's proof (an
+  identity signature, plus the PIN-derived tag while pairing). Signaling
+  uses it, with the transcript bytes unchanged, and droidtop-agent pairs
+  with the same code under its own label (Droidtop/tracker#373).
+- One identity per computer for windowcast and droidtop-agent:
+  `windowcast_identity::app_dir` (the reference app's default data folder)
+  and `computer_dir` (its `host` folder), and the file names
+  `HOST_IDENTITY_FILE` and `HOST_TRUST_FILE`. droidtop-agent keeps its
+  identity and its trusted handhelds there, so a computer paired once is
+  paired for both.
+- `Identity::from_seed`, the identity from the seed its file holds.
+- `TrustStore::update`: pin or revoke against the list as it is on disk,
+  so two programs sharing one list keep each other's changes. `save` now
+  writes beside the file and renames it over.
+
+### Changed
+- The host reads its trusted-client list from disk when a client connects
+  and when it lists them, so a device paired through droidtop-agent can
+  resume at once.
+
 ## [0.28.1] - 2026-10-10
 
 ### Fixed

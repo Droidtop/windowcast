@@ -421,9 +421,13 @@ impl HostControl {
     /// `config.data_dir`, and opens pairing if `config.pairing` says so.
     pub fn open(config: &HostConfig) -> std::io::Result<Arc<Self>> {
         std::fs::create_dir_all(&config.data_dir)?;
-        let identity = Identity::load_or_generate(&config.data_dir.join("agent-identity.key"))
-            .map_err(std::io::Error::other)?;
-        let trust_path = config.data_dir.join("agent-trusted-clients");
+        let identity = Identity::load_or_generate(
+            &config
+                .data_dir
+                .join(windowcast_identity::HOST_IDENTITY_FILE),
+        )
+        .map_err(std::io::Error::other)?;
+        let trust_path = config.data_dir.join(windowcast_identity::HOST_TRUST_FILE);
         let trust = TrustStore::load(&trust_path).map_err(std::io::Error::other)?;
         println!("host identity: {}", identity.peer_id());
         let discovery_id = windowcast_transport::remote::discovery_id(&identity).ok();
@@ -517,7 +521,7 @@ impl HostControl {
     /// admitted by the host's policy.
     async fn admitted(&self) -> TrustStore {
         let mut admitted = TrustStore::default();
-        let pinned: Vec<PeerId> = self.trust.lock().await.peers().copied().collect();
+        let pinned: Vec<PeerId> = self.reload_trust().await.peers().copied().collect();
         let registered: Vec<PeerId> = match self.accounts() {
             Some(_) => self
                 .registered()
@@ -602,15 +606,28 @@ impl HostControl {
 
     /// The clients this host trusts.
     pub async fn trusted(&self) -> Vec<PeerId> {
-        self.trust.lock().await.peers().copied().collect()
+        self.reload_trust().await.peers().copied().collect()
+    }
+
+    /// The trusted-client list as it is on disk now: droidtop-agent, on a
+    /// computer running both, pins and revokes in the same list
+    /// (`windowcast_identity::computer_dir`).
+    async fn reload_trust(&self) -> TrustStore {
+        let mut trust = self.trust.lock().await;
+        match TrustStore::load(&self.trust_path) {
+            Ok(on_disk) => *trust = on_disk,
+            Err(e) => eprintln!("could not read the trusted-client list: {e}"),
+        }
+        trust.clone()
     }
 
     /// Stops trusting `peer`: it has to pair again. A session it has open
     /// now is not cut.
     pub async fn forget(&self, peer: &PeerId) -> std::io::Result<()> {
         let mut trust = self.trust.lock().await;
-        trust.revoke(peer);
-        trust.save(&self.trust_path).map_err(std::io::Error::other)
+        *trust = TrustStore::update(&self.trust_path, |t| t.revoke(peer))
+            .map_err(std::io::Error::other)?;
+        Ok(())
     }
 
     /// The clients connected now.
@@ -1121,9 +1138,12 @@ impl Host {
 
     async fn pin_client(&self, peer: PeerId) {
         let mut trust = self.control.trust.lock().await;
-        trust.pin(peer);
-        if let Err(e) = trust.save(&self.control.trust_path) {
-            eprintln!("could not save the trusted-client list: {e}");
+        match TrustStore::update(&self.control.trust_path, |t| t.pin(peer)) {
+            Ok(saved) => *trust = saved,
+            Err(e) => {
+                trust.pin(peer);
+                eprintln!("could not save the trusted-client list: {e}");
+            }
         }
     }
 
