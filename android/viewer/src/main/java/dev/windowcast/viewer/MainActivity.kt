@@ -1,8 +1,17 @@
 package dev.windowcast.viewer
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import androidx.browser.customtabs.CustomTabsIntent
+import dev.windowcast.OidcDeviceSignIn
+import dev.windowcast.OidcProvider
+import dev.windowcast.SignIn
+import dev.windowcast.SignInOptions
+import java.util.concurrent.atomic.AtomicBoolean
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
@@ -108,6 +117,13 @@ class MainActivity : Activity() {
                 connect(address.text.toString().trim(), pin.text.toString().trim().ifEmpty { null })
             }
         }
+        val signInButton = Button(this).apply {
+            text = "Sign in with an account"
+            setOnClickListener {
+                prefs.edit().putString("address", address.text.toString()).apply()
+                signIn(address.text.toString().trim())
+            }
+        }
         status = TextView(this).apply { text = "Not connected" }
         sendMicrophone = CheckBox(this).apply {
             text = "Send my microphone to the host"
@@ -161,6 +177,7 @@ class MainActivity : Activity() {
             addView(address, MATCH_PARENT, WRAP_CONTENT)
             addView(pin, MATCH_PARENT, WRAP_CONTENT)
             addView(connect, MATCH_PARENT, WRAP_CONTENT)
+            addView(signInButton, MATCH_PARENT, WRAP_CONTENT)
             addView(sendMicrophone, MATCH_PARENT, WRAP_CONTENT)
             addView(status, MATCH_PARENT, WRAP_CONTENT)
             addView(shell, MATCH_PARENT, WRAP_CONTENT)
@@ -211,6 +228,202 @@ class MainActivity : Activity() {
                 s.requestWindows()
             } catch (e: Exception) {
                 main.post { status.text = "Could not connect: ${e.message}" }
+            }
+        }
+    }
+
+    /**
+     * Account sign-in (docs/ACCOUNTS.md): ask the host what it takes; a host not trusted yet
+     * shows its fingerprint first, and nothing is sent to it until the user says it matches.
+     */
+    private fun signIn(address: String) {
+        val c = client ?: return
+        if (address.isEmpty()) {
+            status.text = "Type the host's address first"
+            return
+        }
+        status.text = "Asking $address how to sign in…"
+        worker.execute {
+            try {
+                val options = c.signInOptions(address)
+                main.post { confirmHost(address, options) }
+            } catch (e: Exception) {
+                main.post { status.text = "Could not ask the host: ${e.message}" }
+            }
+        }
+    }
+
+    private fun confirmHost(address: String, options: SignInOptions) {
+        if (options.trusted) {
+            chooseSignIn(address, options, null)
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Is this your host?")
+            .setMessage(
+                "This device has not signed in to this host before. Check that the host shows " +
+                    "this fingerprint:\n\n${options.fingerprint}\n\nIf it shows another, cancel: " +
+                    "a different machine is answering.",
+            )
+            .setPositiveButton("It matches") { _, _ -> chooseSignIn(address, options, options.hostId) }
+            .setNegativeButton("Cancel") { _, _ -> status.text = "Sign-in cancelled" }
+            .show()
+    }
+
+    /** The ways this host takes; [accept] is the host identity the user confirmed, if any. */
+    private fun chooseSignIn(address: String, options: SignInOptions, accept: String?) {
+        val choices = mutableListOf<Pair<String, () -> Unit>>()
+        if (options.password) choices += "User name and password" to { askPassword(address, accept) }
+        for (provider in options.providers) {
+            choices += "${provider.name} in the browser" to { browserSignIn(address, provider, accept) }
+            choices += "${provider.name} with a code on another device" to { deviceSignIn(address, provider, accept) }
+        }
+        if (choices.isEmpty()) {
+            status.text = "This host takes no sign-in this app can do"
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Sign in")
+            .setItems(choices.map { it.first }.toTypedArray()) { _, which -> choices[which].second() }
+            .setNegativeButton("Cancel") { _, _ -> status.text = "Sign-in cancelled" }
+            .show()
+    }
+
+    private fun askPassword(address: String, accept: String?) {
+        val user = EditText(this).apply { hint = "User name"; inputType = InputType.TYPE_CLASS_TEXT }
+        val password = EditText(this).apply {
+            hint = "Password"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val fields = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 16, 48, 0)
+            addView(user, MATCH_PARENT, WRAP_CONTENT)
+            addView(password, MATCH_PARENT, WRAP_CONTENT)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Sign in with a password")
+            .setView(fields)
+            .setPositiveButton("Sign in") { _, _ ->
+                connectAccount(address, SignIn.Password(user.text.toString().trim(), password.text.toString()), accept)
+            }
+            .setNegativeButton("Cancel") { _, _ -> status.text = "Sign-in cancelled" }
+            .show()
+    }
+
+    /**
+     * The provider's page in a Custom Tab. The provider sends the browser back to the library's
+     * loopback port on this device, which hands over the ID token; then this activity comes back
+     * to the front, closing the tab.
+     */
+    private fun browserSignIn(address: String, provider: OidcProvider, accept: String?) {
+        val c = client ?: return
+        status.text = "Opening ${provider.name}…"
+        Thread({
+            try {
+                val signIn = c.oidcBrowser(provider)
+                main.post {
+                    try {
+                        CustomTabsIntent.Builder().build().launchUrl(this, Uri.parse(signIn.url))
+                    } catch (e: Exception) {
+                        status.text = "No browser to sign in with: ${e.message}"
+                    }
+                }
+                val token = signIn.finish(SIGN_IN_TIMEOUT_MS)
+                main.post {
+                    backToFront()
+                    connectAccount(address, SignIn.Oidc(provider, token), accept)
+                }
+            } catch (e: Exception) {
+                main.post { status.text = "Could not sign in with ${provider.name}: ${e.message}" }
+            }
+        }, "windowcast-sign-in").start()
+    }
+
+    /** The provider's code, entered on another device (or opened here); waits until the user is done. */
+    private fun deviceSignIn(address: String, provider: OidcProvider, accept: String?) {
+        val c = client ?: return
+        status.text = "Asking ${provider.name} for a code…"
+        Thread({
+            val signIn = try {
+                c.oidcDevice(provider)
+            } catch (e: Exception) {
+                main.post { status.text = "Could not sign in with ${provider.name}: ${e.message}" }
+                null
+            }
+            if (signIn != null) awaitDeviceSignIn(address, provider, accept, signIn)
+        }, "windowcast-sign-in").start()
+    }
+
+    /** Shows the code and waits (on the calling thread) until the user is done or cancels. */
+    private fun awaitDeviceSignIn(address: String, provider: OidcProvider, accept: String?, signIn: OidcDeviceSignIn) {
+        val cancelled = AtomicBoolean(false)
+        val dialog = arrayOfNulls<AlertDialog>(1)
+        main.post {
+            dialog[0] = AlertDialog.Builder(this)
+                .setTitle("Sign in with ${provider.name}")
+                .setMessage("On another device, open\n\n${signIn.verificationUri}\n\nand enter the code\n\n${signIn.userCode}")
+                .setNegativeButton("Cancel") { _, _ -> cancelled.set(true) }
+                .setNeutralButton("Open it here") { _, _ ->
+                    // The dialog closes; the wait goes on until the provider says.
+                    val page = signIn.verificationUriComplete ?: signIn.verificationUri
+                    CustomTabsIntent.Builder().build().launchUrl(this, Uri.parse(page))
+                }
+                .setCancelable(false)
+                .show()
+            status.text = "Waiting for the sign-in with ${provider.name}…"
+        }
+        try {
+            var waited: String? = null
+            while (waited == null && !cancelled.get()) waited = signIn.await(1000)
+            val token = waited
+            main.post {
+                dialog[0]?.dismiss()
+                if (token != null) {
+                    backToFront()
+                    connectAccount(address, SignIn.Oidc(provider, token), accept)
+                } else {
+                    status.text = "Sign-in cancelled"
+                }
+            }
+        } catch (e: Exception) {
+            main.post {
+                dialog[0]?.dismiss()
+                status.text = "Could not sign in with ${provider.name}: ${e.message}"
+            }
+        } finally {
+            signIn.close()
+        }
+    }
+
+    /** Brings this activity back over a Custom Tab opened from it, closing the tab. */
+    private fun backToFront() {
+        startActivity(
+            Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+        )
+    }
+
+    private fun connectAccount(address: String, signIn: SignIn, accept: String?) {
+        val c = client ?: return
+        status.text = "Signing in to $address…"
+        // The same session start as connect() (Droidtop/tracker#447 changes how the old
+        // session is closed there; this follows it when that lands).
+        worker.execute {
+            try {
+                stopMicrophone()
+                session?.close()
+                val s = c.connectAccount(address, signIn, accept)
+                s.acceptPictures(true)
+                session = s
+                main.post {
+                    status.text = "Signed in to " + s.hostId.take(16) + "…"
+                    if (sendMicrophone.isChecked) startMicrophone()
+                }
+                listen(s)
+                s.requestWindows()
+            } catch (e: Exception) {
+                main.post { status.text = "Could not sign in: ${e.message}" }
             }
         }
     }
@@ -509,5 +722,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val RECORD_REQUEST = 1
+        /** How long a browser sign-in may take before it is given up. */
+        private const val SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000
     }
 }

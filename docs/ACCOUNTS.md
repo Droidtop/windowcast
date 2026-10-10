@@ -218,3 +218,10 @@ SSH crate depending on how accounts are checked:
 - Reference app: sign-in on the client (username and password, or the
   browser for a provider); accounts, providers and policy in the host's
   config.
+- Android viewer: "Sign in with an account" asks the host what it takes,
+  shows its fingerprint for the user to confirm when the host is not
+  trusted yet (nothing is sent before that), then signs in with a
+  password, with a provider in Custom Tabs (the redirect comes back to the
+  library's loopback port on the device, so the viewer registers no
+  redirect of its own), or with a provider's code entered on another
+  device.

@@ -88,4 +88,19 @@ internal object Native {
     @JvmStatic external fun terminalEnded(terminal: Long, code: IntArray): Long
     /** The process id (0 if unknown), or [ERROR] with the reason in lastError. */
     @JvmStatic external fun launch(session: Long, argvJson: String): Long
+
+    // Account sign-in (windowcast.h). Failures leave the reason in lastError.
+    /** The host's sign-in options as JSON, or null. */
+    @JvmStatic external fun signInOptions(client: Long, address: String): String?
+    /** A session, or 0. */
+    @JvmStatic external fun connectAccount(client: Long, address: String, signInJson: String, acceptHost: String?): Long
+    /** A browser sign-in (the page to open in url[0]), or 0. */
+    @JvmStatic external fun oidcBrowserStart(client: Long, providerJson: String, url: Array<String?>): Long
+    /** The ID token, or null; frees the sign-in either way. */
+    @JvmStatic external fun oidcBrowserFinish(signIn: Long, timeoutMs: Int): String?
+    /** A device sign-in (what to show the user, JSON, in shown[0]), or 0. */
+    @JvmStatic external fun oidcDeviceStart(client: Long, providerJson: String, shown: Array<String?>): Long
+    /** The ID token, or null with status[0] [TIMEOUT] (not yet) or [ERROR]. */
+    @JvmStatic external fun oidcDeviceWait(signIn: Long, timeoutMs: Int, status: LongArray): String?
+    @JvmStatic external fun oidcDeviceFree(signIn: Long)
 }

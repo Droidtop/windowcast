@@ -131,6 +131,41 @@ class WindowcastClient(dataDir: File) : Closeable {
         return TerminalSession(terminal)
     }
 
+    /** Asks the host at [address] what account sign-ins it takes, without signing in. Blocks. */
+    fun signInOptions(address: String): SignInOptions =
+        SignInOptions.parse(Native.signInOptions(handle, address) ?: throw IOException(Native.lastError()))
+
+    /**
+     * Signs in to the host at [address] and connects. The credential goes only to a host this
+     * client trusts, or to the one whose identity the user confirmed by its fingerprint and that
+     * is passed as [acceptHost] ([SignInOptions.hostId]). Later connections resume with
+     * [connect] and no PIN while the host keeps the registration. Blocks.
+     */
+    fun connectAccount(address: String, signIn: SignIn, acceptHost: String?): WindowcastSession {
+        val session = Native.connectAccount(handle, address, signIn.json, acceptHost)
+        if (session == 0L) throw IOException(Native.lastError())
+        return WindowcastSession(session)
+    }
+
+    /**
+     * Starts a sign-in with [provider] in the browser. Only for a host the user trusts: the
+     * provider is the host's to name. Blocks while it reads the provider's metadata.
+     */
+    fun oidcBrowser(provider: OidcProvider): OidcBrowserSignIn {
+        val url = arrayOfNulls<String>(1)
+        val signIn = Native.oidcBrowserStart(handle, provider.json, url)
+        if (signIn == 0L) throw IOException(Native.lastError())
+        return OidcBrowserSignIn(signIn, url[0]!!)
+    }
+
+    /** Starts a sign-in with [provider] finished on another device. As [oidcBrowser] otherwise. */
+    fun oidcDevice(provider: OidcProvider): OidcDeviceSignIn {
+        val shown = arrayOfNulls<String>(1)
+        val signIn = Native.oidcDeviceStart(handle, provider.json, shown)
+        if (signIn == 0L) throw IOException(Native.lastError())
+        return OidcDeviceSignIn.parse(signIn, shown[0]!!)
+    }
+
     override fun close() {
         if (handle != 0L) Native.clientFree(handle)
         handle = 0L

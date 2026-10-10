@@ -7,7 +7,9 @@
  */
 #include <jni.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "windowcast.h"
 
@@ -369,4 +371,137 @@ Java_dev_windowcast_Native_launch(JNIEnv *env, jclass cls, jlong session, jstrin
                                                sizeof last_error);
     (*env)->ReleaseStringUTFChars(env, argv_json, chars);
     return result;
+}
+
+/* ---- Account sign-in (docs/ACCOUNTS.md). ---- */
+
+/* Room for sign-in options, a provider's page and an ID token. */
+#define TEXT_CAP (16 * 1024)
+#define BROWSER(h) ((WindowcastOidcSignIn *)(intptr_t)(h))
+#define DEVICE(h) ((WindowcastOidcDeviceSignIn *)(intptr_t)(h))
+
+/* Calls fill a buffer of this size with their answer, or with the reason
+ * they failed; it is wiped once read, as it may hold an ID token. */
+static __thread char answer[TEXT_CAP];
+
+static void fail_with(const char *reason) {
+    snprintf(last_error, sizeof last_error, "%s", reason);
+}
+
+/* The answer as a Java string; wipes the buffer. */
+static jstring take_text(JNIEnv *env) {
+    jstring result = (*env)->NewStringUTF(env, answer);
+    memset(answer, 0, sizeof answer);
+    return result;
+}
+
+/* What the host takes, as JSON; null with the reason in lastError. */
+JNIEXPORT jstring JNICALL
+Java_dev_windowcast_Native_signInOptions(JNIEnv *env, jclass cls, jlong client,
+                                         jstring address) {
+    const char *addr = (*env)->GetStringUTFChars(env, address, NULL);
+    answer[0] = 0;
+    int64_t len = windowcast_sign_in_options(CLIENT(client), addr, answer, sizeof answer);
+    (*env)->ReleaseStringUTFChars(env, address, addr);
+    if (len < 0) {
+        fail_with(len == WINDOWCAST_BUFFER_TOO_SMALL ? "the host's answer is too long" : answer);
+        return NULL;
+    }
+    return take_text(env);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_connectAccount(JNIEnv *env, jclass cls, jlong client,
+                                          jstring address, jstring sign_in,
+                                          jstring accept_host) {
+    const char *addr = (*env)->GetStringUTFChars(env, address, NULL);
+    const char *sign = (*env)->GetStringUTFChars(env, sign_in, NULL);
+    const char *accept = accept_host ? (*env)->GetStringUTFChars(env, accept_host, NULL) : NULL;
+    last_error[0] = 0;
+    WindowcastSession *session = windowcast_connect_account(
+        CLIENT(client), addr, sign, accept, last_error, sizeof last_error);
+    if (accept) (*env)->ReleaseStringUTFChars(env, accept_host, accept);
+    (*env)->ReleaseStringUTFChars(env, sign_in, sign);
+    (*env)->ReleaseStringUTFChars(env, address, addr);
+    return (jlong)(intptr_t)session;
+}
+
+/* Starts a sign-in in the browser, the page to open through url[0]. 0 on
+ * failure, the reason in lastError. */
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_oidcBrowserStart(JNIEnv *env, jclass cls, jlong client,
+                                            jstring provider, jobjectArray url) {
+    const char *prov = (*env)->GetStringUTFChars(env, provider, NULL);
+    answer[0] = 0;
+    WindowcastOidcSignIn *sign_in =
+        windowcast_oidc_browser_start(CLIENT(client), prov, answer, sizeof answer);
+    (*env)->ReleaseStringUTFChars(env, provider, prov);
+    if (!sign_in) {
+        fail_with(answer);
+        return 0;
+    }
+    (*env)->SetObjectArrayElement(env, url, 0, take_text(env));
+    return (jlong)(intptr_t)sign_in;
+}
+
+/* Waits for the browser and frees the sign-in: the ID token, or null with
+ * the reason in lastError. */
+JNIEXPORT jstring JNICALL
+Java_dev_windowcast_Native_oidcBrowserFinish(JNIEnv *env, jclass cls, jlong sign_in,
+                                             jint timeout_ms) {
+    answer[0] = 0;
+    int64_t len =
+        windowcast_oidc_browser_finish(BROWSER(sign_in), (uint32_t)timeout_ms, answer, sizeof answer);
+    if (len < 0) {
+        fail_with(len == WINDOWCAST_BUFFER_TOO_SMALL ? "the ID token is too long" : answer);
+        memset(answer, 0, sizeof answer);
+        return NULL;
+    }
+    return take_text(env);
+}
+
+/* Starts a sign-in finished on another device: what to show the user (JSON)
+ * through shown[0]. 0 on failure, the reason in lastError. */
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_oidcDeviceStart(JNIEnv *env, jclass cls, jlong client,
+                                           jstring provider, jobjectArray shown) {
+    const char *prov = (*env)->GetStringUTFChars(env, provider, NULL);
+    answer[0] = 0;
+    WindowcastOidcDeviceSignIn *sign_in =
+        windowcast_oidc_device_start(CLIENT(client), prov, answer, sizeof answer);
+    (*env)->ReleaseStringUTFChars(env, provider, prov);
+    if (!sign_in) {
+        fail_with(answer);
+        return 0;
+    }
+    (*env)->SetObjectArrayElement(env, shown, 0, take_text(env));
+    return (jlong)(intptr_t)sign_in;
+}
+
+/* Waits up to timeout_ms: the ID token, or null with status[0] set to
+ * WINDOWCAST_TIMEOUT (not yet) or WINDOWCAST_ERROR (the reason in
+ * lastError). */
+JNIEXPORT jstring JNICALL
+Java_dev_windowcast_Native_oidcDeviceWait(JNIEnv *env, jclass cls, jlong sign_in,
+                                          jint timeout_ms, jlongArray status) {
+    answer[0] = 0;
+    int64_t len =
+        windowcast_oidc_device_wait(DEVICE(sign_in), (uint32_t)timeout_ms, answer, sizeof answer);
+    jlong value = len > 0 ? 0 : (jlong)len;
+    (*env)->SetLongArrayRegion(env, status, 0, 1, &value);
+    if (len > 0) return take_text(env);
+    if (len == WINDOWCAST_BUFFER_TOO_SMALL) {
+        value = WINDOWCAST_ERROR;
+        (*env)->SetLongArrayRegion(env, status, 0, 1, &value);
+        fail_with("the ID token is too long");
+    } else if (len == WINDOWCAST_ERROR) {
+        fail_with(answer);
+    }
+    memset(answer, 0, sizeof answer);
+    return NULL;
+}
+
+JNIEXPORT void JNICALL
+Java_dev_windowcast_Native_oidcDeviceFree(JNIEnv *env, jclass cls, jlong sign_in) {
+    windowcast_oidc_device_free(DEVICE(sign_in));
 }
