@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.28.0] - 2026-10-10
 
 ### Added
 - Carriers switch by themselves (docs/BACKENDS.md, "When a carrier switches"; Droidtop/tracker#457 step 3): the client measures how much each shown window moves (pictures or frames per second) and, with the host's content class, moves a still text window to RDP pictures and a moving one to video, with a 25% margin held 3 s, at most one switch per 15 s per window, and backoff after a failed switch. A user's rule for the app, or a switch by hand, pins the window. On by default: `ClientSession::set_auto_switch`, C `windowcast_session_auto_switch`, Kotlin `autoSwitch`; the Windows app's "Switch between video and RDP by themselves".
