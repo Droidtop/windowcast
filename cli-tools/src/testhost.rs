@@ -19,7 +19,7 @@ use windowcast_cli_tools::testpattern::{
 };
 use windowcast_host::audio::{AudioSource, MicrophoneSink};
 use windowcast_host::{FrameSource, HostConfig, WindowSource, DEFAULT_LISTEN};
-use windowcast_protocol::{VideoCodec, WindowId, WindowInfo};
+use windowcast_protocol::{InputEvent, VideoCodec, WindowId, WindowInfo};
 
 /// Another source, plus a microphone that only measures.
 struct MeasuringMicrophone(Arc<dyn WindowSource>);
@@ -36,6 +36,9 @@ impl WindowSource for MeasuringMicrophone {
     }
     fn open_audio(&self, window: WindowId) -> Option<Result<Box<dyn AudioSource>, String>> {
         self.0.open_audio(window)
+    }
+    fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
+        self.0.input(event, focus)
     }
     fn microphone(&self) -> Option<Result<Box<dyn MicrophoneSink>, String>> {
         println!("microphone: a client started sending");

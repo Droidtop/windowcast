@@ -9,7 +9,7 @@ use openh264::encoder::{Encoder, EncoderConfig, FrameRate, IntraFramePeriod};
 use openh264::formats::YUVBuffer;
 use openh264::OpenH264API;
 use windowcast_host::{EncodedFrame, FrameSource, Picture, PictureSource, WindowSource};
-use windowcast_protocol::{BackendKind, ContentHint, VideoCodec, WindowId, WindowInfo};
+use windowcast_protocol::{BackendKind, ContentHint, InputEvent, VideoCodec, WindowId, WindowInfo};
 
 pub const WINDOW: WindowId = WindowId(1);
 pub const WIDTH: usize = 640;
@@ -34,6 +34,12 @@ impl WindowSource for TestPatternSource {
 
     fn encoders(&self) -> Vec<VideoCodec> {
         vec![VideoCodec::H264]
+    }
+
+    /// The test pattern does nothing with input; it logs each event so a
+    /// run shows what reached the host.
+    fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
+        println!("input: {event:?} focus {focus:?}");
     }
 
     fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
@@ -174,6 +180,10 @@ impl WindowSource for WithContent {
         self.inner.open_pictures(window)
     }
 
+    fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
+        self.inner.input(event, focus)
+    }
+
     fn open_audio(
         &self,
         window: WindowId,
@@ -203,6 +213,10 @@ impl WindowSource for TestPatternWithTone {
 
     fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
         TestPatternSource.open(window, codec)
+    }
+
+    fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
+        TestPatternSource.input(event, focus)
     }
 
     fn open_audio(
@@ -326,6 +340,31 @@ mod content_tests {
             source.open_pictures(WINDOW).is_some(),
             "pictures still come from the pattern"
         );
+    }
+
+    #[test]
+    fn with_content_forwards_input() {
+        use std::sync::Mutex;
+        struct Recorder(Mutex<Vec<(InputEvent, Option<WindowId>)>>);
+        impl WindowSource for Recorder {
+            fn list_windows(&self) -> Vec<WindowInfo> {
+                Vec::new()
+            }
+            fn encoders(&self) -> Vec<VideoCodec> {
+                Vec::new()
+            }
+            fn open(&self, _: WindowId, _: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
+                Err("none".into())
+            }
+            fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
+                self.0.lock().unwrap().push((event.clone(), focus));
+            }
+        }
+        let recorder = Arc::new(Recorder(Mutex::new(Vec::new())));
+        let source = WithContent::new(recorder.clone(), ContentHint::Text);
+        let event = InputEvent::Text { text: "abc".into() };
+        source.input(&event, Some(WINDOW));
+        assert_eq!(*recorder.0.lock().unwrap(), vec![(event, Some(WINDOW))]);
     }
 
     #[test]
