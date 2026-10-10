@@ -351,6 +351,7 @@ fn run(
         let mut moved = false;
         if remote_app && action == ironrdp_pdu::Action::FastPath {
             for order in window_orders(&payload) {
+                tracing::debug!(?order, "RemoteApp: window order");
                 windows.apply(order);
                 moved = true;
             }

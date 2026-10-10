@@ -88,6 +88,10 @@ impl<S> RailTap<S> {
             let flags = u32::from_le_bytes(patched[8..12].try_into().ok()?) | INFO_RAIL;
             patched[8..12].copy_from_slice(&flags.to_le_bytes());
             self.info_done = true;
+            tracing::debug!(
+                flags = format!("{flags:#x}"),
+                "RemoteApp: INFO_RAIL set in the Client Info PDU"
+            );
             return reencode(&request, patched);
         }
         if !self.caps_done {
@@ -107,6 +111,10 @@ impl<S> RailTap<S> {
                 window.extend_from_slice(&12u16.to_le_bytes()); // NumIconCacheEntries
                 caps.push(CapabilitySet::WindowList(window));
                 self.caps_done = true;
+                tracing::debug!(
+                    sets = caps.len(),
+                    "RemoteApp: RAIL and Window List capability sets added"
+                );
                 let data = ironrdp_core::encode_vec(&header).ok()?;
                 return reencode(&request, data);
             }
@@ -247,6 +255,11 @@ impl SvcProcessor for RailChannel {
             return Ok(Vec::new());
         }
         let order = u16::from_le_bytes([payload[0], payload[1]]);
+        tracing::debug!(
+            order = format!("{order:#06x}"),
+            length = payload.len(),
+            "RemoteApp: rail PDU from the host"
+        );
         match order {
             RAIL_HANDSHAKE | RAIL_HANDSHAKE_EX => {
                 let mut status = self.status.lock().expect("rail status");

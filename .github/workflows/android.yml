@@ -116,9 +116,14 @@ jobs:
           Write-Output "::add-mask::$password"
           # New-LocalUser, not net user: net user asks before taking a
           # password longer than 14 characters, and gets no answer here.
-          New-LocalUser -Name wcrdp -Password (ConvertTo-SecureString $password -AsPlainText -Force) -PasswordNeverExpires | Out-Null
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member wcrdp
+          # Two users: a user's second login takes over its first session,
+          # and the RemoteApp test needs a session of its own.
+          foreach ($name in "wcrdp", "wcrdpapp") {
+            New-LocalUser -Name $name -Password (ConvertTo-SecureString $password -AsPlainText -Force) -PasswordNeverExpires | Out-Null
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $name
+          }
           $env:WINDOWCAST_TEST_WINDOWS_RDP_USER = "wcrdp"
+          $env:WINDOWCAST_TEST_WINDOWS_RDP_APP_USER = "wcrdpapp"
           $env:WINDOWCAST_TEST_WINDOWS_RDP_PASSWORD = $password
           cargo test -p windowcast-rdp --no-fail-fast -- --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

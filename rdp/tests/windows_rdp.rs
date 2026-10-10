@@ -22,7 +22,7 @@ fn our_client_logs_in_to_windows_remote_desktop() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,ironrdp=debug,sspi=debug".into()),
+                .unwrap_or_else(|_| "info,ironrdp=debug,sspi=debug,windowcast_rdp=debug".into()),
         )
         .try_init();
     let stream = connect(&ClientConfig {
@@ -67,13 +67,21 @@ fn our_client_logs_in_to_windows_remote_desktop() {
 
 #[test]
 fn our_client_runs_notepad_as_a_remoteapp() {
+    // A user of its own: a second login of the same user would take over
+    // the desktop test's session, which is no RemoteApp session.
     let (Ok(user), Ok(password)) = (
-        std::env::var("WINDOWCAST_TEST_WINDOWS_RDP_USER"),
+        std::env::var("WINDOWCAST_TEST_WINDOWS_RDP_APP_USER"),
         std::env::var("WINDOWCAST_TEST_WINDOWS_RDP_PASSWORD"),
     ) else {
         println!("skipped: set WINDOWCAST_TEST_WINDOWS_RDP_USER and _PASSWORD");
         return;
     };
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,windowcast_rdp=debug".into()),
+        )
+        .try_init();
     let stream = connect(&ClientConfig {
         address: "127.0.0.1:3389".parse().unwrap(),
         server_name: "localhost".into(),
