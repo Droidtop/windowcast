@@ -1,19 +1,22 @@
 //! Account sign-in end to end through the library's two ends
 //! (docs/ACCOUNTS.md): a host with sign-in on serving the test pattern,
 //! clients signing in, resuming with the registration, policy narrowing
-//! what they see, and an SSH certificate for a signed-in account. With
-//! WINDOWCAST_TEST_OIDC set to a Dex issuer the CI runs on loopback (a
-//! public client `windowcast` and the mock connector), the OpenID Connect
-//! flows too.
+//! what they see and which commands they may run, and an SSH certificate
+//! for a signed-in account. With WINDOWCAST_TEST_OIDC set to a Dex issuer
+//! the CI runs on loopback (a public client `windowcast` and the mock
+//! connector), the OpenID Connect flows too, the device flow through the C
+//! interface.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use windowcast_accounts::{oidc::ProviderConfig, Config, Policy, Rule};
 use windowcast_cli_tools::testpattern::{TestPatternSource, WINDOW};
-use windowcast_client::{Client, ClientError, Event, SignIn};
+use windowcast_client::{Client, ClientError, ClientSession, Event, SignIn};
+use windowcast_host::command::{NoCommands, PairedDevices};
 use windowcast_host::{HostConfig, HostControl};
+use windowcast_identity::{Identity, TrustStore};
 use windowcast_protocol::{SignInMethod, VideoCodec};
 
 const WAIT: Duration = Duration::from_secs(20);
@@ -32,7 +35,15 @@ fn host(
     name: &str,
     accounts: Config,
 ) -> (Arc<HostControl>, String, PathBuf) {
-    let dir = temp_dir(name);
+    host_in(runtime, temp_dir(name), accounts)
+}
+
+/// As [`host`], in a data folder the caller has prepared.
+fn host_in(
+    runtime: &tokio::runtime::Runtime,
+    dir: PathBuf,
+    accounts: Config,
+) -> (Arc<HostControl>, String, PathBuf) {
     let listener = runtime
         .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
         .unwrap();
@@ -204,6 +215,140 @@ fn local_accounts_sign_in_register_and_follow_policy() {
     drop(bob);
     runtime.shutdown_timeout(Duration::from_secs(1));
     for dir in [host_dir, client_dir, bob_dir] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Runs `true` on the host over the command stream: `Ok` when the host
+/// let it run, the refusal otherwise.
+fn run_command(session: &ClientSession) -> Result<(), String> {
+    match session.exec(vec!["true".into()], WAIT) {
+        Ok((_, code)) => {
+            assert_eq!(code, Some(0));
+            Ok(())
+        }
+        Err(ClientError::Refused(reason)) => Err(reason),
+        Err(e) => panic!("the command did not run or get refused: {e}"),
+    }
+}
+
+/// Writes trust files so that a client in `client_dir` is paired (as by
+/// PIN) with a host in `host_dir`.
+fn pair(host_dir: &Path, client_dir: &Path) {
+    let host_id = Identity::load_or_generate(&host_dir.join("agent-identity.key"))
+        .unwrap()
+        .peer_id();
+    let client_id = Identity::load_or_generate(&client_dir.join("client-identity.key"))
+        .unwrap()
+        .peer_id();
+    let mut trust = TrustStore::default();
+    trust.pin(client_id);
+    trust.save(&host_dir.join("agent-trusted-clients")).unwrap();
+    let mut trust = TrustStore::default();
+    trust.pin(host_id);
+    trust
+        .save(&client_dir.join("client-trusted-hosts"))
+        .unwrap();
+}
+
+#[test]
+fn account_policy_decides_the_command_stream() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let config = Config {
+        policy: Policy {
+            rules: vec![
+                Rule {
+                    who: vec!["user:alice".into()],
+                    commands: Some(true),
+                    ..Rule::default()
+                },
+                Rule {
+                    who: vec!["user:dave".into()],
+                    commands: Some(false),
+                    ..Rule::default()
+                },
+                Rule {
+                    who: vec!["method:pin".into()],
+                    commands: Some(false),
+                    ..Rule::default()
+                },
+                // Staff: policy says nothing about commands.
+                Rule {
+                    who: vec!["group:staff".into()],
+                    ..Rule::default()
+                },
+            ],
+        },
+        ..Config::default()
+    };
+    let host_dir = temp_dir("commands-host");
+    let paired_dir = temp_dir("commands-paired");
+    pair(&host_dir, &paired_dir);
+    let (control, address, host_dir) = host_in(&runtime, host_dir, config);
+    let accounts = control.accounts().unwrap();
+    for (user, groups) in [
+        ("alice", Vec::<String>::new()),
+        ("dave", Vec::new()),
+        ("erin", vec!["staff".to_owned()]),
+    ] {
+        accounts
+            .local()
+            .create(user, &format!("{user}-password"), &groups)
+            .unwrap();
+    }
+    accounts.save_local().unwrap();
+    let host_id = control.peer_id().to_hex();
+
+    // The host's own check refuses everything; policy is asked first.
+    control.set_command_authorizer(Arc::new(NoCommands));
+    let mut dirs = vec![host_dir, paired_dir.clone()];
+    let mut sign_in = |user: &str| {
+        let dir = temp_dir(&format!("commands-{user}"));
+        dirs.push(dir.clone());
+        let client = Client::new(&dir).unwrap();
+        let session = client
+            .connect_account(
+                &address,
+                &password(user, &format!("{user}-password")),
+                Some(host_id.as_str()),
+            )
+            .unwrap();
+        (client, session)
+    };
+    let (_alice, alice_session) = sign_in("alice");
+    let (_dave, dave_session) = sign_in("dave");
+    let (erin, erin_session) = sign_in("erin");
+    let paired = Client::new(&paired_dir).unwrap();
+    let paired_session = paired.connect(&address, None).unwrap();
+
+    // Policy says yes for alice, past the host's own refusal.
+    assert_eq!(run_command(&alice_session), Ok(()));
+    // Policy says no for dave and for a device paired by PIN.
+    for session in [&dave_session, &paired_session] {
+        let reason = run_command(session).unwrap_err();
+        assert!(reason.contains("policy"), "{reason}");
+    }
+    // Policy leaves erin to the host's own check, which says no...
+    let reason = run_command(&erin_session).unwrap_err();
+    assert!(reason.contains("does not allow"), "{reason}");
+    drop(erin_session);
+    // ...until the host allows paired devices again (read per session).
+    control.set_command_authorizer(Arc::new(PairedDevices));
+    let erin_session = erin.connect(&address, None).unwrap();
+    assert_eq!(run_command(&erin_session), Ok(()));
+    drop((alice_session, dave_session, erin_session, paired_session));
+
+    // Sign-in off: a paired device is under the host's own check alone,
+    // as before accounts.
+    control.set_accounts(None).unwrap();
+    let paired_session = paired.connect(&address, None).unwrap();
+    assert_eq!(run_command(&paired_session), Ok(()));
+    drop(paired_session);
+
+    drop(paired);
+    drop(erin);
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    for dir in dirs {
         let _ = std::fs::remove_dir_all(dir);
     }
 }

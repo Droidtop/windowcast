@@ -1,8 +1,10 @@
 //! The host's end of the command stream (docs/COMMAND-STREAM.md): shells,
 //! commands and application launches that a client opens as channels of
 //! its session. Everything a channel does passes [`CommandAuthorizer`]
-//! first; the default lets any paired device in, and the #443 account
-//! layer installs its own through [`crate::HostControl::set_command_authorizer`].
+//! first. The host's own check (by default [`PairedDevices`]; an
+//! application replaces it with [`crate::HostControl::set_command_authorizer`])
+//! decides alone while account sign-in is off; while it is on, the
+//! account policy ([`AccountPolicy`]) is asked first.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -11,6 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub use windowcast_accounts::Account;
+use windowcast_accounts::Accounts;
 use windowcast_identity::PeerId;
 use windowcast_protocol::command::{
     data_messages, ChannelId, ChannelKind, CommandMessage, TerminalSize, MAX_CHANNELS, MAX_CHUNK,
@@ -18,19 +22,12 @@ use windowcast_protocol::command::{
 use windowcast_protocol::ControlMessage;
 use windowcast_transport::{Session, TransportError};
 
-/// Who is asking: the paired device, and the account behind it once an
-/// account layer (#443) has authenticated one.
+/// Who is asking: the device, and the account it acts for when it signed
+/// in with one (docs/ACCOUNTS.md); `None` for a device paired by PIN.
 #[derive(Debug, Clone)]
 pub struct Principal {
     pub peer: PeerId,
     pub account: Option<Account>,
-}
-
-/// An authenticated account. Filled by the account layer (#443); it may
-/// widen this.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Account {
-    pub id: String,
 }
 
 /// The one check every channel passes. An `Err` is the reason shown to the
@@ -39,8 +36,10 @@ pub trait CommandAuthorizer: Send + Sync + 'static {
     fn authorize(&self, who: &Principal, kind: &ChannelKind) -> Result<(), String>;
 }
 
-/// The default: a paired device may open any kind of channel, as the owner
-/// asked ("authorized by the existing pairing").
+/// The host's own default: a paired device may open any kind of channel,
+/// as the owner asked ("authorized by the existing pairing"). A device an
+/// account sign-in registered passes it too; the account policy in front
+/// of it ([`AccountPolicy`]) is what narrows accounts.
 pub struct PairedDevices;
 
 impl CommandAuthorizer for PairedDevices {
@@ -55,6 +54,36 @@ pub struct NoCommands;
 impl CommandAuthorizer for NoCommands {
     fn authorize(&self, _who: &Principal, _kind: &ChannelKind) -> Result<(), String> {
         Err("this host does not allow commands".into())
+    }
+}
+
+/// The check while account sign-in is on: the host's policy for the
+/// principal's account (a PIN-paired device is `method:pin` to it) decides
+/// when its matching rule says `commands`, `false` refusing and `true`
+/// admitting; a rule that does not say leaves it to the host's own check
+/// (`then`). Policy is read at every open.
+pub struct AccountPolicy {
+    accounts: Arc<Accounts>,
+    then: Arc<dyn CommandAuthorizer>,
+}
+
+impl AccountPolicy {
+    pub fn new(accounts: Arc<Accounts>, then: Arc<dyn CommandAuthorizer>) -> Self {
+        AccountPolicy { accounts, then }
+    }
+}
+
+impl CommandAuthorizer for AccountPolicy {
+    fn authorize(&self, who: &Principal, kind: &ChannelKind) -> Result<(), String> {
+        let decision = self.accounts.decide(who.account.as_ref());
+        if !decision.allow {
+            return Err("policy does not admit this account".into());
+        }
+        match decision.commands {
+            Some(false) => Err("policy does not allow commands for this account".into()),
+            Some(true) => Ok(()),
+            None => self.then.authorize(who, kind),
+        }
     }
 }
 

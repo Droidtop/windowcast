@@ -640,10 +640,23 @@ impl HostControl {
             .collect()
     }
 
-    /// Replaces the check every command channel passes. The default lets
-    /// any paired device in; the account layer (#443) installs its own.
+    /// Replaces the host's own check of command channels (by default any
+    /// paired device may open them). Sessions that start later use it.
+    /// While account sign-in is on, the account policy is asked first and
+    /// this check decides only what policy leaves open
+    /// ([`command::AccountPolicy`]).
     pub fn set_command_authorizer(&self, authorizer: Arc<dyn command::CommandAuthorizer>) {
         *self.command_authorizer.write().expect("authorizer") = authorizer;
+    }
+
+    /// The check a session starting now gives its command channels: the
+    /// host's own, behind the account policy while sign-in is on.
+    fn session_authorizer(&self) -> Arc<dyn command::CommandAuthorizer> {
+        let own = Arc::clone(&self.command_authorizer.read().expect("authorizer"));
+        match self.accounts() {
+            Some(accounts) => Arc::new(command::AccountPolicy::new(accounts, own)),
+            None => own,
+        }
     }
 
     fn next_serial(&self) -> u64 {
@@ -899,9 +912,9 @@ impl Host {
             Arc::clone(&session),
             command::Principal {
                 peer,
-                account: None,
+                account: account.clone(),
             },
-            Arc::clone(&control.command_authorizer.read().expect("authorizer")),
+            control.session_authorizer(),
             Arc::clone(&control.commands),
             Arc::clone(&control.command_serial),
         );

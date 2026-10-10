@@ -57,19 +57,25 @@ pub struct Principal { pub peer: PeerId, pub account: Option<Account> }
 pub trait CommandAuthorizer { fn authorize(&self, who: &Principal, kind: &ChannelKind) -> Result<(), String>; }
 ```
 
-* Today a principal is a paired device (`account: None`) and the default
-  authorizer allows any paired device the shell kinds the host enables
-  (`HostControl::set_command_authorizer` replaces the check), as the owner asked: authorized by the
-  existing pairing.
-* #443's account layer (OIDC, LDAP/AD, Kerberos) fills `Principal::account`
-  and installs its own `CommandAuthorizer`; that is the whole interface
-  between the two pieces of work. It is not built here. The agreed shape
-  is exactly the two items above; #443 may widen `Account`.
+* `Account` is `windowcast_accounts::Account` (name, groups, method,
+  provider). `Principal::account` is the account the session signed in
+  with or its device is registered to (#443, docs/ACCOUNTS.md), `None` for
+  a device paired by PIN.
+* The host's own check is `PairedDevices` by default: any paired device
+  may open every kind, as the owner asked (authorized by the existing
+  pairing). `HostControl::set_command_authorizer` replaces it for sessions
+  that start later.
+* While account sign-in is on, `AccountPolicy` stands in front of it for
+  every session: the policy rule matching the principal decides when it
+  says `commands` (`false` refuses, `true` admits), and a rule that does
+  not say leaves it to the host's own check. While sign-in is off the host's
+  own check decides alone, as before accounts. One check per open, read
+  from the policy at that moment.
 * For SSH servers the server does the authenticating. The client supplies
-  a key or a password (`SshAuth`), never stores a password, and calls a
-  `HostKeyPolicy` hook for unknown or changed keys. A later account layer
-  can supply certificates or Kerberos tickets through the same `SshAuth`
-  enum.
+  a password, a key, or a certificate a windowcast host issued for its
+  own SSH key after an account sign-in (`SshAuth::Certificate`), never
+  stores a password, and calls a `HostKeyPolicy` hook for unknown or
+  changed keys.
 
 ## What is built
 
