@@ -59,7 +59,7 @@ fn codec_from_id(id: u32) -> Option<VideoCodec> {
 
 /// # Safety
 /// `s` must be null or a valid NUL-terminated string.
-unsafe fn str_arg<'a>(s: *const c_char) -> Option<&'a str> {
+pub(crate) unsafe fn str_arg<'a>(s: *const c_char) -> Option<&'a str> {
     if s.is_null() {
         None
     } else {
@@ -71,7 +71,7 @@ unsafe fn str_arg<'a>(s: *const c_char) -> Option<&'a str> {
 ///
 /// # Safety
 /// `out` must be null or valid for `cap` writable bytes.
-unsafe fn write_text(text: &str, out: *mut c_char, cap: usize) {
+pub(crate) unsafe fn write_text(text: &str, out: *mut c_char, cap: usize) {
     if out.is_null() || cap == 0 {
         return;
     }

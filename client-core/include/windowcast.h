@@ -174,6 +174,79 @@ int64_t windowcast_oidc_browser_finish(WindowcastOidcSignIn *sign_in, uint32_t t
  * "ssh_certificate" event. */
 int64_t windowcast_session_request_ssh_certificate(const WindowcastSession *session,
                                                    const char *public_key);
+/* ---- The command stream (docs/COMMAND-STREAM.md; ffi_terminal.rs) ----
+ * A terminal on a host of a session or on any SSH server, drawn by the
+ * client library's screen model, and application launches. */
+
+typedef struct WindowcastTerminal WindowcastTerminal;
+
+#define WINDOWCAST_SSH_PASSWORD 0
+#define WINDOWCAST_SSH_KEY 1
+/* What to do with an SSH server whose host key is not pinned yet. A key
+ * that changed is always refused. */
+#define WINDOWCAST_HOSTKEY_FIRST_USE 0   /* pin what it presents */
+#define WINDOWCAST_HOSTKEY_PINNED 1      /* refuse; seen_fingerprint gets its key */
+#define WINDOWCAST_HOSTKEY_FINGERPRINT 2 /* accept only the given fingerprint */
+
+/* A shell on the host of the session. NULL on failure, the reason (a
+ * refusal by the host is worded for the user) in error. */
+WindowcastTerminal *windowcast_session_open_terminal(const WindowcastSession *session,
+                                                     uint16_t cols, uint16_t rows, char *error,
+                                                     size_t error_cap);
+
+/* Logs in to an SSH server and opens a shell. secret is the password, or the
+ * private key in PEM form (passphrase may be NULL). fingerprint is used with
+ * WINDOWCAST_HOSTKEY_FINGERPRINT ("SHA256:..."). */
+WindowcastTerminal *windowcast_client_ssh_terminal(
+    const WindowcastClient *client, const char *host, uint16_t port, const char *user,
+    int32_t auth_kind, const char *secret, const char *passphrase, int32_t host_key_policy,
+    const char *fingerprint, uint16_t cols, uint16_t rows, char *error, size_t error_cap,
+    char *seen_fingerprint, size_t seen_cap);
+
+/* Ends the shell and frees the terminal. */
+void windowcast_terminal_free(WindowcastTerminal *terminal);
+
+/* Input. Each returns 0 or WINDOWCAST_ERROR. Key names: Enter Backspace Tab
+ * Escape Up Down Left Right Home End PageUp PageDown Insert Delete F1..F12.
+ * send_control takes a code point (a letter, or one of @[\]^_). A paste is
+ * bracketed when the program asked for it. */
+int64_t windowcast_terminal_send_text(const WindowcastTerminal *terminal, const char *text);
+int64_t windowcast_terminal_send_key(const WindowcastTerminal *terminal, const char *name);
+int64_t windowcast_terminal_send_control(const WindowcastTerminal *terminal, uint32_t code_point);
+int64_t windowcast_terminal_paste(const WindowcastTerminal *terminal, const char *text);
+/* The view changed size (character cells). */
+int64_t windowcast_terminal_resize(const WindowcastTerminal *terminal, uint16_t cols,
+                                   uint16_t rows);
+/* Scroll the view back from the live screen by lines (0 returns to it). */
+int64_t windowcast_terminal_scroll(const WindowcastTerminal *terminal, uint32_t lines);
+
+/* Waits for the screen to change since seen (the version of the last
+ * snapshot; 0 for anything). Returns 1 on a change, WINDOWCAST_TIMEOUT. */
+int64_t windowcast_terminal_wait(const WindowcastTerminal *terminal, uint64_t seen,
+                                 uint32_t timeout_ms);
+
+/* The screen as JSON: {"cols","rows","lines":[[{"text","fg","bg","bold",
+ * "italic","underline","inverse"}...]...],"cursor":[row,col]|null,
+ * "alternate_screen","scrollback","version"}. fg and bg are 0xRRGGBB, or
+ * null for the viewer's default. Returns the length or
+ * WINDOWCAST_BUFFER_TOO_SMALL (needed gets the size). */
+int64_t windowcast_terminal_snapshot(const WindowcastTerminal *terminal, uint8_t *out, size_t cap,
+                                     size_t *needed);
+
+/* Texts programs put on the clipboard (OSC 52) since the last call, as a
+ * JSON array of strings. */
+int64_t windowcast_terminal_take_clipboard(const WindowcastTerminal *terminal, uint8_t *out,
+                                           size_t cap, size_t *needed);
+
+/* WINDOWCAST_TIMEOUT while the shell runs; WINDOWCAST_ENDED once it ended,
+ * with its exit code in code (-1 when there is none). */
+int64_t windowcast_terminal_ended(const WindowcastTerminal *terminal, int32_t *code);
+
+/* Starts an application on the host. argv_json is a JSON array of strings.
+ * Its windows arrive in the window list. Returns the process id (0 if the
+ * host does not know it) or WINDOWCAST_ERROR with the reason in error. */
+int64_t windowcast_session_launch(const WindowcastSession *session, const char *argv_json,
+                                  char *error, size_t error_cap);
 
 #ifdef __cplusplus
 }

@@ -24,7 +24,7 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn wait_for(what: &str, condition: impl Fn() -> bool) {
+fn wait_for(what: &str, mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + WAIT;
     while !condition() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
@@ -206,4 +206,63 @@ fn the_authorizer_decides_and_the_host_cleans_up() {
     wait_for("the host to end the shell with the session", || {
         rig.control.commands().is_empty()
     });
+}
+
+#[test]
+fn the_c_interface_drives_a_terminal_and_launches() {
+    use std::ffi::{c_char, CString};
+    use windowcast_client::ffi::{WINDOWCAST_ENDED, WINDOWCAST_TIMEOUT};
+    use windowcast_client::ffi_terminal::*;
+
+    let rig = rig("ffi");
+    let session = connect(&rig);
+    let mut error = [0 as c_char; 256];
+    let text = |s: &str| CString::new(s).unwrap();
+    let terminal =
+        unsafe { windowcast_session_open_terminal(&session, 40, 10, error.as_mut_ptr(), 256) };
+    assert!(!terminal.is_null());
+
+    unsafe { windowcast_terminal_send_text(terminal, text("echo c-$((1+2))").as_ptr()) };
+    unsafe { windowcast_terminal_send_key(terminal, text("Enter").as_ptr()) };
+    wait_for("the C snapshot to show the output", || {
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut needed = 0usize;
+        let n = unsafe {
+            windowcast_terminal_snapshot(terminal, buf.as_mut_ptr(), buf.len(), &mut needed)
+        };
+        assert!(n > 0, "snapshot returned {n}");
+        let snapshot: serde_json::Value = serde_json::from_slice(&buf[..n as usize]).unwrap();
+        assert_eq!(snapshot["cols"], 40);
+        snapshot["lines"].to_string().contains("c-3")
+    });
+    assert_eq!(
+        unsafe { windowcast_terminal_send_key(terminal, text("Nonsense").as_ptr()) },
+        windowcast_client::ffi::WINDOWCAST_ERROR
+    );
+
+    let argv = text(&format!(
+        "[\"touch\",\"{}\"]",
+        std::env::temp_dir()
+            .join(format!("wc-ffi-{}", std::process::id()))
+            .display()
+    ));
+    let pid =
+        unsafe { windowcast_session_launch(&session, argv.as_ptr(), error.as_mut_ptr(), 256) };
+    assert!(pid > 1, "launch returned {pid}");
+    let marker = std::env::temp_dir().join(format!("wc-ffi-{}", std::process::id()));
+    wait_for("the launched application", || marker.exists());
+    std::fs::remove_file(marker).unwrap();
+
+    let mut code = 0i32;
+    assert_eq!(
+        unsafe { windowcast_terminal_ended(terminal, &mut code) },
+        WINDOWCAST_TIMEOUT
+    );
+    unsafe { windowcast_terminal_send_text(terminal, text("exit 2\r").as_ptr()) };
+    wait_for("the shell to end", || {
+        let ended = unsafe { windowcast_terminal_ended(terminal, &mut code) };
+        ended == WINDOWCAST_ENDED
+    });
+    assert_eq!(code, 2);
+    unsafe { windowcast_terminal_free(terminal) };
 }

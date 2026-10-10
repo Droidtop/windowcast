@@ -15,6 +15,9 @@
 
 mod command;
 pub mod ffi;
+pub mod ffi_terminal;
+
+pub use command::SshSession;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -6895,6 +6895,7 @@ dependencies = [
  "libc",
  "openh264",
  "opus",
+ "serde_json",
  "tokio",
  "ureq",
  "url",
