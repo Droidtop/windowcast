@@ -83,6 +83,11 @@ int64_t windowcast_session_stop_window(const WindowcastSession *session, uint64_
 int64_t windowcast_session_switch_window(const WindowcastSession *session, uint64_t window,
                                          const char *backend, const uint32_t *codecs,
                                          size_t count, char *error, size_t error_cap);
+/* Whether a window's carrier switches by itself as what it shows and the
+ * connection change (on non-zero, the default) or only by hand. Automatic
+ * switches arrive as "carrier_started" events, handled as for a switch by
+ * hand. Returns 0 or WINDOWCAST_ERROR. */
+int64_t windowcast_session_auto_switch(const WindowcastSession *session, uint32_t on);
 /* The first picture of carrier `generation` was shown: it replaces the old
  * one. Returns 0 or WINDOWCAST_ERROR. */
 int64_t windowcast_session_carrier_shown(const WindowcastSession *session, uint64_t window,

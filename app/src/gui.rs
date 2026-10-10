@@ -797,7 +797,16 @@ impl App {
                 });
                 ui.separator();
 
-                ui.heading("Streams");
+                ui.horizontal(|ui| {
+                    ui.heading("Streams");
+                    let mut auto = client.auto_switch();
+                    if ui
+                        .checkbox(&mut auto, "Switch between video and RDP by themselves")
+                        .changed()
+                    {
+                        client.set_auto_switch(auto);
+                    }
+                });
                 if snapshot.streams.is_empty() {
                     ui.label(RichText::new("Nothing is streaming.").weak());
                 }

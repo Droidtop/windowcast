@@ -304,6 +304,25 @@ pub unsafe extern "C" fn windowcast_session_switch_window(
     }
 }
 
+/// Whether a window's carrier switches by itself as what it shows and the
+/// connection change (non-zero, the default) or only by hand (0). The
+/// switches arrive as `carrier_started` events, handled as for a switch by
+/// hand. Returns 0 or WINDOWCAST_ERROR.
+///
+/// # Safety
+/// `session` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_auto_switch(
+    session: *const ClientSession,
+    on: u32,
+) -> i64 {
+    let Some(session) = session.as_ref() else {
+        return WINDOWCAST_ERROR;
+    };
+    session.set_auto_switch(on != 0);
+    0
+}
+
 /// The app showed the first picture of the carrier `generation` a switch
 /// started: it replaces the old one. Returns 0 or WINDOWCAST_ERROR.
 ///

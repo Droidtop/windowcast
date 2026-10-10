@@ -101,6 +101,12 @@ Java_dev_windowcast_Native_switchWindow(JNIEnv *env, jclass cls, jlong session, 
     return result;
 }
 
+/* Whether carriers switch by themselves. */
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_autoSwitch(JNIEnv *env, jclass cls, jlong session, jboolean on) {
+    return windowcast_session_auto_switch(SESSION(session), on ? 1u : 0u);
+}
+
 JNIEXPORT jlong JNICALL
 Java_dev_windowcast_Native_carrierShown(JNIEnv *env, jclass cls, jlong session, jlong window,
                                         jint generation) {

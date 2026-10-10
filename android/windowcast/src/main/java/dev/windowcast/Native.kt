@@ -27,6 +27,7 @@ internal object Native {
     @JvmStatic external fun startWindow(session: Long, window: Long, codecs: IntArray): Long
     @JvmStatic external fun switchWindow(session: Long, window: Long, backend: String, codecs: IntArray): Long
     @JvmStatic external fun carrierShown(session: Long, window: Long, generation: Int): Long
+    @JvmStatic external fun autoSwitch(session: Long, on: Boolean): Long
     @JvmStatic external fun stopWindow(session: Long, window: Long): Long
     @JvmStatic external fun sendInput(session: Long, json: String): Long
     @JvmStatic external fun setClipboard(session: Long, text: String): Long

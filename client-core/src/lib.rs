@@ -17,6 +17,7 @@ mod command;
 pub mod ffi;
 pub mod ffi_terminal;
 mod remote_app;
+mod selector;
 
 pub use command::SshSession;
 pub use remote_app::REMOTE_APP_WINDOW;
@@ -861,6 +862,12 @@ pub struct ClientSession {
     /// Whether the dialogs, popups and menus a shown window owns are shown
     /// too, as they open ([`Self::set_follow_popups`]).
     follow_popups: AtomicBool,
+    /// Whether carriers switch by themselves ([`Self::set_auto_switch`]).
+    auto_switch: AtomicBool,
+    /// The selector's view of each shown window, and when it last looked.
+    selection: Mutex<(HashMap<WindowId, selector::Window>, Option<Instant>)>,
+    /// Frames each window's video has handed out, for the selector.
+    frames_seen: Mutex<HashMap<WindowId, u64>>,
 }
 
 impl ClientSession {
@@ -924,6 +931,9 @@ impl ClientSession {
             microphone: Mutex::new(None),
             shown: Mutex::default(),
             follow_popups: AtomicBool::new(true),
+            auto_switch: AtomicBool::new(true),
+            selection: Mutex::default(),
+            frames_seen: Mutex::default(),
         }
     }
 
@@ -1033,13 +1043,165 @@ impl ClientSession {
         })
     }
 
+    /// Whether a window's carrier switches by itself as what it shows and
+    /// the connection change (docs/BACKENDS.md, "When a carrier switches";
+    /// on by default). A window whose app has a rule of the user's, or that
+    /// the user switched by hand, keeps its carrier.
+    pub fn set_auto_switch(&self, on: bool) {
+        self.auto_switch.store(on, Ordering::SeqCst);
+    }
+
+    /// Looks at every shown window, at most twice a second, and starts the
+    /// switches the selector chooses.
+    fn select(&self) {
+        let now = Instant::now();
+        {
+            let mut selection = self.selection.lock().expect("selection");
+            if selection
+                .1
+                .is_some_and(|at| now.duration_since(at) < Duration::from_millis(500))
+            {
+                return;
+            }
+            selection.1 = Some(now);
+        }
+        if !self.auto_switch.load(Ordering::SeqCst) {
+            return;
+        }
+        let shown: Vec<(WindowId, Carrier)> = self
+            .shared
+            .carriers
+            .lock()
+            .expect("carriers")
+            .iter()
+            .filter(|(_, c)| c.next.is_none())
+            .filter_map(|(w, c)| Some((*w, c.shown?)))
+            .collect();
+        let rdp_possible = self.shared.host_ip.is_some() && self.pictures.load(Ordering::SeqCst);
+        for (window, carrier) in shown {
+            let Some(info) = self
+                .windows
+                .lock()
+                .expect("windows")
+                .iter()
+                .find(|w| w.id == window)
+                .cloned()
+            else {
+                continue;
+            };
+            let pinned = self
+                .rules
+                .lock()
+                .expect("rules")
+                .iter()
+                .any(|rule| rule.when.matches(&info));
+            let count = if carrier.backend == BackendKind::Rdp {
+                self.shared
+                    .rdp
+                    .lock()
+                    .expect("rdp")
+                    .get(&window)
+                    .map_or(0, |rdp| rdp.pictures())
+            } else {
+                self.frames_seen
+                    .lock()
+                    .expect("frames seen")
+                    .get(&window)
+                    .copied()
+                    .unwrap_or(0)
+            };
+            let choice = {
+                let mut selection = self.selection.lock().expect("selection");
+                let state = selection
+                    .0
+                    .entry(window)
+                    .or_insert_with(|| selector::Window::new(now));
+                state.pinned |= pinned;
+                state.arrived(count, now);
+                if state.pending.is_some() {
+                    None
+                } else {
+                    state.choose(carrier.backend, info.content, rdp_possible, now)
+                }
+            };
+            let Some(kind) = choice else {
+                continue;
+            };
+            let codecs = self
+                .shown
+                .lock()
+                .expect("shown")
+                .get(&window)
+                .cloned()
+                .unwrap_or_default();
+            let started = self.start_switch(window, kind, &codecs);
+            let mut selection = self.selection.lock().expect("selection");
+            if let Some(state) = selection.0.get_mut(&window) {
+                match started {
+                    Ok(generation) => {
+                        state.pending = Some((generation, kind));
+                        state.switched(kind, now);
+                    }
+                    Err(_) => state.failed(kind, now),
+                }
+            }
+        }
+    }
+
+    /// The selector's bookkeeping for an event about a window.
+    fn selection_event(&self, event: &Event) {
+        let mut selection = self.selection.lock().expect("selection");
+        match event {
+            Event::CarrierStarted { .. } => {}
+            Event::CarrierRefused {
+                window, generation, ..
+            } => {
+                if let Some(state) = selection.0.get_mut(&WindowId(*window)) {
+                    if let Some((pending, kind)) = state.pending {
+                        if pending == *generation {
+                            state.pending = None;
+                            state.failed(kind, Instant::now());
+                        }
+                    }
+                }
+            }
+            Event::StreamStopped { window } => {
+                selection.0.remove(&WindowId(*window));
+                self.frames_seen
+                    .lock()
+                    .expect("frames seen")
+                    .remove(&WindowId(*window));
+            }
+            _ => {}
+        }
+    }
+
     /// Switches a streamed window to `backend` without a break
     /// (docs/BACKENDS.md, "One window, any carrier"): the new carrier
     /// starts beside the one on screen, arrives as
     /// [`Event::CarrierStarted`], and replaces it once the app has shown its
     /// first picture ([`Self::carrier_shown`]); [`Event::CarrierRefused`]
     /// says it did not happen. Returns the new carrier's generation.
+    ///
+    /// A switch by hand pins the window: the selector leaves its carrier
+    /// alone from then on.
     pub fn switch_window(
+        &self,
+        window: WindowId,
+        backend: BackendKind,
+        codecs: &[VideoCodec],
+    ) -> Result<u32, ClientError> {
+        self.selection
+            .lock()
+            .expect("selection")
+            .0
+            .entry(window)
+            .or_insert_with(|| selector::Window::new(Instant::now()))
+            .pinned = true;
+        self.start_switch(window, backend, codecs)
+    }
+
+    fn start_switch(
         &self,
         window: WindowId,
         backend: BackendKind,
@@ -1118,6 +1280,12 @@ impl ClientSession {
     /// The app showed the first picture of the carrier a switch started
     /// ([`Event::CarrierStarted`]): it replaces the old one, which stops.
     pub fn carrier_shown(&self, window: WindowId, generation: u32) -> Result<(), ClientError> {
+        // An automatic switch is done: the selector looks again.
+        if let Some(state) = self.selection.lock().expect("selection").0.get_mut(&window) {
+            if state.pending.is_some_and(|(g, _)| g == generation) {
+                state.pending = None;
+            }
+        }
         let old = {
             let mut carriers = self.shared.carriers.lock().expect("carriers");
             let Some(entry) = carriers.get_mut(&window) else {
@@ -1269,6 +1437,7 @@ impl ClientSession {
     /// The next session event, waiting up to `timeout`. `None` on timeout.
     /// After [`Event::Closed`] every call returns `Closed`.
     pub fn next_event(&self, timeout: Duration) -> Option<Event> {
+        self.select();
         match self
             .shared
             .events
@@ -1277,6 +1446,7 @@ impl ClientSession {
             .recv_timeout(timeout)
         {
             Ok(event) => {
+                self.selection_event(&event);
                 match &event {
                     Event::Windows { windows } => self.follow(windows),
                     // A refused window stays counted, so it is not followed
@@ -1303,7 +1473,15 @@ impl ClientSession {
             return FramePoll::Frame(frame);
         }
         match queue.frames.recv_timeout(timeout) {
-            Ok(frame) => FramePoll::Frame(frame),
+            Ok(frame) => {
+                *self
+                    .frames_seen
+                    .lock()
+                    .expect("frames seen")
+                    .entry(window)
+                    .or_insert(0) += 1;
+                FramePoll::Frame(frame)
+            }
             Err(RecvTimeoutError::Timeout) => FramePoll::Timeout,
             Err(RecvTimeoutError::Disconnected) => {
                 drop(queue);

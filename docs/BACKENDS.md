@@ -301,6 +301,27 @@ adaptation alone cannot fit the content or the link (a text window on a
 link too thin for legible video goes to RDP pictures; a window that
 starts playing video goes back to video).
 
+Built (step 3, `client-core` `selector`): the client chooses between
+video and RDP pictures for each shown window, twice a second, from:
+
+- motion, measured on the client as the pictures or frames a window's
+  carrier delivers per second against 24 (a still window's carrier sends
+  about one a second), smoothed over about 2 s;
+- the window's content as the host classifies it (`ContentHint`);
+- whether RDP can reach the host (on this network, a client that shows
+  pictures).
+
+Scores: video 0.2 + motion; RDP pictures 1.2 - motion for text, 0.3 -
+motion for other windows (so only text goes to RDP unless almost still),
+nothing for games and video players. Margin 25%, dwell 3 s, at most one
+switch per 15 s per window (counted from the stream's start), and after a
+refused or failed switch that carrier waits 30 s, doubling each time up
+to 5 min. A window whose app has a rule of the user's, or that the user
+switched by hand, is pinned. On by default
+(`ClientSession::set_auto_switch`; the Windows app's "Switch between video
+and RDP by themselves"). Not used yet: the host's own motion measure,
+loss and bandwidth, decoder and encoder load, and battery.
+
 ### What the client shows
 
 The same window object throughout: the app's window or view, its title,

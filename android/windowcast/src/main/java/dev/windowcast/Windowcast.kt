@@ -253,6 +253,14 @@ class WindowcastSession internal constructor(handle: Long) : Closeable {
         return generation.toInt()
     }
 
+    /**
+     * Whether a window's carrier switches by itself as what it shows and the connection change
+     * (on by default); its switches arrive as [Event.CarrierStarted], as for [switchWindow].
+     */
+    fun autoSwitch(on: Boolean) {
+        withHandle(Unit) { Native.autoSwitch(it, on) }
+    }
+
     /** The first picture of carrier [generation] was shown: it replaces the old one. */
     fun carrierShown(window: Long, generation: Int) {
         withHandle(Unit) { Native.carrierShown(it, window, generation) }

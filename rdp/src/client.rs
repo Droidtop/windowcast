@@ -131,6 +131,12 @@ impl RdpStream {
         }
     }
 
+    /// How many pictures have come so far: the carrier selector's measure
+    /// of how much the window changes.
+    pub fn pictures(&self) -> u64 {
+        self.latest.picture.lock().expect("latest").0
+    }
+
     /// A RemoteApp session's windows as a client lists them
     /// ([`Windows::listed`]), numbered: the number grows with each change.
     pub fn windows(&self) -> (u64, Vec<ListedWindow>) {

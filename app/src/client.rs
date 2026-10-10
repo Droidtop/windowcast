@@ -402,6 +402,7 @@ impl ClientRole {
         };
         session.set_rules(self.store.get().client.rules);
         session.set_follow_popups(self.store.get().client.follow_popups);
+        session.set_auto_switch(self.store.get().client.auto_switch);
         // The Windows stream window shows RDP windows' pictures.
         session.accept_pictures(cfg!(windows));
         state.generation += 1;
@@ -809,6 +810,18 @@ impl ClientRole {
         if let Ok(session) = self.session() {
             session.set_follow_popups(on);
         }
+    }
+
+    /// Whether carriers switch by themselves: kept, and applied now.
+    pub fn set_auto_switch(&self, on: bool) {
+        self.store.update(|config| config.client.auto_switch = on);
+        if let Ok(session) = self.session() {
+            session.set_auto_switch(on);
+        }
+    }
+
+    pub fn auto_switch(&self) -> bool {
+        self.store.get().client.auto_switch
     }
 
     pub fn follow_popups(&self) -> bool {

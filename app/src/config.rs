@@ -178,6 +178,10 @@ pub struct ClientSettings {
     /// each in its own window.
     #[serde(default = "on")]
     pub follow_popups: bool,
+    /// Switch a window's carrier by itself as what it shows and the
+    /// connection change.
+    #[serde(default = "on")]
+    pub auto_switch: bool,
     /// Send pointer and keys from the stream windows to the host.
     pub send_input: bool,
     /// Stream windows open borderless, covering their display.
