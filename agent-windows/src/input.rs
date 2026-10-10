@@ -70,7 +70,8 @@ impl Injector {
                 if let Some(focus) = focus {
                     bring_forward(focus);
                 }
-                if let Some((scan, extended)) = scan_code(*keycode) {
+                if let Some((scan, extended)) = windowcast_protocol::keys::scan_from_evdev(*keycode)
+                {
                     let mut flags = KEYEVENTF_SCANCODE;
                     if extended {
                         flags |= KEYEVENTF_EXTENDEDKEY;
@@ -245,46 +246,9 @@ fn bring_forward(window: WindowId) {
     }
 }
 
-/// evdev keycode to set-1 scan code and whether it is an extended (E0) key.
-/// The main block (1 to 88) is the same number in both.
-pub fn scan_code(keycode: u32) -> Option<(u16, bool)> {
-    let extended = match keycode {
-        96 => 0x1c,  // keypad Enter
-        97 => 0x1d,  // right Ctrl
-        98 => 0x35,  // keypad /
-        99 => 0x37,  // Print Screen
-        100 => 0x38, // right Alt
-        102 => 0x47, // Home
-        103 => 0x48, // Up
-        104 => 0x49, // Page Up
-        105 => 0x4b, // Left
-        106 => 0x4d, // Right
-        107 => 0x4f, // End
-        108 => 0x50, // Down
-        109 => 0x51, // Page Down
-        110 => 0x52, // Insert
-        111 => 0x53, // Delete
-        125 => 0x5b, // left Windows
-        126 => 0x5c, // right Windows
-        127 => 0x5d, // Menu
-        1..=88 => return Some((keycode as u16, false)),
-        _ => return None,
-    };
-    Some((extended, true))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn main_block_keys_keep_their_number_and_arrows_are_extended() {
-        assert_eq!(scan_code(30), Some((0x1e, false))); // A
-        assert_eq!(scan_code(28), Some((0x1c, false))); // Enter
-        assert_eq!(scan_code(103), Some((0x48, true))); // Up
-        assert_eq!(scan_code(111), Some((0x53, true))); // Delete
-        assert_eq!(scan_code(500), None);
-    }
 
     #[test]
     fn picture_corners_map_to_the_window_corners() {

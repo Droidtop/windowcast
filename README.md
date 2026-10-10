@@ -11,9 +11,9 @@ and host agents per OS. GPL-3.0.
 **The shape.** windowcast is one library we write: protocol, pairing and
 identity, every backend, codecs and input. Host agents and clients are
 thin implementations of it on each end, and clients use it only through
-`client-core`'s C interface. The GameStream, RDP and media backends are
-our own implementations of those protocols inside the library, not
-wrappers around other projects' clients. See
+`client-core`'s C interface. The GameStream, RDP and media backends live
+inside the library, not as wrappers around other projects' programs
+(GameStream is written here; RDP links IronRDP's protocol crates). See
 [`docs/BACKENDS.md`](docs/BACKENDS.md) for the backends and how a window's
 backend is chosen.
 
@@ -87,6 +87,7 @@ docs/BACKENDS.md).
 | `identity` | Real, tested (persistent Ed25519 identity, pinned-peer trust store) |
 | `pairing` | Real, tested (SPAKE2 PAKE + HKDF + HMAC fingerprint authentication) — the *device* credential |
 | `gamestream` | Our own GameStream (#110): pairing at both ends (PIN-salted AES key, RSA certificates, the five-step challenge), a client for Sunshine/Apollo (`serverinfo`, pairing, app list, launch, quit over HTTPS with the host's certificate pinned), and a host stock Moonlight pairs with, lists windows from and streams them from (RTSP, H.264 video packets, the AES-GCM ENet control stream; tested in CI with Arch's moonlight-qt). Our client streams from a GameStream host; input (keys, mouse, touch, controllers) and the window's sound (Opus with Reed-Solomon parity) cross in both directions; control, audio and video are encrypted as the client asks |
+| `rdp` | RDP (#111) on IronRDP's protocol crates: one window of a host served over RDP (the desktop is the window; TLS with a per-host certificate and NLA with a login the host sets; RemoteFX or plain bitmaps as the client supports; keys and pointer to the window), and a client for RDP hosts (ours, Windows' own Remote Desktop) giving the picture as RGBA and taking windowcast input. `windowcast-rdp connect` and `serve` try it. Tested in CI: our client against our host, stock FreeRDP against our host, our client against a Windows runner's own Remote Desktop. Not yet: a windowcast session choosing RDP for a window (the seam), RemoteApp, a host window that changes size mid-session |
 | `rendezvous` | Real, tested: finding a paired device away from the LAN the way Syncthing does (its global discovery, STUN, hole punching; addresses only, never data), shared with droidtop-agent |
 | `transport` | Real, tested (webrtc-rs 0.21): authenticated offer/answer signaling over any byte stream (`signaling::connect`/`accept`), the control data channel, per-window H.264/H.265/AV1 tracks with renegotiation over the control channel, keyframe requests, loopback candidates for same-device sessions; away from the LAN, signaling over a punched UDP stream (`punched`, `remote`) and ICE through the NATs (`Session::away`), with no relay |
 | `host-core` | Real, tested: the host side of the library (listening, PIN pairing with lockout and re-issue, trusted clients, window lists, backend and codec choice, feeding window tracks from an agent's encoder, keyframe requests). Agents implement `WindowSource` |
@@ -95,7 +96,7 @@ docs/BACKENDS.md).
 | `agent-linux` | Real, tested: windows from `ext_foreign_toplevel_list_v1` (falling back to `zwlr_foreign_toplevel_manager_v1` for listing), per-window capture with `ext-image-copy-capture-v1` (toplevel source) into shared memory, the desktop backend (the window's output, cut by sway's geometry), OpenH264. Input under sway: a virtual pointer at absolute layout positions mapped onto the window (sway IPC), a virtual keyboard with an xkbcommon US keymap and its modifier state, text typed through it. CI runs it under a headless sway: captures a test window both ways, decodes the colour, and checks the click position and keys arrive |
 | `agent-windows` | Real, tested: the desktop's windows, per-window capture (Windows.Graphics.Capture), BGRA to NV12/I420, encoders behind one interface chosen with `--encoder` (Media Foundation hardware, i.e. the GPU vendor's NVENC/AMF/Quick Sync MFT, or one vendor's on a machine with several, with H.265 and AV1 where offered; Microsoft's software H.264 MFT; OpenH264). CI captures a real window, encodes it with each encoder, streams it over loopback and decodes it. Input with SendInput (pointer mapped from the picture to the window, keys as scan codes, text as Unicode, touch as the pointer), clipboard text both ways; CI clicks and types into a real window through a client |
 | `agent-macos` | Not started |
-| GameStream, RDP, VNC, passthrough backends | Not started; the seam is in `protocol` (`StreamBackend`, `selection`). Each is our own implementation of its protocol; GameStream pairing follows the real protocol's salted-PIN AES challenge/response, read from reference sources, not guessed at |
+| RDP, VNC, passthrough backends | In progress (RDP, #111) and not started; the seam is in `protocol` (`StreamBackend`, `selection`) |
 | `client-windows` | The Windows client end: hardware decoding with Media Foundation on a Direct3D 11 device (H.264; H.265 and AV1 with Microsoft's Video Extensions), presented through the GPU's video processor into a flip-model swap chain in a native window per stream; pointer and keys back to the host |
 | `app` | The reference application `windowcast-app`: host, client or both by configuration, a native window per role (egui) and one per streamed window (`client-windows`); `--connect`/`--stream` for a stream straight from the command line. Host role on Windows and Linux (Wayland); stream windows on Windows only so far |
 | `cli-tools` | `windowcast-client` (pairs or resumes, lists windows, `--watch` streams one and decodes it) and `windowcast-testhost` (a host whose one window is an OpenH264 test pattern, Windows included) |

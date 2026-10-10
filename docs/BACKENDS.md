@@ -7,11 +7,21 @@ clients (droidtop's Desktop mode, the reference CLI, anything else) on the
 other. A client embeds `client-core` and talks to it only through its C
 interface, which is the single surface every end implements against.
 
-Every backend below is our own implementation of that protocol, inside
-this library, on both ends. None wraps another project's client or server
-(no moonlight-common-c, no FreeRDP, no libvncclient). Other projects'
-source is reference material for how a protocol behaves on the wire; it is
-read, never linked.
+Every backend below lives inside this library, on both ends, and none
+wraps another project's client or server program (no moonlight-common-c,
+no FreeRDP, no libvncclient). Other projects' source is reference material
+for how a protocol behaves on the wire. GameStream is written here from
+those references.
+
+Libraries are another matter (the owner's decision, 2026-10-09: "We can
+wire in other crates, that's fine"): a backend may link a protocol crate
+as its protocol layer, never an external program, with each crate's
+licence kept straight in `NOTICE`. RDP is built that way: IronRDP's
+crates (Devolutions, MIT or Apache-2.0) carry the RDP protocol itself
+(connection sequence, TLS, CredSSP/NLA, the bitmap codecs, the static and
+dynamic channels), and windowcast keeps its own window handling on top:
+which window an RDP connection shows, RemoteApp, input mapping, the
+streaming into windowcast's sessions and the backend seam.
 
 ## The window abstraction
 
@@ -37,7 +47,7 @@ over it and keyed from it.
 | `Passthrough` | video players | a video track on the session, carrying the media as it was already encoded (no second encode) | seam only |
 | `Desktop` | hosts that cannot capture one window; whole-desktop streams | a video track on the session, cut from a whole-output capture | built on Windows and on Linux under sway: the window cut from a capture of its screen, with whatever covers it; whole-desktop targets are #112 |
 | `GameStream` | games | its own low-latency video, audio and controller channels | video, sound and input built at both ends (the `gamestream` crate) (#110) |
-| `Rdp` | text-heavy windows: editors, terminals, documents | its own connection; sharp text at low bandwidth | seam only (#111) |
+| `Rdp` | text-heavy windows: editors, terminals, documents | its own connection; sharp text at low bandwidth | host and client built in the `rdp` crate on IronRDP; not yet chosen by a session (#111) |
 | `Vnc` | anything else that only speaks VNC | its own connection | seam only (#111) |
 
 Video tracks carry H.264, H.265 or AV1, chosen per track: the client lists

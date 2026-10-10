@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use openh264::encoder::{Encoder, EncoderConfig, FrameRate, IntraFramePeriod};
 use openh264::formats::YUVBuffer;
 use openh264::OpenH264API;
-use windowcast_host::{EncodedFrame, FrameSource, WindowSource};
+use windowcast_host::{EncodedFrame, FrameSource, Picture, PictureSource, WindowSource};
 use windowcast_protocol::{ContentHint, VideoCodec, WindowId, WindowInfo};
 
 pub const WINDOW: WindowId = WindowId(1);
@@ -54,6 +54,74 @@ impl WindowSource for TestPatternSource {
             next_at: Instant::now(),
         }))
     }
+
+    fn open_pictures(&self, window: WindowId) -> Option<Result<Box<dyn PictureSource>, String>> {
+        (window == WINDOW).then(|| {
+            Ok(Box::new(TestPictures {
+                frame: 0,
+                next_at: Instant::now(),
+            }) as _)
+        })
+    }
+}
+
+/// The test pattern's pictures, unencoded.
+struct TestPictures {
+    frame: u64,
+    next_at: Instant,
+}
+
+impl PictureSource for TestPictures {
+    fn next_picture(&mut self) -> Option<Picture> {
+        let now = Instant::now();
+        if self.next_at > now {
+            std::thread::sleep(self.next_at - now);
+        }
+        self.next_at += FRAME_TIME;
+        let picture = draw_bgra(self.frame);
+        self.frame += 1;
+        Some(picture)
+    }
+}
+
+/// The pattern as BGRA: a grey ramp, a red bar that sweeps across, and the
+/// frame number in binary as a row of white and black blocks along the top.
+pub fn draw_bgra(frame: u64) -> Picture {
+    let (w, h) = (WIDTH, HEIGHT);
+    let mut data = vec![0u8; w * h * 4];
+    let bar = (frame as usize * 8) % w;
+    for y in 0..h {
+        for x in 0..w {
+            let grey = (x * 200 / w + 16) as u8;
+            let mut pixel = [grey, grey, grey, 255];
+            if x >= bar && x < bar + 24 {
+                pixel = [40, 40, 220, 255];
+            }
+            if y < 32 {
+                let bit = x / (w / 16);
+                let on = (frame >> (15 - bit)) & 1 == 1;
+                let v = if on { 235 } else { 16 };
+                pixel = [v, v, v, 255];
+            }
+            data[(y * w + x) * 4..][..4].copy_from_slice(&pixel);
+        }
+    }
+    Picture {
+        width: w as u32,
+        height: h as u32,
+        stride: w * 4,
+        data,
+    }
+}
+
+/// The frame number a [`draw_bgra`] picture (or a copy of it, in any
+/// channel order) carries in its top row of blocks.
+pub fn frame_number(rgba_or_bgra: &[u8], width: usize) -> u64 {
+    (0..16).fold(0, |n, bit| {
+        let x = bit * (width / 16) + width / 32;
+        let v = rgba_or_bgra[(16 * width + x) * 4 + 1];
+        (n << 1) | u64::from(v > 128)
+    })
 }
 
 /// The test pattern with a sound: a 440 Hz tone, generated (no capture),

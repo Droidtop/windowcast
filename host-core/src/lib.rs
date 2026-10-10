@@ -85,6 +85,13 @@ pub trait WindowSource: Send + Sync + 'static {
         Err("this host does not capture whole screens".into())
     }
 
+    /// `window`'s pictures as captured, unencoded, for backends that
+    /// encode their own way (RDP's bitmap codecs). `None` when this host
+    /// cannot hand out raw pictures.
+    fn open_pictures(&self, _window: WindowId) -> Option<Result<Box<dyn PictureSource>, String>> {
+        None
+    }
+
     /// The sound `window` makes (its application's), streamed beside its
     /// picture. `None` when this host captures no window audio.
     fn open_audio(&self, _window: WindowId) -> Option<Result<Box<dyn audio::AudioSource>, String>> {
@@ -117,6 +124,22 @@ pub trait WindowSource: Send + Sync + 'static {
 
     /// Replaces the clipboard's text with the client's.
     fn set_clipboard(&self, _text: &str) {}
+}
+
+/// One captured picture: BGRA, rows from the top, `stride` bytes apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picture {
+    pub width: u32,
+    pub height: u32,
+    pub stride: usize,
+    pub data: Vec<u8>,
+}
+
+/// A running capture of one window's pictures. Runs on its own thread.
+pub trait PictureSource: Send {
+    /// Blocks until the next picture, paced by the source. `None` ends the
+    /// capture (the window went away).
+    fn next_picture(&mut self) -> Option<Picture>;
 }
 
 /// A running capture and encoder for one window. Runs on its own thread.

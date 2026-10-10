@@ -18,7 +18,6 @@ mod audio;
 #[cfg(windows)]
 mod decoder;
 #[cfg(windows)]
-mod keys;
 #[cfg(windows)]
 mod microphone;
 #[cfg(windows)]

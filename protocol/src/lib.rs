@@ -3,6 +3,7 @@
 //! by anything embedding windowcast without pulling in WebRTC or capture
 //! backends it doesn't need.
 
+pub mod keys;
 pub mod selection;
 
 use serde::{Deserialize, Serialize};

@@ -89,7 +89,7 @@ jobs:
     steps:
       - name: Install system dependencies
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rust nasm cmake sway wayland libxkbcommon xkeyboard-config pulseaudio libpulse moonlight-qt
+          pacman -Syu --noconfirm --needed base-devel git rust nasm cmake sway wayland libxkbcommon xkeyboard-config pulseaudio libpulse moonlight-qt freerdp
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -130,3 +130,8 @@ jobs:
           printf '%s\n' '[General]' 'enableMdns=false' > "/tmp/moonhome/.config/Moonlight Game Streaming Project/Moonlight.conf"
           HOME=/tmp/moonhome QT_QPA_PLATFORM=wayland WINDOWCAST_TEST_MOONLIGHT=1 \
             cargo test -p windowcast-gamestream --test moonlight -- --nocapture
+          # Stock FreeRDP (Arch's wlfreerdp3) logs in to our RDP host and
+          # shows the test pattern window.
+          mkdir -p /tmp/rdphome
+          HOME=/tmp/rdphome WINDOWCAST_TEST_FREERDP=1 \
+            cargo test -p windowcast-rdp --test freerdp -- --nocapture

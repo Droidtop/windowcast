@@ -5,6 +5,7 @@ members = [
     "identity",
     "pairing",
     "gamestream",
+    "rdp",
     "rendezvous",
     "transport",
     "host-core",

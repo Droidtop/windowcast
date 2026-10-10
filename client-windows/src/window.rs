@@ -23,7 +23,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::decoder::Decoder;
 use crate::present::{self, Presenter};
-use crate::{keys, Display, Placement, Shared, SharedStats};
+use crate::{Display, Placement, Shared, SharedStats};
 
 /// An open stream window. Dropping the handle leaves the window open;
 /// [`StreamWindow::close`] closes it.
@@ -520,7 +520,9 @@ unsafe extern "system" fn window_proc(
                 let flags = lparam.0 as u32;
                 let scan = (flags >> 16) & 0xff;
                 let extended = flags & (1 << 24) != 0;
-                if let Some(keycode) = keys::evdev(scan, extended) {
+                if let Some(keycode) =
+                    windowcast_protocol::keys::evdev_from_scan(scan as u16, extended)
+                {
                     let pressed = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
                     state.input.push(InputEvent::Key { keycode, pressed });
                 }

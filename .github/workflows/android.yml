@@ -94,12 +94,29 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Clippy
-        run: cargo clippy -p windowcast-agent-windows -p windowcast-client-windows -p windowcast-app --all-targets -- -D warnings
+        run: cargo clippy -p windowcast-agent-windows -p windowcast-client-windows -p windowcast-app -p windowcast-rdp --all-targets -- -D warnings
 
       - name: Test the agent (capture, encode, stream, decode)
         env:
           WINDOWCAST_TEST_ON_SCREEN: "1"
         run: cargo test -p windowcast-agent-windows --no-fail-fast -- --nocapture
+
+      - name: Our RDP client against Windows' own Remote Desktop
+        # Remote Desktop on, and a user made for the test, on this runner
+        # only; the client logs in to it over loopback (TLS, NLA with NTLM).
+        shell: pwsh
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1
+          Start-Service TermService -ErrorAction SilentlyContinue
+          $password = "Wc-" + [guid]::NewGuid().ToString("N") + "-9a"
+          Write-Output "::add-mask::$password"
+          net user wcrdp $password /add | Out-Null
+          net localgroup "Remote Desktop Users" wcrdp /add | Out-Null
+          $env:WINDOWCAST_TEST_WINDOWS_RDP_USER = "wcrdp"
+          $env:WINDOWCAST_TEST_WINDOWS_RDP_PASSWORD = $password
+          cargo test -p windowcast-rdp --no-fail-fast -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build
         run: cargo build --release -p windowcast-cli-tools -p windowcast-agent-windows -p windowcast-app --bins
@@ -113,4 +130,5 @@ jobs:
             target/release/windowcast-app.exe
             target/release/windowcast-testhost.exe
             target/release/windowcast-client.exe
+            target/release/windowcast-rdp.exe
             target/debug/deps/encoders-*.exe
