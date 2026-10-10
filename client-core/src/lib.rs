@@ -258,18 +258,51 @@ impl Client {
         self.identity.peer_id().to_hex()
     }
 
-    /// Connects to a host agent at `address` (`HOST:PORT`): pairs with
-    /// `pin` the first time, otherwise resumes with the pinned identity.
-    /// Blocks until the session is up.
+    /// Connects to a host agent at `address` (`HOST:PORT`). Resumes with
+    /// this device's pinned identity when the host trusts it; `pin` is
+    /// used only when that is refused, because the host is not pinned here
+    /// or no longer trusts this device (so a PIN left in the form does not
+    /// get a host that already paired this device to refuse the session
+    /// with "pairing is not open"). Blocks until the session is up.
     pub fn connect(&self, address: &str, pin: Option<&str>) -> Result<ClientSession, ClientError> {
         let trusted = self.trust.lock().expect("trust store").clone();
-        let identity = Arc::clone(&self.identity);
         let mut host_ip = None;
-        let established = self.runtime.block_on(async {
+        let resumed = if pin.is_some() {
+            // Try the identity first; only a refusal that a PIN could fix falls through.
+            match self.connect_once(address, None, &trusted, &mut host_ip) {
+                Err(ClientError::Transport(e)) if pairing_could_help(&e) => None,
+                other => Some(other),
+            }
+        } else {
+            Some(self.connect_once(address, None, &trusted, &mut host_ip))
+        };
+        let established = match resumed {
+            Some(result) => result?,
+            None => self.connect_once(address, pin, &trusted, &mut host_ip)?,
+        };
+
+        if established.paired {
+            let mut trust = self.trust.lock().expect("trust store");
+            trust.pin(established.peer);
+            trust.save(&self.trust_path)?;
+        }
+        Ok(self.started(established, host_ip))
+    }
+
+    /// One connection attempt: pairing with `pin`, or resuming when there is none.
+    fn connect_once(
+        &self,
+        address: &str,
+        pin: Option<&str>,
+        trusted: &TrustStore,
+        host_ip: &mut Option<std::net::IpAddr>,
+    ) -> Result<windowcast_transport::Established, ClientError> {
+        let identity = Arc::clone(&self.identity);
+        self.runtime.block_on(async {
             let stream = tokio::net::TcpStream::connect(address)
                 .await
                 .map_err(|e| ClientError::Unreachable(address.to_owned(), e))?;
-            host_ip = stream.peer_addr().ok().map(|peer| peer.ip());
+            *host_ip = stream.peer_addr().ok().map(|peer| peer.ip());
             // A host on this device is reached over loopback alone.
             let local = stream.peer_addr().is_ok_and(|peer| peer.ip().is_loopback());
             let session = if local {
@@ -279,17 +312,10 @@ impl Client {
             };
             let credential = match pin {
                 Some(pin) => ClientCredential::Pin(pin),
-                None => ClientCredential::Pinned(&trusted),
+                None => ClientCredential::Pinned(trusted),
             };
             Ok::<_, ClientError>(connect(stream, session, &identity, credential).await?)
-        })?;
-
-        if established.paired {
-            let mut trust = self.trust.lock().expect("trust store");
-            trust.pin(established.peer);
-            trust.save(&self.trust_path)?;
-        }
-        Ok(self.started(established, host_ip))
+        })
     }
 
     /// A session on `established`; `host_ip` is where backends with their
@@ -661,6 +687,16 @@ impl Shared {
         *slot = fresh;
         (sender, keyframe)
     }
+}
+
+/// Whether a failed resume is one a PIN could fix: the host is not pinned
+/// on this device, or the host does not know this device (it refuses a
+/// resume with the same message whatever the cause).
+fn pairing_could_help(error: &TransportError) -> bool {
+    matches!(
+        error,
+        TransportError::UnknownPeer | TransportError::Rejected(_)
+    )
 }
 
 fn new_slot() -> Arc<WindowSlot> {
@@ -1360,5 +1396,20 @@ async fn pump_frames(
             }
             Err(TrySendError::Disconnected(_)) => return,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_refused_resume_falls_back_to_the_pin() {
+        assert!(pairing_could_help(&TransportError::UnknownPeer));
+        assert!(pairing_could_help(&TransportError::Rejected(
+            "authentication failed".into()
+        )));
+        assert!(!pairing_could_help(&TransportError::Timeout));
+        assert!(!pairing_could_help(&TransportError::Closed));
     }
 }
