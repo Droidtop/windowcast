@@ -41,7 +41,7 @@ class AudioPlayer(
         var packets = 0L
         try {
             while (running) {
-                val len = Native.nextAudio(session.handle, window, 100, buffer, info)
+                val len = session.withHandle(Native.ERROR) { Native.nextAudio(it, window, 100, buffer, info) }
                 if (len == Native.TIMEOUT || len == Native.BUFFER_TOO_SMALL) continue
                 if (len < 0) break
                 val packet = ByteArray(len.toInt())

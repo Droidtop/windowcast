@@ -47,7 +47,7 @@ class WindowDecoder(
         val output = MediaCodec.BufferInfo()
         try {
             while (running) {
-                val len = Native.nextFrame(session.handle, window, 200, buffer, info)
+                val len = session.withHandle(Native.ERROR) { Native.nextFrame(it, window, 200, buffer, info) }
                 when {
                     len == Native.TIMEOUT -> continue
                     len == Native.BUFFER_TOO_SMALL -> {

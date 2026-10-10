@@ -179,14 +179,22 @@ interface WindowRenderer {
 }
 
 /** A connected session. Every call blocks; none may run on the main thread. */
-class WindowcastSession internal constructor(internal val handle: Long) : Closeable {
-    @Volatile private var closed = false
+class WindowcastSession internal constructor(handle: Long) : Closeable {
+    // Calls run outside any lock and [close] frees the session when the last one has left, so a
+    // reader inside [nextEvent] never meets a freed session (it returns null from then on).
+    private val native = NativeHandle(handle, Native::sessionFree)
 
     val hostId: String = Native.sessionHost(handle)
     val paired: Boolean = Native.sessionPaired(handle)
 
+    /** True until [close]. */
+    val isOpen: Boolean get() = native.isOpen
+
+    /** Runs [block] with the session's native handle, or returns [default] once closed. */
+    internal fun <T> withHandle(default: T, block: (Long) -> T): T = native.use(default, block)
+
     fun requestWindows() {
-        Native.requestWindows(handle)
+        withHandle(Unit) { Native.requestWindows(it) }
     }
 
     /**
@@ -195,32 +203,32 @@ class WindowcastSession internal constructor(internal val handle: Long) : Closea
      * backend "Rdp").
      */
     fun acceptPictures(on: Boolean) {
-        Native.acceptPictures(handle, on)
+        withHandle(Unit) { Native.acceptPictures(it, on) }
     }
 
     /** Asks to stream [window], decodable in [codecs], most preferred first. */
     fun startWindow(window: Long, codecs: List<Codec>) {
-        Native.startWindow(handle, window, codecs.map { it.id }.toIntArray())
+        withHandle(Unit) { Native.startWindow(it, window, codecs.map { c -> c.id }.toIntArray()) }
     }
 
     fun stopWindow(window: Long) {
-        Native.stopWindow(handle, window)
+        withHandle(Unit) { Native.stopWindow(it, window) }
     }
 
     /** Sends one input event (see [Input]). */
     fun send(input: Input) {
-        Native.sendInput(handle, input.json)
+        withHandle(Unit) { Native.sendInput(it, input.json) }
     }
 
     /** Gives the host this device's clipboard text. */
     fun setClipboard(text: String) {
-        Native.setClipboard(handle, text)
+        withHandle(Unit) { Native.setClipboard(it, text) }
     }
 
     /** A shell on the host, drawn on a screen of [cols] by [rows] cells. The host may refuse (IOException). */
     fun openTerminal(cols: Int, rows: Int): TerminalSession {
-        val terminal = Native.openTerminal(handle, cols, rows)
-        if (terminal == 0L) throw IOException(Native.lastError())
+        val terminal = withHandle(0L) { Native.openTerminal(it, cols, rows) }
+        if (terminal == 0L) throw IOException(if (isOpen) Native.lastError() else "the session is closed")
         return TerminalSession(terminal)
     }
 
@@ -229,20 +237,18 @@ class WindowcastSession internal constructor(internal val handle: Long) : Closea
      * arrive in the window list. Returns the process id (0 if the host does not know it).
      */
     fun launch(argv: List<String>): Long {
-        val pid = Native.launch(handle, org.json.JSONArray(argv).toString())
-        if (pid == Native.ERROR) throw IOException(Native.lastError())
+        val pid = withHandle(Native.ERROR) { Native.launch(it, org.json.JSONArray(argv).toString()) }
+        if (pid == Native.ERROR) throw IOException(if (isOpen) Native.lastError() else "the session is closed")
         return pid
     }
 
-    /** The next event, or null after [timeoutMs] without one. */
+    /** The next event, or null after [timeoutMs] without one, and for good once the session is closed. */
     fun nextEvent(timeoutMs: Int): Event? =
-        Native.nextEvent(handle, timeoutMs)?.let { Event.parse(it) }
+        withHandle<String?>(null) { Native.nextEvent(it, timeoutMs) }?.let { Event.parse(it) }
 
+    /** Never waits: the session is freed by the last call still running on it. */
     override fun close() {
-        if (!closed) {
-            closed = true
-            Native.sessionFree(handle)
-        }
+        native.close()
     }
 }
 

@@ -13,11 +13,16 @@ import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 /**
  * A terminal drawn from a [TerminalSession]'s snapshots, with the keyboard (a hardware one, a
  * gamepad's D-pad and buttons, or the soft keyboard) and vertical drags for the scrollback. It
- * is the baseline view: no selection, no mouse reporting.
+ * is the baseline view: no selection, no mouse reporting. No native call runs on the main
+ * thread: input, resize and scrollback go out in order on one worker, the screen is read on a
+ * reader thread.
  */
 class TerminalView(context: Context) : View(context) {
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -31,7 +36,8 @@ class TerminalView(context: Context) : View(context) {
     private var baseline = 0f
 
     @Volatile private var snapshot: TerminalSnapshot? = null
-    private var terminal: TerminalSession? = null
+    @Volatile private var terminal: TerminalSession? = null
+    private var input: ExecutorService? = null
     @Volatile private var running = false
     private var dragged = 0f
     private var scrolled = 0
@@ -52,6 +58,16 @@ class TerminalView(context: Context) : View(context) {
         baseline = -metrics.ascent
     }
 
+    /** Runs [block] on the session in order, off the main thread. */
+    private fun io(block: (TerminalSession) -> Unit) {
+        val t = terminal ?: return
+        try {
+            input?.execute { block(t) }
+        } catch (_: RejectedExecutionException) {
+            // detached meanwhile
+        }
+    }
+
     /** How many cells fit the view now. */
     private fun cols() = (width / cellWidth).toInt().coerceAtLeast(1)
     private fun rows() = (height / cellHeight).toInt().coerceAtLeast(1)
@@ -65,12 +81,14 @@ class TerminalView(context: Context) : View(context) {
         detach()
         terminal = session
         running = true
-        if (width > 0) session.resize(cols(), rows())
+        input = Executors.newSingleThreadExecutor { r -> Thread(r, "windowcast-terminal-input") }
+        if (width > 0) resizeTerminal()
         Thread({
             var seen = 0L
             var told = false
             while (running) {
                 val shown = terminal ?: break
+                if (!shown.isOpen) break
                 if (shown.waitChange(seen, 500)) {
                     val s = shown.snapshot() ?: break
                     seen = s.version
@@ -91,12 +109,19 @@ class TerminalView(context: Context) : View(context) {
     fun detach() {
         running = false
         terminal = null
+        input?.shutdown()
+        input = null
         snapshot = null
         invalidate()
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        terminal?.resize(cols(), rows())
+        resizeTerminal()
+    }
+
+    private fun resizeTerminal() {
+        val (c, r) = cols() to rows()
+        io { it.resize(c, r) }
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -146,7 +171,8 @@ class TerminalView(context: Context) : View(context) {
                 if (lines != 0) {
                     dragged += lines * cellHeight
                     scrolled = (scrolled + lines).coerceAtLeast(0)
-                    terminal?.scrollBack(scrolled)
+                    val back = scrolled
+                    io { it.scrollBack(back) }
                 }
             }
             MotionEvent.ACTION_UP -> {
@@ -175,7 +201,7 @@ class TerminalView(context: Context) : View(context) {
             }
 
             override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
-                repeat(beforeLength.coerceAtLeast(1)) { terminal?.sendKey("Backspace") }
+                repeat(beforeLength.coerceAtLeast(1)) { io { t -> t.sendKey("Backspace") } }
                 return true
             }
 
@@ -186,27 +212,32 @@ class TerminalView(context: Context) : View(context) {
     private fun typed(string: String) {
         if (scrolled != 0) {
             scrolled = 0
-            terminal?.scrollBack(0)
+            io { it.scrollBack(0) }
         }
-        terminal?.sendText(string.replace("\n", "\r"))
+        val text = string.replace("\n", "\r")
+        io { it.sendText(text) }
     }
 
     /** Sends a key event to the shell. Returns whether it was used. */
     fun handleKey(event: KeyEvent): Boolean {
-        val shell = terminal ?: return false
+        if (terminal == null) return false
         if (event.action != KeyEvent.ACTION_DOWN) return NAMED.containsKey(event.keyCode)
         NAMED[event.keyCode]?.let {
             scrolled = 0
-            shell.scrollBack(0)
-            shell.sendKey(it)
+            io { t ->
+                t.scrollBack(0)
+                t.sendKey(it)
+            }
             return true
         }
         if (event.keyCode >= KeyEvent.KEYCODE_F1 && event.keyCode <= KeyEvent.KEYCODE_F12) {
-            shell.sendKey("F" + (event.keyCode - KeyEvent.KEYCODE_F1 + 1))
+            val name = "F" + (event.keyCode - KeyEvent.KEYCODE_F1 + 1)
+            io { it.sendKey(name) }
             return true
         }
         if (event.isCtrlPressed && event.keyCode >= KeyEvent.KEYCODE_A && event.keyCode <= KeyEvent.KEYCODE_Z) {
-            shell.sendControl('a' + (event.keyCode - KeyEvent.KEYCODE_A))
+            val letter = 'a' + (event.keyCode - KeyEvent.KEYCODE_A)
+            io { it.sendControl(letter) }
             return true
         }
         val c = event.unicodeChar

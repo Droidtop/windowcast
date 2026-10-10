@@ -50,7 +50,7 @@ jobs:
 
       - name: Build the Android library and the viewer
         working-directory: android
-        run: ./gradlew :windowcast:assembleRelease :viewer:assembleDebug --stacktrace
+        run: ./gradlew :windowcast:testDebugUnitTest :windowcast:assembleRelease :viewer:assembleDebug --stacktrace
 
       # Android loads the bridge's dependencies by name; a path from this
       # machine in its NEEDED entries is a library that never loads.

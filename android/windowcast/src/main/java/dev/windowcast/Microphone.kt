@@ -30,7 +30,7 @@ class Microphone(private val session: WindowcastSession) {
     private fun run() {
         var record: AudioRecord? = null
         try {
-            if (Native.startMicrophone(session.handle) != 0L) error("the host session refused the microphone")
+            if (session.withHandle(Native.ERROR) { Native.startMicrophone(it) } != 0L) error("the host session refused the microphone")
             val minimum = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
             record = AudioRecord(
                 MediaRecorder.AudioSource.VOICE_COMMUNICATION,
@@ -46,7 +46,7 @@ class Microphone(private val session: WindowcastSession) {
             while (running) {
                 val n = record.read(pcm, 0, pcm.size)
                 if (n < 0) error("the microphone stopped ($n)")
-                if (n > 0 && Native.sendMicrophone(session.handle, pcm, n) != 0L) error("the session stopped taking the microphone")
+                if (n > 0 && session.withHandle(Native.ERROR) { Native.sendMicrophone(it, pcm, n) } != 0L) error("the session stopped taking the microphone")
                 sent += n
                 if (sent >= RATE * 2 * 5) {
                     Log.i(TAG, "microphone: 5 s sent")
@@ -61,7 +61,7 @@ class Microphone(private val session: WindowcastSession) {
                 runCatching { it.stop() }
                 it.release()
             }
-            Native.stopMicrophone(session.handle)
+            session.withHandle(Unit) { Native.stopMicrophone(it) }
         }
     }
 

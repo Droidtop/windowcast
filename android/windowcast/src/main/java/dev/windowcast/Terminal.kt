@@ -74,15 +74,18 @@ enum class HostKeyPolicy(internal val id: Int) {
 
 /**
  * A shell, on the host of a windowcast session or on an SSH server, drawn by the
- * library's screen model: send input, read [snapshot]s. Every call blocks briefly;
- * none may run on the main thread except the cheap input calls.
+ * library's screen model: send input, read [snapshot]s. Every call can block (a write to the
+ * network, [waitChange] up to its timeout): none may run on the main thread.
  */
 class TerminalSession internal constructor(handle: Long) : Closeable {
-    private var handle: Long = handle
-    private val lock = Any()
+    // Calls run outside any lock, so a [waitChange] on the reader thread never holds up input,
+    // resize, scrollback or close; [close] frees the screen when the last call has left.
+    private val native = NativeHandle(handle, Native::terminalFree)
 
-    private inline fun <T> live(default: T, block: (Long) -> T): T =
-        synchronized(lock) { if (handle == 0L) default else block(handle) }
+    private inline fun <T> live(default: T, crossinline block: (Long) -> T): T = native.use(default) { block(it) }
+
+    /** True until [close]. */
+    val isOpen: Boolean get() = native.isOpen
 
     fun sendText(text: String) {
         live(0L) { Native.terminalSendText(it, text) }
@@ -132,10 +135,8 @@ class TerminalSession internal constructor(handle: Long) : Closeable {
         if (Native.terminalEnded(h, code) == Native.ENDED) code[0] else null
     }
 
+    /** Never waits: the screen is freed by the last call still running on it. */
     override fun close() {
-        synchronized(lock) {
-            if (handle != 0L) Native.terminalFree(handle)
-            handle = 0L
-        }
+        native.close()
     }
 }

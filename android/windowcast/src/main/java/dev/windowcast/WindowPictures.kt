@@ -41,7 +41,7 @@ class WindowPictures(
         val paint = Paint(Paint.FILTER_BITMAP_FLAG)
         try {
             while (running) {
-                val len = Native.nextPicture(session.handle, window, 200, buffer, size)
+                val len = session.withHandle(Native.ERROR) { Native.nextPicture(it, window, 200, buffer, size) }
                 when {
                     len == Native.TIMEOUT -> continue
                     len == Native.BUFFER_TOO_SMALL -> {
