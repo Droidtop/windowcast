@@ -4,7 +4,9 @@
 //! sessions and streams are the real host library.
 //!
 //! Usage: `windowcast-testhost [--listen ADDR:PORT] [--no-pairing] [--tone]
-//! [--microphone-level]` (`--tone`: the window also sounds a 440 Hz tone,
+//! [--microphone-level] [--content general|text|game|video]` (`--content`: the
+//! window's content hint, which the default rules turn into a backend, so
+//! `--content text` makes a client get RDP; `--tone`: the window also sounds a 440 Hz tone,
 //! for trying a client's audio; `--microphone-level`: a client's
 //! microphone is taken and its level printed once a second, the sound
 //! itself kept nowhere).
@@ -12,7 +14,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use windowcast_cli_tools::testpattern::{TestPatternSource, TestPatternWithTone};
+use windowcast_cli_tools::testpattern::{
+    parse_content, TestPatternSource, TestPatternWithTone, WithContent,
+};
 use windowcast_host::audio::{AudioSource, MicrophoneSink};
 use windowcast_host::{FrameSource, HostConfig, WindowSource, DEFAULT_LISTEN};
 use windowcast_protocol::{VideoCodec, WindowId, WindowInfo};
@@ -82,6 +86,7 @@ async fn main() {
     let mut pairing = true;
     let mut tone = false;
     let mut measure = false;
+    let mut content = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -89,6 +94,15 @@ async fn main() {
             "--no-pairing" => pairing = false,
             "--tone" => tone = true,
             "--microphone-level" => measure = true,
+            "--content" => {
+                let name = args
+                    .next()
+                    .expect("--content needs general, text, game or video");
+                let Some(hint) = parse_content(&name) else {
+                    panic!("unknown content {name}");
+                };
+                content = Some(hint);
+            }
             other => panic!("unknown argument {other}"),
         }
     }
@@ -101,6 +115,10 @@ async fn main() {
         Arc::new(TestPatternWithTone)
     } else {
         Arc::new(TestPatternSource)
+    };
+    let source: Arc<dyn WindowSource> = match content {
+        Some(content) => Arc::new(WithContent::new(source, content)),
+        None => source,
     };
     let source: Arc<dyn WindowSource> = if measure {
         Arc::new(MeasuringMicrophone(source))

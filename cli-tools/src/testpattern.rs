@@ -2,13 +2,14 @@
 //! BSD-licensed). For trying a client against a host with no capture yet:
 //! the pixels are generated, the encoding and everything after it are real.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use openh264::encoder::{Encoder, EncoderConfig, FrameRate, IntraFramePeriod};
 use openh264::formats::YUVBuffer;
 use openh264::OpenH264API;
 use windowcast_host::{EncodedFrame, FrameSource, Picture, PictureSource, WindowSource};
-use windowcast_protocol::{ContentHint, VideoCodec, WindowId, WindowInfo};
+use windowcast_protocol::{BackendKind, ContentHint, VideoCodec, WindowId, WindowInfo};
 
 pub const WINDOW: WindowId = WindowId(1);
 pub const WIDTH: usize = 640;
@@ -122,6 +123,69 @@ pub fn frame_number(rgba_or_bgra: &[u8], width: usize) -> u64 {
         let v = rgba_or_bgra[(16 * width + x) * 4 + 1];
         (n << 1) | u64::from(v > 128)
     })
+}
+
+/// Another source whose windows all carry `content` as their hint, so the rules pick the
+/// backend that hint asks for (Text: RDP) with no capture to classify anything.
+pub struct WithContent {
+    inner: Arc<dyn WindowSource>,
+    content: ContentHint,
+}
+
+impl WithContent {
+    pub fn new(inner: Arc<dyn WindowSource>, content: ContentHint) -> Self {
+        WithContent { inner, content }
+    }
+}
+
+/// The hint a name stands for (`--content text`), case-insensitively.
+pub fn parse_content(name: &str) -> Option<ContentHint> {
+    match name.to_ascii_lowercase().as_str() {
+        "general" => Some(ContentHint::General),
+        "text" => Some(ContentHint::Text),
+        "game" => Some(ContentHint::Game),
+        "video" => Some(ContentHint::Video),
+        _ => None,
+    }
+}
+
+impl WindowSource for WithContent {
+    fn list_windows(&self) -> Vec<WindowInfo> {
+        let mut windows = self.inner.list_windows();
+        for window in &mut windows {
+            window.content = self.content;
+        }
+        windows
+    }
+
+    fn encoders(&self) -> Vec<VideoCodec> {
+        self.inner.encoders()
+    }
+
+    fn backends(&self) -> Vec<BackendKind> {
+        self.inner.backends()
+    }
+
+    fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
+        self.inner.open(window, codec)
+    }
+
+    fn open_pictures(&self, window: WindowId) -> Option<Result<Box<dyn PictureSource>, String>> {
+        self.inner.open_pictures(window)
+    }
+
+    fn open_audio(
+        &self,
+        window: WindowId,
+    ) -> Option<Result<Box<dyn windowcast_host::audio::AudioSource>, String>> {
+        self.inner.open_audio(window)
+    }
+
+    fn microphone(
+        &self,
+    ) -> Option<Result<Box<dyn windowcast_host::audio::MicrophoneSink>, String>> {
+        self.inner.microphone()
+    }
 }
 
 /// The test pattern with a sound: a 440 Hz tone, generated (no capture),
@@ -246,4 +310,28 @@ fn draw(frame: u64) -> Vec<u8> {
         }
     }
     yuv
+}
+
+#[cfg(test)]
+mod content_tests {
+    use super::*;
+
+    #[test]
+    fn with_content_overrides_every_windows_hint() {
+        let source = WithContent::new(Arc::new(TestPatternSource), ContentHint::Text);
+        let windows = source.list_windows();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].content, ContentHint::Text);
+        assert!(
+            source.open_pictures(WINDOW).is_some(),
+            "pictures still come from the pattern"
+        );
+    }
+
+    #[test]
+    fn content_names_parse() {
+        assert_eq!(parse_content("text"), Some(ContentHint::Text));
+        assert_eq!(parse_content("Game"), Some(ContentHint::Game));
+        assert_eq!(parse_content("nope"), None);
+    }
 }
