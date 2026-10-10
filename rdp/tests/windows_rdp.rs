@@ -17,6 +17,13 @@ fn our_client_logs_in_to_windows_remote_desktop() {
         println!("skipped: set WINDOWCAST_TEST_WINDOWS_RDP_USER and _PASSWORD");
         return;
     };
+    // IronRDP's and sspi's own account of the login, for when it fails.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,ironrdp=debug,sspi=debug".into()),
+        )
+        .try_init();
     let stream = connect(&ClientConfig {
         address: "127.0.0.1:3389".parse().unwrap(),
         server_name: "localhost".into(),

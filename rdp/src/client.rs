@@ -148,8 +148,17 @@ fn connector_config(config: &ClientConfig) -> ironrdp_connector::Config {
     }
 }
 
-fn connect_err(e: impl std::fmt::Display) -> RdpError {
-    RdpError::Connect(e.to_string())
+/// The error and every cause under it: IronRDP's errors carry the useful
+/// part (what the host or the login said) as their source.
+fn connect_err(e: impl std::error::Error) -> RdpError {
+    let mut text = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    RdpError::Connect(text)
 }
 
 /// Logs in and starts the session.

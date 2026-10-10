@@ -30,4 +30,5 @@ sha2 = "0.10"
 
 [dev-dependencies]
 windowcast-cli-tools = { path = "../cli-tools" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
