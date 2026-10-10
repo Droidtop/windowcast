@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.26.0] - 2026-10-10
 
 ### Added
 - Protocol 10, carrier generations (docs/BACKENDS.md, "One window, any carrier"; Droidtop/tracker#457): a window's stream may run on several carriers at once while it switches. `StreamStartRequest` and `StreamStartResponse` name a `generation`; `CarrierStop` stops one carrier; the host sends `StreamStopped` once when the stream ends, and the transport `TrackEnded` when a window's video track ends.
