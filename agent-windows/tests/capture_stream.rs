@@ -175,12 +175,12 @@ fn stream_with(
     session
         .start_window(WindowId(window), &[VideoCodec::H264])
         .unwrap();
-    // The window's size can come just before the start (the first frame
-    // races the answer).
+    // The window's size and the host's first quality report can come just
+    // before the start (the first frame races the answer).
     loop {
         match session.next_event(WAIT) {
             Some(Event::StreamStarted { .. }) => break,
-            Some(Event::WindowResized { .. }) => {}
+            Some(Event::WindowResized { .. } | Event::StreamQuality { .. }) => {}
             other => panic!("{choice:?}: expected the stream to start, got {other:?}"),
         }
     }
