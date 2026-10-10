@@ -6,7 +6,8 @@
 //! each stream's backend and codec, attaching window tracks and feeding
 //! them frames, and keyframe requests. A host application watches and
 //! steers a running host through [`HostControl`]: the PIN, the trusted
-//! clients, who is connected and what each stream is doing.
+//! clients, account sign-in and the devices registered by it
+//! (docs/ACCOUNTS.md), who is connected and what each stream is doing.
 
 pub mod audio;
 pub mod gamepad;
@@ -23,15 +24,18 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use windowcast_accounts::{Account, Accounts, Decision, Registration, Registrations};
 use windowcast_identity::{Identity, PeerId, TrustStore};
 use windowcast_protocol::selection;
+use windowcast_protocol::{AccountCredential, OidcProviderInfo, SignInMethod};
 use windowcast_protocol::{
     BackendKind, ControlMessage, InputEvent, StreamBackend, StreamLimits, StreamOptions,
     StreamQuality, StreamTarget, VideoCodec, WindowId, WindowInfo,
 };
 use windowcast_transport::remote::RemotePeers;
 use windowcast_transport::{
-    accept, is_keyframe, AudioTrack, HostCredential, Session, TransportError, WindowTrack,
+    accept, is_keyframe, AccountGate, AudioTrack, HostCredential, Session, TransportError,
+    WindowTrack,
 };
 
 /// The default signaling address.
@@ -43,6 +47,12 @@ pub const DEFAULT_LISTEN: &str = "0.0.0.0:47100";
 /// space (three guesses a minute at most).
 const MAX_PAIRING_FAILURES: u32 = 3;
 const PAIRING_LOCKOUT: Duration = Duration::from_secs(60);
+
+/// Failed account sign-ins within [`SIGN_IN_LOCKOUT`] before the host
+/// refuses every sign-in for that long: a password guesser gets a handful
+/// of tries a minute, whoever they try.
+const MAX_SIGN_IN_FAILURES: u32 = 5;
+const SIGN_IN_LOCKOUT: Duration = Duration::from_secs(60);
 
 /// One encoded access unit from a [`FrameSource`].
 pub struct EncodedFrame {
@@ -270,6 +280,8 @@ pub struct ClientStatus {
     pub peer: PeerId,
     pub address: String,
     pub since: Instant,
+    /// The account the device acts for; `None` for a PIN-paired device.
+    pub account: Option<Account>,
 }
 
 /// One live stream and its counters since it started. Rates are the
@@ -315,6 +327,87 @@ pub struct HostControl {
     remote_peers: RemotePeers,
     /// This host's own; `None` if its certificate could not be made.
     discovery_id: Option<String>,
+    /// Account sign-in; `None` while it is off.
+    accounts: std::sync::RwLock<Option<Arc<Accounts>>>,
+    registrations: std::sync::Mutex<Registrations>,
+    data_dir: PathBuf,
+    sign_ins: Arc<SignInThrottle>,
+}
+
+/// Counts failed sign-ins and shuts sign-in for a while after too many.
+#[derive(Default)]
+struct SignInThrottle {
+    state: std::sync::Mutex<(u32, Option<Instant>, Option<Instant>)>,
+}
+
+impl SignInThrottle {
+    fn locked(&self) -> bool {
+        let state = self.state.lock().expect("sign-in throttle");
+        state.2.is_some_and(|until| Instant::now() < until)
+    }
+
+    fn failed(&self) {
+        let mut state = self.state.lock().expect("sign-in throttle");
+        let now = Instant::now();
+        let (count, since, until) = &mut *state;
+        if since.is_none_or(|since| now.duration_since(since) > SIGN_IN_LOCKOUT) {
+            *count = 0;
+            *since = Some(now);
+        }
+        *count += 1;
+        if *count >= MAX_SIGN_IN_FAILURES {
+            eprintln!(
+                "sign-in paused for {} s after {count} failures",
+                SIGN_IN_LOCKOUT.as_secs()
+            );
+            *until = Some(now + SIGN_IN_LOCKOUT);
+            *count = 0;
+            *since = None;
+        }
+    }
+}
+
+/// The host's account checks as signaling asks for them: blocking checks
+/// (PAM, LDAP, an OIDC provider's keys) on a blocking thread, then the
+/// host's policy, with every failure counted.
+struct Gate {
+    accounts: Arc<Accounts>,
+    throttle: Arc<SignInThrottle>,
+}
+
+#[async_trait::async_trait]
+impl AccountGate for Gate {
+    fn offer(&self) -> (Vec<SignInMethod>, Vec<OidcProviderInfo>, Option<String>) {
+        self.accounts.offer()
+    }
+
+    async fn check(&self, client: PeerId, credential: AccountCredential) -> Option<Account> {
+        if self.throttle.locked() {
+            eprintln!("{client}: sign-in refused while paused");
+            return None;
+        }
+        let accounts = Arc::clone(&self.accounts);
+        let checked = tokio::task::spawn_blocking(move || {
+            let account = accounts
+                .check(&credential, &client)
+                .map_err(|e| e.to_string())?;
+            if accounts.admits(Some(&account)) {
+                Ok(account)
+            } else {
+                Err(format!("policy does not admit {}", account.name))
+            }
+        })
+        .await;
+        match checked {
+            Ok(Ok(account)) => Some(account),
+            Ok(Err(reason)) => {
+                eprintln!("{client}: sign-in refused: {reason}");
+                self.throttle.failed();
+                None
+            }
+            Err(_) => None,
+        }
+    }
 }
 
 impl HostControl {
@@ -338,7 +431,132 @@ impl HostControl {
             serial: AtomicU64::new(1),
             remote_peers: RemotePeers::load(&config.data_dir.join("remote-peers.json")),
             discovery_id,
+            accounts: std::sync::RwLock::new(None),
+            registrations: std::sync::Mutex::new(Registrations::load(
+                &config.data_dir.join("agent-registrations.json"),
+            )),
+            data_dir: config.data_dir.clone(),
+            sign_ins: Arc::default(),
         }))
+    }
+
+    /// Turns account sign-in on with `config` (local accounts kept in the
+    /// host's data folder), or off with `None`. Devices registered earlier
+    /// stay registered, and connect while sign-in is on.
+    pub fn set_accounts(&self, config: Option<windowcast_accounts::Config>) -> std::io::Result<()> {
+        let accounts = match config {
+            Some(config) => Some(Arc::new(
+                Accounts::open(config, &self.data_dir).map_err(std::io::Error::other)?,
+            )),
+            None => None,
+        };
+        *self.accounts.write().expect("accounts") = accounts;
+        Ok(())
+    }
+
+    /// The host's accounts while sign-in is on: its local accounts, its
+    /// configuration and policy.
+    pub fn accounts(&self) -> Option<Arc<Accounts>> {
+        self.accounts.read().expect("accounts").clone()
+    }
+
+    /// The devices registered by account sign-ins, unexpired.
+    pub fn registered(&self) -> Vec<(PeerId, Registration)> {
+        self.registrations
+            .lock()
+            .expect("registrations")
+            .active()
+            .map(|(peer, registration)| (peer, registration.clone()))
+            .collect()
+    }
+
+    /// Forgets a registered device: it has to sign in again.
+    pub fn unregister(&self, peer: &PeerId) -> std::io::Result<()> {
+        self.registrations
+            .lock()
+            .expect("registrations")
+            .remove(peer)
+    }
+
+    /// The account a device acts for: its registration, while sign-in is
+    /// on and the account still exists. `None` for a PIN-paired device (or
+    /// one whose account is gone). The command stream's authorizer
+    /// (Droidtop/tracker#444) asks this for a session's peer.
+    pub fn account_of(&self, peer: &PeerId) -> Option<Account> {
+        let accounts = self.accounts()?;
+        let account = self
+            .registrations
+            .lock()
+            .expect("registrations")
+            .get(peer)?
+            .account
+            .clone();
+        (account.provider != "local" || accounts.local().active(&account.name)).then_some(account)
+    }
+
+    /// What policy lets the device `peer` do on this host.
+    pub fn decision(&self, peer: &PeerId) -> Decision {
+        match self.accounts() {
+            Some(accounts) => accounts.decide(self.account_of(peer).as_ref()),
+            None => windowcast_accounts::Policy::default().decide(None, ""),
+        }
+    }
+
+    /// The devices that may resume: pinned by PIN pairing, or registered
+    /// to an account that still exists while sign-in is on; either way
+    /// admitted by the host's policy.
+    async fn admitted(&self) -> TrustStore {
+        let mut admitted = TrustStore::default();
+        let pinned: Vec<PeerId> = self.trust.lock().await.peers().copied().collect();
+        let registered: Vec<PeerId> = match self.accounts() {
+            Some(_) => self
+                .registered()
+                .into_iter()
+                .map(|(peer, _)| peer)
+                .collect(),
+            None => Vec::new(),
+        };
+        for peer in pinned {
+            if self.decision(&peer).allow {
+                admitted.pin(peer);
+            }
+        }
+        // A registration whose account is gone (a revoked local account)
+        // lets nothing in.
+        for peer in registered {
+            if self.account_of(&peer).is_some() && self.decision(&peer).allow {
+                admitted.pin(peer);
+            }
+        }
+        admitted
+    }
+
+    /// Signs an SSH user certificate for the account `peer` acts for
+    /// (docs/ACCOUNTS.md, "SSH and the command stream").
+    fn ssh_certificate(&self, peer: &PeerId, public_key: &str) -> Result<String, String> {
+        let accounts = self.accounts().ok_or("sign-in is off on this host")?;
+        let config = accounts.config();
+        let ca = config
+            .ssh_ca
+            .as_deref()
+            .ok_or("this host signs no SSH certificates")?;
+        let account = self
+            .account_of(peer)
+            .ok_or("only a device signed in with an account gets an SSH certificate")?;
+        if self.decision(peer).commands == Some(false) {
+            return Err("policy does not allow commands".into());
+        }
+        let authority = windowcast_accounts::ssh::CertificateAuthority::load_or_generate(
+            &self.data_dir.join(ca),
+        )
+        .map_err(|e| e.to_string())?;
+        authority
+            .issue(
+                public_key,
+                &account,
+                Duration::from_secs(u64::from(config.ssh_certificate_minutes) * 60),
+            )
+            .map_err(|e| e.to_string())
     }
 
     pub fn peer_id(&self) -> PeerId {
@@ -582,12 +800,17 @@ impl Host {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
         let control = &self.control;
-        let trusted = control.trust.lock().await.clone();
+        let trusted = control.admitted().await;
         let pin = if pairing {
             control.pairing.current().await
         } else {
             None
         };
+        // Sign-in, like pairing, only on the LAN.
+        let gate = control.accounts().filter(|_| pairing).map(|accounts| Gate {
+            accounts,
+            throttle: Arc::clone(&control.sign_ins),
+        });
         let established = accept(
             stream,
             session,
@@ -595,6 +818,7 @@ impl Host {
             HostCredential {
                 pin: pin.as_deref(),
                 trusted: &trusted,
+                accounts: gate.as_ref().map(|g| g as &dyn AccountGate),
             },
         )
         .await?;
@@ -604,9 +828,34 @@ impl Host {
             control.pairing.paired().await;
             self.pin_client(peer).await;
             println!("paired with {peer}; pairing is now closed");
+        } else if let Some(account) = &established.account {
+            let days = control
+                .accounts()
+                .map_or(0, |a| a.config().registration_days);
+            if let Err(e) = control
+                .registrations
+                .lock()
+                .expect("registrations")
+                .register(peer, account.clone(), days)
+            {
+                eprintln!("could not save the device registrations: {e}");
+            }
+            println!(
+                "{peer} signed in as {} ({} via {})",
+                account.name,
+                account.method.name(),
+                account.provider
+            );
         } else {
             println!("{peer} connected");
         }
+        // A sign-in that registers nothing (registration_days 0) still
+        // acts for its account on this connection.
+        let account = established.account.or_else(|| control.account_of(&peer));
+        let decision = match control.accounts() {
+            Some(accounts) => accounts.decide(account.as_ref()),
+            None => control.decision(&peer),
+        };
         let serial = control.next_serial();
         control.clients.lock().expect("clients").insert(
             serial,
@@ -614,6 +863,7 @@ impl Host {
                 peer,
                 address,
                 since: Instant::now(),
+                account: account.clone(),
             },
         );
         let _listed = Listed {
@@ -645,6 +895,7 @@ impl Host {
         }
         loop {
             match session.recv_control().await? {
+                ControlMessage::Input(_) if decision.input == Some(false) => {}
                 ControlMessage::Input(event) => {
                     // Only windows this session streams take input; the
                     // client cannot reach any other window on the host.
@@ -663,9 +914,10 @@ impl Host {
                 }
                 ControlMessage::ListWindowsRequest => {
                     let source = Arc::clone(&self.source);
-                    let windows = tokio::task::spawn_blocking(move || source.list_windows())
+                    let mut windows = tokio::task::spawn_blocking(move || source.list_windows())
                         .await
                         .unwrap_or_default();
+                    windows.retain(|w| decision.window_allowed(&w.app_id, &w.title));
                     session
                         .send_control(&ControlMessage::ListWindowsResponse(windows))
                         .await?;
@@ -677,6 +929,15 @@ impl Host {
                     let response = match self.start(&session, peer, window, &options, &rtt).await {
                         Ok(started) => {
                             streams.insert(window, started.stream);
+                    let allowed = self.window_allowed(&decision, window).await;
+                    let started = if allowed {
+                        self.start(&session, peer, window, &options, &rtt).await
+                    } else {
+                        Err("not allowed for this account".to_owned())
+                    };
+                    let response = match started {
+                        Ok((stream, track, backend)) => {
+                            streams.insert(window, stream);
                             ControlMessage::StreamStartResponse {
                                 target: StreamTarget::Window(window),
                                 accepted: true,
@@ -710,6 +971,17 @@ impl Host {
                             .await?;
                     }
                 }
+                ControlMessage::SshCertificateRequest { public_key } => {
+                    let control = Arc::clone(&self.control);
+                    let issued = tokio::task::spawn_blocking(move || {
+                        control.ssh_certificate(&peer, &public_key)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    session
+                        .send_control(&ControlMessage::SshCertificateResponse(issued))
+                        .await?;
+                }
                 ControlMessage::Ping => session.send_control(&ControlMessage::Pong).await?,
                 ControlMessage::Pong => rtt.answered(),
                 ControlMessage::Rendezvous { discovery_id } => {
@@ -725,6 +997,19 @@ impl Host {
                 other => tracing::debug!("ignoring {other:?}"),
             }
         }
+    }
+
+    /// Whether policy lets this session stream `window`.
+    async fn window_allowed(&self, decision: &Decision, window: WindowId) -> bool {
+        if decision.windows.is_empty() {
+            return true;
+        }
+        let source = Arc::clone(&self.source);
+        tokio::task::spawn_blocking(move || source.list_windows())
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|w| w.id == window && decision.window_allowed(&w.app_id, &w.title))
     }
 
     async fn pin_client(&self, peer: PeerId) {

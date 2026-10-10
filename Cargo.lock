@@ -6960,6 +6960,7 @@ dependencies = [
 name = "windowcast-host"
 version = "0.20.0"
 dependencies = [
+ "async-trait",
  "audiopus_sys",
  "bytes",
  "openh264",
@@ -6967,6 +6968,7 @@ dependencies = [
  "opus",
  "tokio",
  "tracing",
+ "windowcast-accounts",
  "windowcast-identity",
  "windowcast-pairing",
  "windowcast-protocol",

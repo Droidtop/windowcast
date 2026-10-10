@@ -187,7 +187,7 @@ async fn announce_and_punch(
         }
 
         // Look up the trusted clients that told us their discovery IDs.
-        let trusted: Vec<PeerId> = control.trust.lock().await.peers().copied().collect();
+        let trusted: Vec<PeerId> = control.admitted().await.peers().copied().collect();
         for (peer_hex, id) in control.remote_peers.all() {
             if !trusted.iter().any(|p| p.to_hex() == peer_hex) {
                 continue;

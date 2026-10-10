@@ -10,6 +10,8 @@ windowcast-identity = { path = "../identity" }
 windowcast-pairing = { path = "../pairing" }
 windowcast-transport = { path = "../transport" }
 windowcast-rendezvous = { path = "../rendezvous" }
+windowcast-accounts = { path = "../accounts" }
+async-trait = "0.1"
 tokio = { workspace = true, features = ["net"] }
 tracing.workspace = true
 bytes = "1"
@@ -21,3 +23,12 @@ openh264-sys2 = { version = "0.9", default-features = false }
 # Opus for window audio (BSD-3-Clause), libopus built from source.
 opus = "0.3"
 audiopus_sys = { version = "0.2", features = ["static"] }
+
+[features]
+default = ["ldap", "pam"]
+# Account sign-in sources (docs/ACCOUNTS.md): LDAP and Active Directory,
+# the OS's accounts through PAM (Linux; links libpam), and Kerberos (needs
+# the krb5 development headers on Unix).
+ldap = ["windowcast-accounts/ldap"]
+pam = ["windowcast-accounts/pam"]
+kerberos = ["windowcast-accounts/kerberos"]
