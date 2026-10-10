@@ -407,25 +407,68 @@ pub fn window_orders(frame: &[u8]) -> Vec<WindowOrder> {
             at: 0,
         };
         let Some(count) = reader.u16() else { continue };
-        for _ in 0..count {
-            let start = reader.at;
-            let Some(control) = reader.u8() else { break };
-            // An alternate secondary order (class 0b10) of type window (0x0B).
-            if control & 0x03 != 0x02 || control >> 2 != 0x0B {
-                break;
-            }
-            let Some(size) = reader.u16() else { break };
-            let end = start + usize::from(size);
-            if let Some(order) = window_order(&mut reader) {
-                out.push(order);
-            }
-            if end > reader.data.len() {
-                break;
-            }
-            reader.at = end;
-        }
+        orders(&mut reader, count, &mut out);
     }
     out
+}
+
+/// The window orders in a slow-path frame, when it is an Orders update
+/// (TS_UPDATE_ORDERS: a Share Data PDU of type Update, update type 0),
+/// which IronRDP cannot decode; `None` for any other frame.
+pub fn slow_path_window_orders(frame: &[u8]) -> Option<Vec<WindowOrder>> {
+    let X224(indication) =
+        ironrdp_core::decode::<X224<ironrdp_pdu::mcs::SendDataIndication<'_>>>(frame).ok()?;
+    let mut r = Reader {
+        data: indication.user_data.as_ref(),
+        at: 0,
+    };
+    // Share Control Header: total length, PDU type (data is 7), source.
+    r.u16()?;
+    if r.u16()? & 0x0f != 0x07 {
+        return None;
+    }
+    r.u16()?;
+    // Share Data Header: share ID, pad, stream, length, type (update is
+    // 2), compression type, compressed length.
+    r.take(8)?;
+    let pdu_type = r.u8()?;
+    let compression = r.u8()?;
+    r.u16()?;
+    if pdu_type != 0x02 || compression & 0x20 != 0 {
+        return None;
+    }
+    // TS_UPDATE_ORDERS: update type 0, pad, count, pad, orders.
+    if r.u16()? != 0x0000 {
+        return None;
+    }
+    r.u16()?;
+    let count = r.u16()?;
+    r.u16()?;
+    let mut out = Vec::new();
+    orders(&mut r, count, &mut out);
+    Some(out)
+}
+
+/// Reads `count` orders, keeping the window ones, until one that is not a
+/// windowing order (its size cannot be known).
+fn orders(reader: &mut Reader<'_>, count: u16, out: &mut Vec<WindowOrder>) {
+    for _ in 0..count {
+        let start = reader.at;
+        let Some(control) = reader.u8() else { break };
+        // An alternate secondary order (class 0b10) of type window (0x0B).
+        if control & 0x03 != 0x02 || control >> 2 != 0x0B {
+            break;
+        }
+        let Some(size) = reader.u16() else { break };
+        let end = start + usize::from(size);
+        if let Some(order) = window_order(reader) {
+            out.push(order);
+        }
+        if end > reader.data.len() {
+            break;
+        }
+        reader.at = end;
+    }
 }
 
 fn window_order(r: &mut Reader<'_>) -> Option<WindowOrder> {

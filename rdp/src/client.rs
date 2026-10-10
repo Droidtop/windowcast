@@ -25,7 +25,8 @@ use ironrdp_session::{ActiveStageBuilder, ActiveStageOutput};
 use windowcast_protocol::{InputEvent, PointerButton};
 
 use crate::remoteapp::{
-    window_orders, RailChannel, RailStatus, RailTap, RemoteApp, RemoteWindow, Windows,
+    slow_path_window_orders, window_orders, RailChannel, RailStatus, RailTap, RemoteApp,
+    RemoteWindow, Windows,
 };
 use crate::tls::{self, Pinned};
 use crate::RdpError;
@@ -351,8 +352,18 @@ fn run(
             Err(e) => return Err(e.into()),
         };
         let mut moved = false;
-        if remote_app && action == ironrdp_pdu::Action::FastPath {
-            for order in window_orders(&payload) {
+        // Slow-path Orders updates are only window orders here, and IronRDP
+        // cannot decode them: they stop at us.
+        let slow_orders = (remote_app && action == ironrdp_pdu::Action::X224)
+            .then(|| slow_path_window_orders(&payload))
+            .flatten();
+        if remote_app {
+            let orders = match (&slow_orders, action) {
+                (Some(orders), _) => orders.clone(),
+                (None, ironrdp_pdu::Action::FastPath) => window_orders(&payload),
+                _ => Vec::new(),
+            };
+            for order in orders {
                 tracing::debug!(?order, "RemoteApp: window order");
                 windows.apply(order);
                 moved = true;
@@ -361,9 +372,25 @@ fn run(
                 area = windows.main().map(|w| Area::of(w, desktop));
             }
         }
-        let mut outputs = stage
-            .process(&mut image, action, &payload)
-            .map_err(session)?;
+        let mut outputs = if slow_orders.is_some() {
+            Vec::new()
+        } else {
+            match stage.process(&mut image, action, &payload) {
+                Ok(outputs) => outputs,
+                // A RemoteApp server sends slow-path PDUs IronRDP does not
+                // know; one it cannot read is skipped rather than ending the
+                // session.
+                Err(e) if remote_app && action == ironrdp_pdu::Action::X224 => {
+                    tracing::debug!(
+                        error = %e,
+                        head = ?&payload[..payload.len().min(32)],
+                        "RemoteApp: skipped a PDU IronRDP cannot read"
+                    );
+                    Vec::new()
+                }
+                Err(e) => return Err(session(e)),
+            }
+        };
         if moved {
             // The window moved or appeared: hand out its picture again.
             outputs.push(ActiveStageOutput::GraphicsUpdate(
