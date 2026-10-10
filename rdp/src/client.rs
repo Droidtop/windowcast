@@ -53,7 +53,7 @@ pub struct RgbaPicture {
 
 /// A connected RDP session.
 pub struct RdpStream {
-    pub pictures: Receiver<RgbaPicture>,
+    pictures: std::sync::Mutex<Receiver<RgbaPicture>>,
     input: Sender<InputEvent>,
     stop: Arc<AtomicBool>,
     /// Set once the session has ended (the host closed it, or it failed).
@@ -65,6 +65,14 @@ pub struct RdpStream {
 }
 
 impl RdpStream {
+    /// The host's picture after its next change, waiting up to `timeout`.
+    pub fn next_picture(&self, timeout: Duration) -> Result<RgbaPicture, mpsc::RecvTimeoutError> {
+        self.pictures
+            .lock()
+            .expect("pictures")
+            .recv_timeout(timeout)
+    }
+
     /// Sends input. Pointer positions are fractions of the desktop, as
     /// windowcast's are; the window an event names is ignored (the
     /// desktop is the one picture).
@@ -231,7 +239,7 @@ pub fn connect(config: &ClientConfig) -> Result<RdpStream, RdpError> {
         });
     }
     Ok(RdpStream {
-        pictures,
+        pictures: std::sync::Mutex::new(pictures),
         input,
         stop,
         ended,

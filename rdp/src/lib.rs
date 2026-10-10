@@ -10,9 +10,11 @@
 //! - [`tls`]: the host's TLS identity, pinned by fingerprint.
 
 pub mod client;
+#[cfg(feature = "host")]
 pub mod host;
 pub mod tls;
 
+#[cfg(feature = "host")]
 pub use ironrdp_server::Credentials;
 
 #[derive(Debug, thiserror::Error)]

@@ -9,11 +9,13 @@ use sha2::{Digest, Sha256};
 
 use crate::RdpError;
 
+#[cfg(feature = "host")]
 pub struct HostIdentity {
     pub cert_der: Vec<u8>,
     key_der: Vec<u8>,
 }
 
+#[cfg(feature = "host")]
 impl HostIdentity {
     pub fn generate(name: &str) -> Result<Self, RdpError> {
         let cert = |e: rcgen::Error| RdpError::Certificate(e.to_string());

@@ -65,6 +65,17 @@ async fn main() {
         pairing,
         data_dir,
     };
+    // Windows over RDP too, for clients that ask (sharp text).
+    let source = match windowcast_rdp::host::WithRdp::new(
+        Arc::new(source),
+        std::net::IpAddr::from([0, 0, 0, 0]),
+    ) {
+        Ok(source) => source,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     if let Err(e) = windowcast_host::run(config, Arc::new(source)).await {
         eprintln!("host stopped: {e}");
         std::process::exit(1);

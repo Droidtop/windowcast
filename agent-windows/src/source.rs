@@ -171,6 +171,23 @@ impl WindowSource for WindowsSource {
         Some(crate::gamepad::WindowsPads::open().map(|pads| Box::new(pads) as _))
     }
 
+    fn open_pictures(
+        &self,
+        window: WindowId,
+    ) -> Option<Result<Box<dyn windowcast_host::PictureSource>, String>> {
+        if let Err(e) = check_window(window) {
+            return Some(Err(e));
+        }
+        let fps = self.current.read().expect("options").options.fps.max(1);
+        Some(Ok(Box::new(WindowPictures {
+            window,
+            capture: None,
+            frame_time: frame_time(fps),
+            next_at: Instant::now(),
+            last_sent: None,
+        })))
+    }
+
     fn microphone(
         &self,
     ) -> Option<Result<Box<dyn windowcast_host::audio::MicrophoneSink>, String>> {
@@ -299,6 +316,75 @@ unsafe impl Send for WindowStream {}
 /// A static window still gets a frame this often, so a client that just
 /// joined or lost a packet is never left without a picture.
 const REFRESH: Duration = Duration::from_secs(1);
+
+/// A window's pictures as captured, read back as BGRA, for backends that
+/// encode their own way: one when the window changes (and once a second
+/// regardless), never faster than the frame rate. The capture starts on
+/// the thread that asks for pictures, as Windows.Graphics.Capture wants.
+struct WindowPictures {
+    window: WindowId,
+    capture: Option<Capture>,
+    frame_time: Duration,
+    next_at: Instant,
+    last_sent: Option<Instant>,
+}
+
+// The capture is created on the thread that asks for pictures, after the
+// move, in the multithreaded apartment.
+unsafe impl Send for WindowPictures {}
+
+impl windowcast_host::PictureSource for WindowPictures {
+    fn next_picture(&mut self) -> Option<windowcast_host::Picture> {
+        capture::init_thread();
+        let hwnd = windows_list::hwnd(self.window);
+        if self.capture.is_none() {
+            match Capture::new(hwnd) {
+                Ok(mut capture) => {
+                    capture.set_bgra_output();
+                    self.capture = Some(capture);
+                }
+                Err(e) => {
+                    eprintln!("capture of window {} failed: {e}", self.window.0);
+                    return None;
+                }
+            }
+        }
+        let capture = self.capture.as_mut().expect("capture");
+        loop {
+            if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+                return None;
+            }
+            std::thread::sleep(self.next_at.saturating_duration_since(Instant::now()));
+            let changed = match capture.poll(self.frame_time) {
+                Ok(changed) => changed,
+                Err(e) => {
+                    eprintln!("capture of window {} stopped: {e}", self.window.0);
+                    return None;
+                }
+            };
+            let due = self.last_sent.is_none_or(|sent| sent.elapsed() >= REFRESH);
+            if !(changed || due) {
+                continue;
+            }
+            let Some(convert::Picture::Bgra(picture)) = capture.picture() else {
+                continue;
+            };
+            let row = picture.width * 4;
+            let mut data = Vec::with_capacity(row * picture.height);
+            for y in 0..picture.height {
+                data.extend_from_slice(&picture.data[y * picture.stride..][..row]);
+            }
+            self.next_at = Instant::now() + self.frame_time;
+            self.last_sent = Some(Instant::now());
+            return Some(windowcast_host::Picture {
+                width: picture.width as u32,
+                height: picture.height as u32,
+                stride: row,
+                data,
+            });
+        }
+    }
+}
 
 /// The frame rate in force: the setting, or less under adaptive quality.
 fn fps(options: &Options, quality: &Quality) -> u32 {

@@ -7,9 +7,11 @@
 //!
 //! Every connection must log in with the [`Credentials`] the host set for
 //! this window (NLA, over TLS with the host's [`HostIdentity`]).
+//!
+//! [`WithRdp`] adds this to any host as the `Rdp` backend of its sessions.
 
 use std::num::{NonZeroU16, NonZeroUsize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
@@ -17,9 +19,12 @@ use ironrdp_server::{
     BitmapUpdate, Credentials, DesktopSize, DisplayUpdate, KeyboardEvent, MouseEvent, PixelFormat,
     RdpServer, RdpServerDisplay, RdpServerDisplayUpdates, RdpServerInputHandler,
 };
+use rand_core::RngCore;
 use tokio::net::TcpListener;
-use windowcast_host::{Picture, WindowSource};
-use windowcast_protocol::{InputEvent, PointerButton, WindowId};
+use windowcast_host::{FrameSource, Handoff, Picture, PictureSource, WindowSource};
+use windowcast_protocol::{
+    BackendKind, HandoffTarget, InputEvent, PointerButton, VideoCodec, WindowId, WindowInfo,
+};
 
 use crate::tls::HostIdentity;
 use crate::RdpError;
@@ -33,17 +38,22 @@ pub struct HostStats {
     pub pictures: AtomicU64,
 }
 
-/// Serves `window` to RDP clients on `listener`, one connection at a time,
-/// until the listener fails. Blocks: IronRDP's server runs on a
-/// single-threaded runtime of its own, so give this a thread.
-pub fn serve_window(
-    listener: std::net::TcpListener,
-    source: Arc<dyn WindowSource>,
-    window: WindowId,
-    credentials: Credentials,
-    identity: &HostIdentity,
-    stats: Arc<HostStats>,
-) -> Result<(), RdpError> {
+/// One window's RDP server: what it shows, who may log in, and how to
+/// stop it.
+pub struct WindowServer {
+    pub source: Arc<dyn WindowSource>,
+    pub window: WindowId,
+    pub credentials: Credentials,
+    pub identity: Arc<HostIdentity>,
+    pub stats: Arc<HostStats>,
+    /// Set to stop serving; a connected client is dropped.
+    pub stop: Arc<AtomicBool>,
+}
+
+/// Serves the window to RDP clients on `listener`, one connection at a
+/// time, until stopped or the listener fails. Blocks: IronRDP's server runs
+/// on a single-threaded runtime of its own, so give this a thread.
+pub fn serve_window(listener: std::net::TcpListener, server: WindowServer) -> Result<(), RdpError> {
     listener.set_nonblocking(true)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -51,18 +61,26 @@ pub fn serve_window(
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
         let listener = TcpListener::from_std(listener)?;
-        serve(listener, source, window, credentials, identity, stats).await
+        serve(listener, server).await
     })
 }
 
-async fn serve(
-    listener: TcpListener,
-    source: Arc<dyn WindowSource>,
-    window: WindowId,
-    credentials: Credentials,
-    identity: &HostIdentity,
-    stats: Arc<HostStats>,
-) -> Result<(), RdpError> {
+/// Resolves once `stop` is set.
+async fn stopped(stop: &AtomicBool) {
+    while !stop.load(Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn serve(listener: TcpListener, config: WindowServer) -> Result<(), RdpError> {
+    let WindowServer {
+        source,
+        window,
+        credentials,
+        identity,
+        stats,
+        stop,
+    } = config;
     let size = source
         .list_windows()
         .into_iter()
@@ -95,12 +113,163 @@ async fn serve(
         .build();
     server.set_credentials(Some(credentials));
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let (stream, peer) = tokio::select! {
+            accepted = listener.accept() => accepted?,
+            () = stopped(&stop) => return Ok(()),
+        };
         let _ = stream.set_nodelay(true);
         eprintln!("rdp: {peer} connected to window {}", window.0);
-        match server.run_connection(stream).await {
-            Ok(()) => eprintln!("rdp: {peer} left"),
-            Err(e) => eprintln!("rdp: {peer}: {e:#}"),
+        tokio::select! {
+            result = server.run_connection(stream) => match result {
+                Ok(()) => eprintln!("rdp: {peer} left"),
+                Err(e) => eprintln!("rdp: {peer}: {e:#}"),
+            },
+            () = stopped(&stop) => return Ok(()),
+        }
+    }
+}
+
+/// Any host's windows, also served over RDP: a [`WindowSource`] that
+/// passes everything to the host's own and adds the `Rdp` backend, starting
+/// an RDP server for a window when a client's session asks for one (on a
+/// port of its own, with a login made for that one stream, the certificate
+/// pinned through the session).
+pub struct WithRdp {
+    inner: Arc<dyn WindowSource>,
+    identity: Arc<HostIdentity>,
+    /// Where the RDP servers listen; the port is picked per stream.
+    bind: std::net::IpAddr,
+    /// Whether RDP is offered (a host setting); on unless switched off.
+    enabled: AtomicBool,
+}
+
+impl WithRdp {
+    pub fn new(inner: Arc<dyn WindowSource>, bind: std::net::IpAddr) -> Result<Self, RdpError> {
+        Ok(WithRdp {
+            inner,
+            identity: Arc::new(HostIdentity::generate("windowcast")?),
+            bind,
+            enabled: AtomicBool::new(true),
+        })
+    }
+
+    /// Offers RDP to clients from now on, or stops offering it (streams
+    /// already on RDP keep going until they stop).
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, Ordering::SeqCst);
+    }
+
+    fn start(&self, window: WindowId) -> Result<Handoff, String> {
+        // Raw pictures first, so a host without them refuses here rather
+        // than after the client has logged in.
+        match self.inner.open_pictures(window) {
+            Some(Ok(_)) => {}
+            Some(Err(e)) => return Err(e),
+            None => return Err("this host cannot hand out raw pictures for RDP".into()),
+        }
+        let listener = std::net::TcpListener::bind((self.bind, 0)).map_err(|e| e.to_string())?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        let mut secret = [0u8; 18];
+        rand_core::OsRng.fill_bytes(&mut secret);
+        let password: String = secret.iter().map(|b| format!("{b:02x}")).collect();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = WindowServer {
+            source: Arc::clone(&self.inner),
+            window,
+            credentials: Credentials {
+                username: "windowcast".into(),
+                password: password.clone(),
+                domain: None,
+            },
+            identity: Arc::clone(&self.identity),
+            stats: Arc::new(HostStats::default()),
+            stop: Arc::clone(&stop),
+        };
+        std::thread::spawn(move || {
+            if let Err(e) = serve_window(listener, server) {
+                eprintln!("rdp: window {}: {e}", window.0);
+            }
+        });
+        Ok(Handoff {
+            target: HandoffTarget {
+                address: String::new(),
+                port,
+                username: "windowcast".into(),
+                password,
+                certificate_sha256: Some(self.identity.fingerprint()),
+            },
+            guard: Box::new(StopOnDrop(stop)),
+        })
+    }
+}
+
+/// Stops a handed-off window's RDP server when dropped.
+struct StopOnDrop(Arc<AtomicBool>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+impl WindowSource for WithRdp {
+    fn list_windows(&self) -> Vec<WindowInfo> {
+        self.inner.list_windows()
+    }
+    fn encoders(&self) -> Vec<VideoCodec> {
+        self.inner.encoders()
+    }
+    fn backends(&self) -> Vec<BackendKind> {
+        let mut kinds = self.inner.backends();
+        if self.enabled.load(Ordering::SeqCst) {
+            kinds.push(BackendKind::Rdp);
+        }
+        kinds
+    }
+    fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
+        self.inner.open(window, codec)
+    }
+    fn open_desktop(
+        &self,
+        window: WindowId,
+        codec: VideoCodec,
+    ) -> Result<Box<dyn FrameSource>, String> {
+        self.inner.open_desktop(window, codec)
+    }
+    fn open_pictures(&self, window: WindowId) -> Option<Result<Box<dyn PictureSource>, String>> {
+        self.inner.open_pictures(window)
+    }
+    fn open_audio(
+        &self,
+        window: WindowId,
+    ) -> Option<Result<Box<dyn windowcast_host::audio::AudioSource>, String>> {
+        self.inner.open_audio(window)
+    }
+    fn microphone(
+        &self,
+    ) -> Option<Result<Box<dyn windowcast_host::audio::MicrophoneSink>, String>> {
+        self.inner.microphone()
+    }
+    fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
+        self.inner.input(event, focus)
+    }
+    fn gamepads(&self) -> Option<Result<Box<dyn windowcast_host::gamepad::GamepadSink>, String>> {
+        self.inner.gamepads()
+    }
+    fn clipboard(&self) -> Option<(u64, String)> {
+        self.inner.clipboard()
+    }
+    fn set_clipboard(&self, text: &str) {
+        self.inner.set_clipboard(text)
+    }
+    fn handoff(&self, kind: BackendKind, window: WindowId) -> Option<Result<Handoff, String>> {
+        if kind == BackendKind::Rdp {
+            if !self.enabled.load(Ordering::SeqCst) {
+                return Some(Err("this host does not offer RDP".into()));
+            }
+            Some(self.start(window))
+        } else {
+            self.inner.handoff(kind, window)
         }
     }
 }

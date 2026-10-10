@@ -381,6 +381,47 @@ pub unsafe extern "C" fn windowcast_session_next_frame(
     frame.data.len() as i64
 }
 
+/// Waits up to `timeout_ms` for the next picture of a window streamed over
+/// RDP (a "stream_started" event with backend "Rdp") and copies it into
+/// `out`: RGBA, rows from the top, `width * 4` bytes each. Returns its
+/// length, [`WINDOWCAST_TIMEOUT`] (the window has not changed),
+/// [`WINDOWCAST_ENDED`], or [`WINDOWCAST_BUFFER_TOO_SMALL`] (the picture
+/// stays queued; `width` and `height` say its size).
+///
+/// # Safety
+/// `session` must be valid; `out` valid for `cap` bytes; `width` and
+/// `height` valid.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_next_picture(
+    session: *const ClientSession,
+    window: u64,
+    timeout_ms: u32,
+    out: *mut u8,
+    cap: usize,
+    width: *mut u32,
+    height: *mut u32,
+) -> i64 {
+    let (Some(session), Some(width), Some(height)) =
+        (session.as_ref(), width.as_mut(), height.as_mut())
+    else {
+        return WINDOWCAST_ERROR;
+    };
+    let window = WindowId(window);
+    let picture = match session.next_picture(window, Duration::from_millis(u64::from(timeout_ms))) {
+        crate::PicturePoll::Picture(picture) => picture,
+        crate::PicturePoll::Timeout => return WINDOWCAST_TIMEOUT,
+        crate::PicturePoll::Ended => return WINDOWCAST_ENDED,
+    };
+    *width = picture.width;
+    *height = picture.height;
+    if picture.data.len() > cap || out.is_null() {
+        session.hold_picture(window, picture);
+        return WINDOWCAST_BUFFER_TOO_SMALL;
+    }
+    std::ptr::copy_nonoverlapping(picture.data.as_ptr(), out, picture.data.len());
+    picture.data.len() as i64
+}
+
 /// 0 for success, WINDOWCAST_ERROR for a failure.
 fn status<T, E>(result: Result<T, E>) -> i64 {
     match result {

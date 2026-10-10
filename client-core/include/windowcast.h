@@ -97,6 +97,16 @@ int64_t windowcast_session_next_frame(const WindowcastSession *session, uint64_t
                                       uint32_t timeout_ms, uint8_t *out, size_t cap,
                                       WindowcastFrameInfo *info);
 
+/* Next picture of a window streamed over RDP (stream_started with backend
+ * "Rdp"): RGBA, rows from the top, width * 4 bytes each. Returns its
+ * length, WINDOWCAST_TIMEOUT when the window has not changed,
+ * WINDOWCAST_ENDED, or WINDOWCAST_BUFFER_TOO_SMALL (the picture stays
+ * queued; *width and *height say its size). Input for that window is sent
+ * as usual and goes over RDP. */
+int64_t windowcast_session_next_picture(const WindowcastSession *session, uint64_t window,
+                                        uint32_t timeout_ms, uint8_t *out, size_t cap,
+                                        uint32_t *width, uint32_t *height);
+
 /* The microphone, to the host's virtual microphone: start, then sound as
  * it comes (count interleaved stereo 16-bit samples at 48 kHz; encoded to
  * Opus inside), then stop. Each returns 0 or WINDOWCAST_ERROR. */

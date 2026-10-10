@@ -6287,6 +6287,7 @@ dependencies = [
  "windowcast-host",
  "windowcast-identity",
  "windowcast-protocol",
+ "windowcast-rdp",
  "xkbcommon",
 ]
 
@@ -6302,6 +6303,7 @@ dependencies = [
  "windowcast-host",
  "windowcast-identity",
  "windowcast-protocol",
+ "windowcast-rdp",
  "windows",
  "windows-core",
 ]
@@ -6321,6 +6323,7 @@ dependencies = [
  "windowcast-host",
  "windowcast-identity",
  "windowcast-protocol",
+ "windowcast-rdp",
  "windowcast-transport",
  "windows",
 ]
@@ -6354,6 +6357,7 @@ dependencies = [
  "tokio",
  "windowcast-identity",
  "windowcast-protocol",
+ "windowcast-rdp",
  "windowcast-transport",
 ]
 
@@ -6448,7 +6452,6 @@ version = "0.19.1"
 dependencies = [
  "anyhow",
  "async-trait",
- "bytes",
  "ironrdp-blocking",
  "ironrdp-connector",
  "ironrdp-graphics",
@@ -6456,6 +6459,7 @@ dependencies = [
  "ironrdp-pdu",
  "ironrdp-server",
  "ironrdp-session",
+ "rand_core 0.6.4",
  "rcgen 0.13.2",
  "rustls",
  "sha2 0.10.9",

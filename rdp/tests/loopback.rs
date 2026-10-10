@@ -3,6 +3,7 @@
 //! the host's certificate pinned), sees the pattern move, and its keys and
 //! pointer reach the window. A wrong password is refused.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -10,7 +11,7 @@ use windowcast_cli_tools::testpattern::{frame_number, TestPatternSource, HEIGHT,
 use windowcast_host::{FrameSource, PictureSource, WindowSource};
 use windowcast_protocol::{InputEvent, PointerButton, VideoCodec, WindowId, WindowInfo};
 use windowcast_rdp::client::{connect, ClientConfig};
-use windowcast_rdp::host::serve_window;
+use windowcast_rdp::host::{serve_window, HostStats, WindowServer};
 use windowcast_rdp::tls::HostIdentity;
 use windowcast_rdp::Credentials;
 
@@ -49,13 +50,19 @@ fn our_client_sees_and_drives_a_window_over_our_rdp_host() {
     let source: Arc<dyn WindowSource> = Arc::new(recording);
     let window = source.list_windows()[0].id;
     std::thread::spawn(move || {
-        let credentials = Credentials {
-            username: "windowcast".into(),
-            password: "a one-time password".into(),
-            domain: None,
+        let server = WindowServer {
+            source,
+            window,
+            credentials: Credentials {
+                username: "windowcast".into(),
+                password: "a one-time password".into(),
+                domain: None,
+            },
+            identity: Arc::new(identity),
+            stats: Arc::new(HostStats::default()),
+            stop: Arc::new(AtomicBool::new(false)),
         };
-        let stats = Arc::new(windowcast_rdp::host::HostStats::default());
-        if let Err(e) = serve_window(listener, source, window, credentials, &identity, stats) {
+        if let Err(e) = serve_window(listener, server) {
             eprintln!("host: {e}");
         }
     });
@@ -87,7 +94,7 @@ fn our_client_sees_and_drives_a_window_over_our_rdp_host() {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut last = None;
     while numbers.len() < 10 && Instant::now() < deadline {
-        if let Ok(picture) = stream.pictures.recv_timeout(Duration::from_millis(500)) {
+        if let Ok(picture) = stream.next_picture(Duration::from_millis(500)) {
             assert_eq!(
                 (picture.width, picture.height),
                 (WIDTH as u32, HEIGHT as u32)

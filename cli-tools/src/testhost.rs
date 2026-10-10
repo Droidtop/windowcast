@@ -107,6 +107,16 @@ async fn main() {
     } else {
         source
     };
+    // RDP for clients that ask for it (windowcast-rdp is the protocol's
+    // own client; windowcast clients get the login over the session).
+    let source: Arc<dyn WindowSource> =
+        match windowcast_rdp::host::WithRdp::new(source, std::net::IpAddr::from([0, 0, 0, 0])) {
+            Ok(with_rdp) => Arc::new(with_rdp),
+            Err(e) => {
+                eprintln!("no RDP: {e}");
+                std::process::exit(1);
+            }
+        };
     if let Err(e) = windowcast_host::run(config, source).await {
         eprintln!("host stopped: {e}");
         std::process::exit(1);

@@ -18,6 +18,7 @@ test = false
 [dependencies]
 windowcast-protocol = { path = "../protocol" }
 windowcast-host = { path = "../host-core" }
+windowcast-rdp = { path = "../rdp" }
 tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]

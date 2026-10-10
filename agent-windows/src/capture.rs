@@ -224,6 +224,15 @@ impl Capture {
         self.scale = scale.clamp(0.1, 1.0);
     }
 
+    /// Reads pictures back as BGRA from here on, with no GPU conversion
+    /// (for backends that take raw pictures).
+    pub fn set_bgra_output(&mut self) {
+        self.converter = None;
+        self.nv12_size = None;
+        self.texture_output = false;
+        self.texture = None;
+    }
+
     pub fn set_texture_output(&mut self, on: bool) {
         self.texture_output = on && self.converter.is_some();
         if !self.texture_output {

@@ -43,7 +43,7 @@ fn our_client_logs_in_to_windows_remote_desktop() {
     let mut pictures = 0;
     let mut varied = false;
     while Instant::now() < deadline && !(pictures >= 3 && varied) {
-        if let Ok(picture) = stream.pictures.recv_timeout(Duration::from_millis(500)) {
+        if let Ok(picture) = stream.next_picture(Duration::from_millis(500)) {
             pictures += 1;
             let first = &picture.data[..4];
             varied |= picture

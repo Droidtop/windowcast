@@ -86,6 +86,13 @@ impl WindowSource for Gated {
         self.agent.open_desktop(window, codec)
     }
 
+    fn open_pictures(
+        &self,
+        window: WindowId,
+    ) -> Option<Result<Box<dyn windowcast_host::PictureSource>, String>> {
+        self.agent.open_pictures(window)
+    }
+
     fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
         if self.input.load(Ordering::SeqCst) {
             self.agent.input(event, focus);
@@ -203,6 +210,8 @@ pub struct HostRole {
     runtime: Handle,
     control: Arc<HostControl>,
     source: Arc<Gated>,
+    /// What sessions are served: the agent's windows, also over RDP.
+    served: Arc<windowcast_rdp::host::WithRdp>,
     store: Arc<Store>,
     pub listen: String,
     /// Each encoder option and the codecs it has on this machine.
@@ -243,15 +252,26 @@ impl HostRole {
             clipboard: AtomicBool::new(settings.clipboard),
             microphone: Arc::new(AtomicBool::new(settings.microphone)),
         });
+        // RDP servers listen where the host does, on a port per stream.
+        let bind = listen
+            .rsplit_once(':')
+            .and_then(|(host, _)| host.trim_matches(['[', ']']).parse().ok())
+            .unwrap_or(std::net::IpAddr::from([0, 0, 0, 0]));
+        let served = Arc::new(
+            windowcast_rdp::host::WithRdp::new(Arc::clone(&source) as Arc<dyn WindowSource>, bind)
+                .map_err(|e| e.to_string())?,
+        );
+        served.set_enabled(settings.rdp);
         runtime.spawn(windowcast_host::serve_with(
             listener,
             Arc::clone(&control),
-            Arc::clone(&source) as Arc<dyn WindowSource>,
+            Arc::clone(&served) as Arc<dyn WindowSource>,
         ));
         let role = Arc::new(HostRole {
             runtime,
             control,
             source,
+            served,
             store,
             listen,
             encoders,
@@ -280,7 +300,7 @@ impl HostRole {
 
     fn take_snapshot(&self) -> HostSnapshot {
         let windows = self.source.list_windows();
-        let available = self.source.backends();
+        let available = self.served.backends();
         let titles: HashMap<u64, String> = windows
             .iter()
             .map(|window| (window.id.0, window.title.clone()))
@@ -349,7 +369,7 @@ impl HostRole {
         };
         let task = self.runtime.spawn(windowcast_host::remote::serve_remote(
             Arc::clone(&self.control),
-            Arc::clone(&self.source) as Arc<dyn WindowSource>,
+            Arc::clone(&self.served) as Arc<dyn WindowSource>,
             windowcast_host::remote::RemoteAccess {
                 port,
                 config,
@@ -432,6 +452,7 @@ impl HostRole {
         self.source
             .microphone
             .store(settings.microphone, Ordering::SeqCst);
+        self.served.set_enabled(settings.rdp);
         self.set_away(settings.away, settings.away_port);
         self.store.update(|config| config.host = settings);
         Ok(())

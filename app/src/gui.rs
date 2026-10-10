@@ -202,6 +202,7 @@ impl App {
                     &mut settings.microphone,
                     "Clients may use their microphone here",
                 );
+                ui.checkbox(&mut settings.rdp, "Offer windows over RDP");
             });
             ui.horizontal(|ui| {
                 ui.checkbox(

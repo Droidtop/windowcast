@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped on any incompatible change to the message shapes below. A peer
 /// that receives a mismatched version should refuse the session rather
 /// than guess at how to interpret an unknown wire format.
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
@@ -214,8 +214,9 @@ pub enum StreamBackend {
     /// low-latency video, audio and controller channels to the
     /// [`HandoffTarget`]. Not built yet.
     GameStream,
-    /// windowcast's own RDP implementation, for text-heavy windows. Not
-    /// built yet.
+    /// RDP (on IronRDP's protocol crates), for text-heavy windows: the
+    /// host serves the window over RDP at the [`HandoffTarget`], with a
+    /// login made for the stream.
     Rdp,
     /// windowcast's own VNC implementation. Not built yet.
     Vnc,
@@ -264,11 +265,18 @@ pub enum BackendKind {
 }
 
 /// Where to reach a backend that runs its own connection (GameStream,
-/// RDP, VNC): normally the same machine as the host agent, on its own port.
+/// RDP, VNC): normally the same machine as the host agent, on its own port,
+/// with a login made for this one stream and the backend's certificate to
+/// pin, both handed over this paired session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandoffTarget {
+    /// Empty for "the address this session reached the host at".
     pub address: String,
     pub port: u16,
+    pub username: String,
+    pub password: String,
+    /// SHA-256 of the backend's TLS certificate.
+    pub certificate_sha256: Option<[u8; 32]>,
 }
 
 /// What the client asks for with a stream.
@@ -552,6 +560,9 @@ mod tests {
             handoff: Some(HandoffTarget {
                 address: "127.0.0.1".into(),
                 port: 47989,
+                username: String::new(),
+                password: String::new(),
+                certificate_sha256: None,
             }),
             reason: None,
         };
@@ -577,6 +588,9 @@ mod tests {
             handoff: Some(HandoffTarget {
                 address: "10.0.0.5".into(),
                 port: 3389,
+                username: "windowcast".into(),
+                password: "one-time".into(),
+                certificate_sha256: Some([7; 32]),
             }),
             reason: None,
         };
@@ -588,6 +602,9 @@ mod tests {
             handoff: Some(HandoffTarget {
                 address: "10.0.0.5".into(),
                 port: 8080,
+                username: String::new(),
+                password: String::new(),
+                certificate_sha256: None,
             }),
             reason: None,
         };

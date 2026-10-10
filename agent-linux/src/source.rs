@@ -93,6 +93,21 @@ impl WindowSource for LinuxSource {
         Some(crate::audio::WindowAudio::open(window).map(|audio| Box::new(audio) as _))
     }
 
+    fn open_pictures(
+        &self,
+        window: WindowId,
+    ) -> Option<Result<Box<dyn windowcast_host::PictureSource>, String>> {
+        let fps = self.options().fps.max(1);
+        Some(Capture::window(window).map(|capture| {
+            Box::new(WindowPictures {
+                capture,
+                frame_time: Duration::from_nanos(1_000_000_000 / u64::from(fps)),
+                next_at: Instant::now(),
+                last_sent: None,
+            }) as _
+        }))
+    }
+
     fn microphone(
         &self,
     ) -> Option<Result<Box<dyn windowcast_host::audio::MicrophoneSink>, String>> {
@@ -117,6 +132,56 @@ impl WindowSource for LinuxSource {
 /// A static window still gets a frame this often, so a client that just
 /// joined or lost a packet is never left without a picture.
 const REFRESH: Duration = Duration::from_secs(1);
+
+/// A window's pictures as captured, for backends that encode their own
+/// way: one when the window changes (and once a second regardless), never
+/// faster than the frame rate.
+struct WindowPictures {
+    capture: Capture,
+    frame_time: Duration,
+    next_at: Instant,
+    last_sent: Option<Instant>,
+}
+
+impl windowcast_host::PictureSource for WindowPictures {
+    fn next_picture(&mut self) -> Option<windowcast_host::Picture> {
+        loop {
+            std::thread::sleep(self.next_at.saturating_duration_since(Instant::now()));
+            let changed = match self.capture.poll(self.frame_time) {
+                Ok(changed) => changed,
+                Err(e) => {
+                    eprintln!("capture stopped: {e}");
+                    return None;
+                }
+            };
+            let due = self.last_sent.is_none_or(|sent| sent.elapsed() >= REFRESH);
+            if !(changed || due) {
+                continue;
+            }
+            let Some(picture) = self.capture.picture() else {
+                continue;
+            };
+            self.next_at = Instant::now() + self.frame_time;
+            self.last_sent = Some(Instant::now());
+            return Some(copy_picture(&picture));
+        }
+    }
+}
+
+/// A captured picture, copied out tightly packed.
+fn copy_picture(picture: &video::Bgra<'_>) -> windowcast_host::Picture {
+    let row = picture.width * 4;
+    let mut data = Vec::with_capacity(row * picture.height);
+    for y in 0..picture.height {
+        data.extend_from_slice(&picture.data[y * picture.stride..][..row]);
+    }
+    windowcast_host::Picture {
+        width: picture.width as u32,
+        height: picture.height as u32,
+        stride: row,
+        data,
+    }
+}
 
 struct WindowStream {
     capture: Capture,

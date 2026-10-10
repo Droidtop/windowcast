@@ -9,7 +9,9 @@
 //! threads: a client connects, asks for the window list and for streams,
 //! then polls two queues, session events ([`ClientSession::next_event`])
 //! and each window's frames ([`ClientSession::next_frame`]), from its own
-//! threads. Frames come out whole and ready for a hardware decoder.
+//! threads. Frames come out whole and ready for a hardware decoder; a
+//! window the host hands to RDP comes out as RGBA pictures instead
+//! ([`ClientSession::next_picture`]), and its input goes over RDP.
 
 pub mod ffi;
 
@@ -25,9 +27,11 @@ use tokio::runtime::Runtime;
 use windowcast_identity::{Identity, TrustStore};
 use windowcast_protocol::selection::{self, BackendRule};
 use windowcast_protocol::{
-    BackendKind, ControlMessage, InputEvent, StreamLimits, StreamOptions, StreamQuality,
-    StreamTarget, VideoCodec, WindowId, WindowInfo,
+    BackendKind, ControlMessage, HandoffTarget, InputEvent, StreamBackend, StreamLimits,
+    StreamOptions, StreamQuality, StreamTarget, VideoCodec, WindowId, WindowInfo,
 };
+use windowcast_rdp::client::RdpStream;
+pub use windowcast_rdp::client::RgbaPicture;
 use windowcast_transport::remote::{
     self, Answer, Directory, RemoteConfig, RemotePeers, Syncthing, CONNECT_WITHIN,
 };
@@ -123,10 +127,12 @@ impl Client {
     pub fn connect(&self, address: &str, pin: Option<&str>) -> Result<ClientSession, ClientError> {
         let trusted = self.trust.lock().expect("trust store").clone();
         let identity = Arc::clone(&self.identity);
+        let mut host_ip = None;
         let established = self.runtime.block_on(async {
             let stream = tokio::net::TcpStream::connect(address)
                 .await
                 .map_err(|e| ClientError::Unreachable(address.to_owned(), e))?;
+            host_ip = stream.peer_addr().ok().map(|peer| peer.ip());
             // A host on this device is reached over loopback alone.
             let local = stream.peer_addr().is_ok_and(|peer| peer.ip().is_loopback());
             let session = if local {
@@ -146,10 +152,17 @@ impl Client {
             trust.pin(established.peer);
             trust.save(&self.trust_path)?;
         }
-        Ok(self.started(established))
+        Ok(self.started(established, host_ip))
     }
 
-    fn started(&self, established: windowcast_transport::Established) -> ClientSession {
+    /// A session on `established`; `host_ip` is where backends with their
+    /// own connection (RDP) are reached, `None` away from the LAN (they
+    /// are not offered then).
+    fn started(
+        &self,
+        established: windowcast_transport::Established,
+        host_ip: Option<std::net::IpAddr>,
+    ) -> ClientSession {
         ClientSession::start(
             Arc::clone(&self.runtime),
             established.session,
@@ -159,6 +172,7 @@ impl Client {
                 peers: Arc::clone(&self.remote_hosts),
                 own: windowcast_transport::remote::discovery_id(&self.identity).ok(),
             },
+            host_ip,
         )
     }
 
@@ -256,7 +270,7 @@ impl Client {
                 .await?,
             )
         })?;
-        Ok(self.started(established))
+        Ok(self.started(established, None))
     }
 
     /// Stops trusting the host whose identity is `host_id` (hex, as
@@ -327,6 +341,14 @@ pub enum AudioPoll {
     Ended,
 }
 
+/// The result of waiting for an RDP window's picture.
+pub enum PicturePoll {
+    Picture(RgbaPicture),
+    Timeout,
+    /// The window is not streamed over RDP (any more).
+    Ended,
+}
+
 /// The result of waiting for a frame.
 pub enum FramePoll {
     Frame(WindowFrame),
@@ -364,6 +386,15 @@ struct Shared {
     ping: Mutex<(Option<Instant>, Option<Duration>)>,
     /// The ceilings this client set per window, sent with each start.
     limits: Mutex<HashMap<WindowId, StreamLimits>>,
+    /// Where the host is, for backends with their own connection.
+    host_ip: Option<std::net::IpAddr>,
+    /// Windows streamed over RDP: their connections.
+    rdp: Mutex<HashMap<WindowId, Arc<RdpStream>>>,
+    /// The window keys and text go to: the last one a pointer event named.
+    focus: Mutex<Option<WindowId>>,
+    /// A picture a caller could not take (its buffer was too small),
+    /// handed out again first.
+    held_pictures: Mutex<HashMap<WindowId, RgbaPicture>>,
 }
 
 impl Shared {
@@ -436,6 +467,7 @@ impl ClientSession {
         host: windowcast_identity::PeerId,
         paired: bool,
         rendezvous: Rendezvous,
+        host_ip: Option<std::net::IpAddr>,
     ) -> Self {
         let session = Arc::new(session);
         if let Some(discovery_id) = rendezvous.own.clone() {
@@ -453,6 +485,10 @@ impl ClientSession {
             audio: Mutex::new(HashMap::new()),
             ping: Mutex::new((None, None)),
             limits: Mutex::default(),
+            host_ip,
+            rdp: Mutex::default(),
+            focus: Mutex::default(),
+            held_pictures: Mutex::default(),
         });
         let windows = Arc::new(Mutex::new(Vec::new()));
 
@@ -512,6 +548,12 @@ impl ClientSession {
                     selection::choose_backend(info, &rules)
                 })
         };
+        // RDP is its own TCP connection to the host, which only a host on
+        // this network can take.
+        let backend = match backend {
+            BackendKind::Rdp if self.shared.host_ip.is_none() => BackendKind::Native,
+            other => other,
+        };
         let limits = self
             .shared
             .limits
@@ -551,7 +593,52 @@ impl ClientSession {
     /// they name (one this session streams); keys, text and gamepads to the
     /// last such window.
     pub fn send_input(&self, event: InputEvent) -> Result<(), ClientError> {
+        let named = input_window(&event);
+        let window = {
+            let mut focus = self.shared.focus.lock().expect("focus");
+            if named.is_some() {
+                *focus = named;
+            }
+            *focus
+        };
+        // A window on RDP takes its pointer, keys and text over RDP;
+        // gamepads always go over the session.
+        let over_rdp = !matches!(
+            event,
+            InputEvent::Gamepad { .. } | InputEvent::GamepadGone { .. }
+        );
+        if over_rdp {
+            if let Some(rdp) =
+                window.and_then(|w| self.shared.rdp.lock().expect("rdp").get(&w).cloned())
+            {
+                rdp.input(event);
+                return Ok(());
+            }
+        }
         self.send(ControlMessage::Input(event))
+    }
+
+    /// The next picture of a window streamed over RDP (whole, RGBA),
+    /// waiting up to `timeout`. A picture comes whenever the window
+    /// changes; a client behind gets the newest.
+    pub fn next_picture(&self, window: WindowId, timeout: Duration) -> PicturePoll {
+        let Some(rdp) = self.shared.rdp.lock().expect("rdp").get(&window).cloned() else {
+            return PicturePoll::Ended;
+        };
+        if let Some(picture) = self
+            .shared
+            .held_pictures
+            .lock()
+            .expect("held pictures")
+            .remove(&window)
+        {
+            return PicturePoll::Picture(picture);
+        }
+        match rdp.next_picture(timeout) {
+            Ok(picture) => PicturePoll::Picture(picture),
+            Err(RecvTimeoutError::Timeout) => PicturePoll::Timeout,
+            Err(RecvTimeoutError::Disconnected) => PicturePoll::Ended,
+        }
     }
 
     /// Gives the host this client's clipboard text.
@@ -560,6 +647,7 @@ impl ClientSession {
     }
 
     pub fn stop_window(&self, window: WindowId) -> Result<(), ClientError> {
+        self.shared.rdp.lock().expect("rdp").remove(&window);
         self.send(ControlMessage::StreamStopRequest(StreamTarget::Window(
             window,
         )))
@@ -640,6 +728,14 @@ impl ClientSession {
     }
 
     /// Puts a frame back to be returned by the next [`Self::next_frame`].
+    pub(crate) fn hold_picture(&self, window: WindowId, picture: RgbaPicture) {
+        self.shared
+            .held_pictures
+            .lock()
+            .expect("held pictures")
+            .insert(window, picture);
+    }
+
     pub(crate) fn hold_frame(&self, window: WindowId, frame: WindowFrame) {
         if let Some(slot) = self.shared.existing_slot(window) {
             slot.queue.lock().expect("frame queue").held = Some(frame);
@@ -734,6 +830,79 @@ impl Drop for ClientSession {
     }
 }
 
+/// The window an input event names, if it names one.
+fn input_window(event: &InputEvent) -> Option<WindowId> {
+    match event {
+        InputEvent::PointerMove { window, .. }
+        | InputEvent::PointerButton { window, .. }
+        | InputEvent::PointerScroll { window, .. }
+        | InputEvent::Touch { window, .. } => Some(*window),
+        _ => None,
+    }
+}
+
+/// Logs in to the RDP server the host started for `window`, on a thread of
+/// its own, then announces the stream (or its refusal, telling the host to
+/// stop serving it).
+fn connect_rdp(
+    session: Arc<Session>,
+    shared: Arc<Shared>,
+    events: mpsc::Sender<Event>,
+    window: WindowId,
+    target: HandoffTarget,
+    size: (u16, u16),
+) {
+    let runtime = tokio::runtime::Handle::current();
+    std::thread::spawn(move || {
+        let address = match (target.address.parse::<std::net::IpAddr>(), shared.host_ip) {
+            (Ok(ip), _) => Some(ip),
+            (Err(_), Some(ip)) if target.address.is_empty() => Some(ip),
+            _ => None,
+        };
+        let result = match address {
+            Some(ip) => windowcast_rdp::client::connect(&windowcast_rdp::client::ClientConfig {
+                address: std::net::SocketAddr::new(ip, target.port),
+                server_name: ip.to_string(),
+                username: target.username,
+                password: target.password,
+                domain: None,
+                size,
+                pinned: target.certificate_sha256,
+            })
+            .map_err(|e| e.to_string()),
+            None => Err("the host's RDP address is not reachable from here".to_owned()),
+        };
+        let event = match result {
+            Ok(stream) => {
+                shared
+                    .rdp
+                    .lock()
+                    .expect("rdp")
+                    .insert(window, Arc::new(stream));
+                Event::StreamStarted {
+                    window: window.0,
+                    backend: BackendKind::Rdp,
+                    codec: None,
+                }
+            }
+            Err(reason) => {
+                runtime.spawn(async move {
+                    let _ = session
+                        .send_control(&ControlMessage::StreamStopRequest(StreamTarget::Window(
+                            window,
+                        )))
+                        .await;
+                });
+                Event::StreamRefused {
+                    window: window.0,
+                    reason: format!("RDP: {reason}"),
+                }
+            }
+        };
+        let _ = events.send(event);
+    });
+}
+
 async fn pump_events(
     session: Arc<Session>,
     shared: Arc<Shared>,
@@ -753,6 +922,31 @@ async fn pump_events(
             ControlMessage::ListWindowsResponse(list) => {
                 *windows.lock().expect("windows") = list.clone();
                 Event::Windows { windows: list }
+            }
+            ControlMessage::StreamStartResponse {
+                target: StreamTarget::Window(window),
+                accepted: true,
+                backend: StreamBackend::Rdp,
+                handoff: Some(target),
+                ..
+            } => {
+                // Logging in takes a moment; the stream starts (or is
+                // refused) when it is done.
+                let size = windows
+                    .lock()
+                    .expect("windows")
+                    .iter()
+                    .find(|w| w.id == window)
+                    .map_or((1280, 720), |w| (w.width as u16, w.height as u16));
+                connect_rdp(
+                    Arc::clone(&session),
+                    Arc::clone(&shared),
+                    events.clone(),
+                    window,
+                    target,
+                    size,
+                );
+                continue;
             }
             ControlMessage::StreamStartResponse {
                 target: StreamTarget::Window(window),
@@ -786,6 +980,7 @@ async fn pump_events(
                 if let Some(slot) = slot {
                     slot.sender.lock().expect("sender").take();
                 }
+                shared.rdp.lock().expect("rdp").remove(&window);
                 Event::StreamStopped { window: window.0 }
             }
             ControlMessage::WindowResized {

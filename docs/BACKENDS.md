@@ -47,12 +47,39 @@ over it and keyed from it.
 | `Passthrough` | video players | a video track on the session, carrying the media as it was already encoded (no second encode) | seam only |
 | `Desktop` | hosts that cannot capture one window; whole-desktop streams | a video track on the session, cut from a whole-output capture | built on Windows and on Linux under sway: the window cut from a capture of its screen, with whatever covers it; whole-desktop targets are #112 |
 | `GameStream` | games | its own low-latency video, audio and controller channels | video, sound and input built at both ends (the `gamestream` crate) (#110) |
-| `Rdp` | text-heavy windows: editors, terminals, documents | its own connection; sharp text at low bandwidth | host and client built in the `rdp` crate on IronRDP; not yet chosen by a session (#111) |
+| `Rdp` | text-heavy windows: editors, terminals, documents | its own connection; sharp text at low bandwidth | built (#111): a session hands the window to an RDP server started for that stream (see below); clients get RGBA pictures |
 | `Vnc` | anything else that only speaks VNC | its own connection | seam only (#111) |
 
 Video tracks carry H.264, H.265 or AV1, chosen per track: the client lists
 what it decodes in hardware, most preferred first, and the host picks the
 first it can produce (for passthrough, the codec the media already is).
+
+## Handing a window to RDP
+
+A backend with its own connection is negotiated over the session and
+keyed from it. For RDP:
+
+1. The client's rules choose `Rdp` for a window and it asks for the
+   stream as usual. Away from the LAN (a punched session) the client asks
+   for `Native` instead: RDP is a TCP connection of its own to the host.
+2. The host (any `WindowSource` wrapped in `rdp::host::WithRdp`, which the
+   app, the agents and the test host do; the app's "Offer windows over RDP"
+   setting switches it) starts an RDP server for that one window on a port
+   of its own, with a login made for the stream (a random password) and
+   the host's RDP certificate, and answers with a `HandoffTarget`: the
+   port, the login and the certificate's SHA-256.
+3. The client logs in with TLS and NLA, pinning that certificate, and
+   only then reports the stream started; a failed login refuses it and
+   tells the host to stop. Its pictures come out of `client-core` as RGBA
+   (`next_picture`, `windowcast_session_next_picture`), and the input it
+   sends for that window (pointer, keys, text) goes over RDP; gamepads stay
+   on the session.
+4. Stopping the stream (either side, or the session ending) stops the RDP
+   server. The window's picture size is fixed when the client logs in.
+
+The RDP desktop is the window, so any RDP client given that login sees
+only that window, and the host's own input rules apply (the app's input
+setting gates RDP input as it does session input).
 
 ## Choosing a backend
 

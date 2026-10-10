@@ -82,6 +82,8 @@ pub struct HostSettings {
     pub away: bool,
     /// The UDP port it uses for that.
     pub away_port: u16,
+    /// Hand a window to RDP when a client asks for it (sharp text).
+    pub rdp: bool,
 }
 
 impl Default for HostSettings {
@@ -99,6 +101,7 @@ impl Default for HostSettings {
             microphone_device: String::new(),
             away: false,
             away_port: windowcast_transport::remote::DEFAULT_PORT,
+            rdp: true,
         }
     }
 }

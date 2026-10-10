@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use windowcast_cli_tools::testpattern::TestPatternSource;
 use windowcast_host::WindowSource;
 use windowcast_rdp::client::{connect, ClientConfig};
-use windowcast_rdp::host::{serve_window, HostStats};
+use windowcast_rdp::host::{serve_window, HostStats, WindowServer};
 use windowcast_rdp::tls::HostIdentity;
 use windowcast_rdp::Credentials;
 
@@ -68,11 +68,7 @@ fn main() {
             let started = Instant::now();
             let mut pictures = 0u64;
             while started.elapsed() < Duration::from_secs(seconds) {
-                if stream
-                    .pictures
-                    .recv_timeout(Duration::from_millis(200))
-                    .is_ok()
-                {
+                if stream.next_picture(Duration::from_millis(200)).is_ok() {
                     pictures += 1;
                 }
                 if stream.ended.load(std::sync::atomic::Ordering::SeqCst) {
@@ -103,19 +99,19 @@ fn main() {
             println!("serving the test pattern over RDP on {address} as {user}; certificate SHA-256 {hex}");
             let source: Arc<dyn WindowSource> = Arc::new(TestPatternSource);
             let window = source.list_windows()[0].id;
-            let credentials = Credentials {
-                username: user.to_owned(),
-                password,
-                domain: None,
-            };
-            if let Err(e) = serve_window(
-                listener,
+            let server = WindowServer {
                 source,
                 window,
-                credentials,
-                &identity,
-                Arc::new(HostStats::default()),
-            ) {
+                credentials: Credentials {
+                    username: user.to_owned(),
+                    password,
+                    domain: None,
+                },
+                identity: Arc::new(identity),
+                stats: Arc::new(HostStats::default()),
+                stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            };
+            if let Err(e) = serve_window(listener, server) {
                 fail(&e.to_string());
             }
         }

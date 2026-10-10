@@ -5,13 +5,13 @@
 //! with WINDOWCAST_TEST_FREERDP set.
 
 use std::process::{Command, Stdio};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use windowcast_cli_tools::testpattern::TestPatternSource;
 use windowcast_host::WindowSource;
-use windowcast_rdp::host::{serve_window, HostStats};
+use windowcast_rdp::host::{serve_window, HostStats, WindowServer};
 use windowcast_rdp::tls::HostIdentity;
 use windowcast_rdp::Credentials;
 
@@ -30,12 +30,19 @@ fn stock_freerdp_logs_in_and_shows_the_window() {
             let source: Arc<dyn WindowSource> = Arc::new(TestPatternSource);
             let window = source.list_windows()[0].id;
             let identity = HostIdentity::generate("windowcast test host").unwrap();
-            let credentials = Credentials {
-                username: "windowcast".into(),
-                password: "freerdp-test-password".into(),
-                domain: None,
+            let server = WindowServer {
+                source,
+                window,
+                credentials: Credentials {
+                    username: "windowcast".into(),
+                    password: "freerdp-test-password".into(),
+                    domain: None,
+                },
+                identity: Arc::new(identity),
+                stats,
+                stop: Arc::new(AtomicBool::new(false)),
             };
-            if let Err(e) = serve_window(listener, source, window, credentials, &identity, stats) {
+            if let Err(e) = serve_window(listener, server) {
                 eprintln!("host: {e}");
             }
         });

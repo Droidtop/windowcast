@@ -15,6 +15,8 @@ crate-type = ["cdylib", "rlib"]
 windowcast-protocol = { path = "../protocol" }
 windowcast-identity = { path = "../identity" }
 windowcast-transport = { path = "../transport" }
+# The RDP backend's client (IronRDP underneath; see NOTICE).
+windowcast-rdp = { path = "../rdp", default-features = false }
 tokio = { workspace = true, features = ["net"] }
 serde.workspace = true
 serde_json = "1"

@@ -85,6 +85,14 @@ pub trait WindowSource: Send + Sync + 'static {
         Err("this host does not capture whole screens".into())
     }
 
+    /// Hands `window` to a backend with its own connection (RDP): starts
+    /// serving it for one client and says where and how to log in. Only
+    /// asked for kinds in [`Self::backends`] that send nothing on the
+    /// session. Dropping the [`Handoff`] stops serving.
+    fn handoff(&self, _kind: BackendKind, _window: WindowId) -> Option<Result<Handoff, String>> {
+        None
+    }
+
     /// `window`'s pictures as captured, unencoded, for backends that
     /// encode their own way (RDP's bitmap codecs). `None` when this host
     /// cannot hand out raw pictures.
@@ -124,6 +132,14 @@ pub trait WindowSource: Send + Sync + 'static {
 
     /// Replaces the clipboard's text with the client's.
     fn set_clipboard(&self, _text: &str) {}
+}
+
+/// A window being served by a backend with its own connection: where the
+/// client logs in ([`HandoffTarget`], its address left empty for "the
+/// host's"), and whatever keeps the serving going until dropped.
+pub struct Handoff {
+    pub target: windowcast_protocol::HandoffTarget,
+    pub guard: Box<dyn Send>,
 }
 
 /// One captured picture: BGRA, rows from the top, `stride` bytes apart.
@@ -469,6 +485,16 @@ struct Stream {
     stop: Arc<AtomicBool>,
     /// The client's ceilings, which it may change while it watches.
     limits: Arc<std::sync::Mutex<StreamLimits>>,
+    /// The backend serving it, for a handoff; dropped with the stream.
+    _handoff: Option<Box<dyn Send>>,
+}
+
+/// A started stream: on the session (a track), or handed off.
+struct Started {
+    stream: Stream,
+    backend: StreamBackend,
+    track_id: Option<String>,
+    handoff: Option<windowcast_protocol::HandoffTarget>,
 }
 
 /// The session's round trip, from the host's own pings.
@@ -649,14 +675,14 @@ impl Host {
                     options,
                 } => {
                     let response = match self.start(&session, peer, window, &options, &rtt).await {
-                        Ok((stream, track, backend)) => {
-                            streams.insert(window, stream);
+                        Ok(started) => {
+                            streams.insert(window, started.stream);
                             ControlMessage::StreamStartResponse {
                                 target: StreamTarget::Window(window),
                                 accepted: true,
-                                backend,
-                                track_id: Some(track.track_id()),
-                                handoff: None,
+                                backend: started.backend,
+                                track_id: started.track_id,
+                                handoff: started.handoff,
                                 reason: None,
                             }
                         }
@@ -670,9 +696,19 @@ impl Host {
                         .await?;
                 }
                 ControlMessage::StreamStopRequest(StreamTarget::Window(window)) => {
-                    streams.remove(&window);
+                    let handed_off = streams
+                        .remove(&window)
+                        .is_some_and(|stream| stream._handoff.is_some());
                     session.detach_audio(window).await?;
-                    session.detach_window(window).await?;
+                    if !session.detach_window(window).await? && handed_off {
+                        // A handed-off stream has no track to detach; its
+                        // backend stopped when the stream was dropped.
+                        session
+                            .send_control(&ControlMessage::StreamStopped(StreamTarget::Window(
+                                window,
+                            )))
+                            .await?;
+                    }
                 }
                 ControlMessage::Ping => session.send_control(&ControlMessage::Pong).await?,
                 ControlMessage::Pong => rtt.answered(),
@@ -708,11 +744,34 @@ impl Host {
         window: WindowId,
         options: &StreamOptions,
         rtt: &Arc<RoundTrip>,
-    ) -> Result<(Stream, WindowTrack, StreamBackend), String> {
+    ) -> Result<Started, String> {
         // Of the backends the client may ask for, the session-track ones
-        // are served here; one this host does not offer falls back to
-        // native (docs/BACKENDS.md).
+        // are served here and the others handed off; one this host does
+        // not offer falls back to native (docs/BACKENDS.md).
         let kind = selection::serve(options.backend, &self.source.backends());
+        if !matches!(kind, BackendKind::Native | BackendKind::Desktop) {
+            let source = Arc::clone(&self.source);
+            let handoff = tokio::task::spawn_blocking(move || source.handoff(kind, window))
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("{kind:?} is not built on this host"))??;
+            let backend = match kind {
+                BackendKind::Rdp => StreamBackend::Rdp,
+                BackendKind::GameStream => StreamBackend::GameStream,
+                BackendKind::Vnc => StreamBackend::Vnc,
+                other => StreamBackend::Other(format!("{other:?}")),
+            };
+            return Ok(Started {
+                stream: Stream {
+                    stop: Arc::new(AtomicBool::new(false)),
+                    limits: Arc::new(std::sync::Mutex::new(options.limits)),
+                    _handoff: Some(handoff.guard),
+                },
+                backend,
+                track_id: None,
+                handoff: Some(handoff.target),
+            });
+        }
         let encoders = self.source.encoders();
         let codec = options
             .codecs
@@ -773,7 +832,16 @@ impl Host {
             serial,
         );
         self.start_audio(session, window, &stop, serial).await;
-        Ok((Stream { stop, limits }, track, backend))
+        Ok(Started {
+            stream: Stream {
+                stop,
+                limits,
+                _handoff: None,
+            },
+            backend,
+            track_id: Some(track.track_id()),
+            handoff: None,
+        })
     }
 
     /// Streams the window's sound beside its picture, if the agent captures
