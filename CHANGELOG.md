@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.19.1] - 2026-10-09
 
 ### Fixed
 - The stock-Moonlight check pairs again when moonlight-qt says "Incorrect PIN" for a correct one. moonlight-qt cuts its PIN key at the first zero byte (`QByteArray(hash.constData())` in `nvpairingmanager.cpp`), so about one salt in sixteen gives it a key no host can match; this failed main's CI for 0.19.0, which was tagged but not released. A person pairing hits the same moonlight-qt bug and pairs again.
