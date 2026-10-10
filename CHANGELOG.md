@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.28.1] - 2026-10-10
 
 ### Fixed
 - Viewer: the menu's "Show as video / Show as RDP pictures" can be opened. The menu was built once, at start, with both items hidden (no stream yet), so no overflow button appeared; it is now rebuilt when a stream starts or stops and when a carrier switch starts, finishes or is given up (Droidtop/tracker#460).
