@@ -7,7 +7,7 @@
 use std::io::{Read, Write};
 use std::sync::Mutex;
 
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
 /// A terminal's size in character cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +54,9 @@ pub struct Pty {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
+    /// Ends the shell while another thread waits for it (waiting holds
+    /// the child).
+    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     reader: Mutex<Option<Box<dyn Read + Send>>>,
 }
 
@@ -75,6 +78,7 @@ impl Pty {
             .slave
             .spawn_command(command)
             .map_err(std::io::Error::other)?;
+        let killer = child.clone_killer();
         // The slave end belongs to the child now; keeping ours open would
         // stop the reader seeing the end of the shell.
         drop(pair.slave);
@@ -87,6 +91,7 @@ impl Pty {
             master: Mutex::new(pair.master),
             writer: Mutex::new(writer),
             child: Mutex::new(child),
+            killer: Mutex::new(killer),
             reader: Mutex::new(Some(reader)),
         })
     }
@@ -114,7 +119,7 @@ impl Pty {
 
     /// Ends the shell.
     pub fn kill(&self) {
-        let _ = self.child.lock().expect("pty child").kill();
+        let _ = self.killer.lock().expect("pty killer").kill();
     }
 
     /// The shell's exit code if it has ended; `None` while it runs. A shell
@@ -189,6 +194,16 @@ mod tests {
         pty.write(b"stty size; echo $TERM\n").unwrap();
         let out = read_until(&mut *reader, "xterm-256color");
         assert!(out.contains("17 61"), "{out:?}");
+    }
+
+    #[test]
+    fn a_shell_can_be_killed_while_another_thread_waits_for_it() {
+        let pty = std::sync::Arc::new(Pty::spawn(&sh()).unwrap());
+        let waiting = std::sync::Arc::clone(&pty);
+        let waiter = std::thread::spawn(move || waiting.wait());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        pty.kill();
+        waiter.join().unwrap();
     }
 
     #[test]
