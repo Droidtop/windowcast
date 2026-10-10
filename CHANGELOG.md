@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.29.0] - 2026-10-10
 
 ### Added
 - Window positions (Droidtop/tracker#457 step 4, protocol 11): `WindowInfo::position` is the window's top-left on the host (Windows hosts and RemoteApp windows; Wayland does not say). The Windows client opens a popup's, menu's or dialog's window borderless and above its owner's stream window, where it is on the host against its owner (`Placement::at`, `owner`; each stream window publishes its `View`); the viewer places a popup's floating window the same way against the watched window.
