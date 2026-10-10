@@ -35,7 +35,7 @@ windowcast-testhost for the current user.
   --prefix DIR     install under DIR/bin and DIR/share instead of ~/.local
   --autostart      also start the host agent when you sign in (a systemd
                    user unit, or an XDG autostart entry without systemd)
-  --no-desktop     skip the menu entry and the icon
+  --no-desktop     skip the menu entry
   --from DIR       use an unpacked tarball in DIR
   --tarball FILE   use this .tar.zst instead of downloading one
   --release TAG    download that release (default: the latest)
@@ -231,9 +231,6 @@ bindir_esc=$(printf '%s' "$BIN_DIR" | sed 's/[\\&|]/\\&/g')
 if [ "$DESKTOP" = 1 ] && [ -f "$SRC/share/applications/$DESKTOP_ID.desktop" ]; then
     sed "s|@BINDIR@|$bindir_esc|g" "$SRC/share/applications/$DESKTOP_ID.desktop" >"$WORK/$DESKTOP_ID.desktop"
     put "$WORK/$DESKTOP_ID.desktop" "$DATA_HOME/applications/$DESKTOP_ID.desktop" 644
-    if [ -f "$SRC/share/icons/hicolor/scalable/apps/$DESKTOP_ID.svg" ]; then
-        put "$SRC/share/icons/hicolor/scalable/apps/$DESKTOP_ID.svg" "$DATA_HOME/icons/hicolor/scalable/apps/$DESKTOP_ID.svg" 644
-    fi
 fi
 
 # ---- starting at sign-in: the host agent -----------------------------------
@@ -266,7 +263,7 @@ mv -f "$MANIFEST.new.$$" "$MANIFEST"
 
 say "Installed $NAME $VERSION for $(id -un):"
 for b in $BINS; do say "  $BIN_DIR/$b"; done
-[ "$DESKTOP" = 0 ] || say "  menu entry and icon under $DATA_HOME"
+[ "$DESKTOP" = 0 ] || say "  menu entry under $DATA_HOME"
 [ "$AUTOSTART" = 0 ] || say "  the host agent starts when you sign in ($AUTOSTART_HOW)"
 if [ -n "$replaced" ]; then
     printf 'Replaced files that were already there:\n%s' "$replaced"

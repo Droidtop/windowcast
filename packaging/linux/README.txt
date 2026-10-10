@@ -17,7 +17,7 @@ In this package
   LICENSE                     GPL-3.0-only
 
 Install (for you only, nothing needs root)
-  sh install.sh                  programs in ~/.local/bin, menu entry and icon
+  sh install.sh                  programs in ~/.local/bin, menu entry
   sh install.sh --autostart      ... and start the host agent when you sign in
   windowcast-app                 open the window; or from the application menu
 

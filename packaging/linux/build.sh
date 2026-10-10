@@ -87,10 +87,9 @@ GLIBC_MIN=$(for b in $BINS; do grep -aoE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' "$BIN
 # ---- the tree every format is made from ------------------------------------
 dir=$NAME-linux-$ARCH
 S=$WORK/stage/$dir
-mkdir -p "$S/bin" "$S/share/applications" "$S/share/icons/hicolor/scalable/apps"
+mkdir -p "$S/bin" "$S/share/applications"
 for b in $BINS; do install -m 755 "$BINDIR/$b" "$S/bin/$b"; done
 install -m 644 "$here/$DESKTOP_ID.desktop" "$S/share/applications/$DESKTOP_ID.desktop"
-install -m 644 "$here/$DESKTOP_ID.svg" "$S/share/icons/hicolor/scalable/apps/$DESKTOP_ID.svg"
 mkdir -p "$S/share/systemd/user"
 install -m 644 "$here/$UNIT" "$S/share/systemd/user/$UNIT"
 install -m 755 "$here/install.sh" "$here/uninstall.sh" "$S/"

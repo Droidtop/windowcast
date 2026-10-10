@@ -28,8 +28,6 @@ contents:
     dst: /usr/bin/windowcast-testhost
   - src: ${PKGFILES}/windowcast.desktop
     dst: /usr/share/applications/windowcast.desktop
-  - src: ${STAGE}/share/icons/hicolor/scalable/apps/windowcast.svg
-    dst: /usr/share/icons/hicolor/scalable/apps/windowcast.svg
   - src: ${PKGFILES}/windowcast-agent.service
     dst: /usr/lib/systemd/user/windowcast-agent.service
   - src: ${STAGE}/LICENSE

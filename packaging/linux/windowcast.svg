@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!-- windowcast: a window with a title bar, and a play triangle in it for the stream. -->
-<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
-  <rect x="4" y="8" width="56" height="48" rx="7" fill="#2b3a67"/>
-  <path d="M4 15a7 7 0 0 1 7-7h42a7 7 0 0 1 7 7v5H4z" fill="#4c63b6"/>
-  <circle cx="12" cy="14" r="2.2" fill="#ffffff"/>
-  <circle cx="19" cy="14" r="2.2" fill="#ffffff"/>
-  <path d="M26 27l16 10-16 10z" fill="#ffffff"/>
-</svg>

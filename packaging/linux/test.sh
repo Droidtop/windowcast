@@ -46,7 +46,7 @@ fresh_home
 mkdir "$T/x"
 zstd -dc "$OUT/$NAME-linux-$ARCH.tar.zst" | tar -xf - -C "$T/x"
 pkg=$T/x/$NAME-linux-$ARCH
-for f in install.sh uninstall.sh README.txt LICENSE VERSION share/applications/$DESKTOP_ID.desktop share/icons/hicolor/scalable/apps/$DESKTOP_ID.svg share/systemd/user/$NAME-agent.service; do
+for f in install.sh uninstall.sh README.txt LICENSE VERSION share/applications/$DESKTOP_ID.desktop share/systemd/user/$NAME-agent.service; do
     [ -f "$pkg/$f" ] || fail "tarball lacks $f"
 done
 if grep -q '@GLIBC@' "$pkg/README.txt"; then fail "README.txt still has its placeholder"; fi
@@ -61,7 +61,6 @@ manifest=$HOME/.local/share/$NAME/install-manifest
 [ -f "$manifest" ] || fail "no manifest"
 [ -x "$HOME/.local/share/$NAME/uninstall.sh" ] || fail "no uninstall.sh left beside the manifest"
 grep -q "^Exec=$HOME/.local/bin/windowcast-app\$" "$HOME/.local/share/applications/$DESKTOP_ID.desktop" || fail "desktop entry Exec not filled in"
-[ -f "$HOME/.local/share/icons/hicolor/scalable/apps/$DESKTOP_ID.svg" ] || fail "no icon"
 autostart=$HOME/.config/autostart/$NAME-agent.desktop
 [ -f "$autostart" ] || fail "autostart did not leave $autostart"
 grep -q "^Exec=\"$HOME/.local/bin/windowcast-agent-linux\"\$" "$autostart" || fail "autostart does not start the installed agent"
@@ -71,7 +70,7 @@ while IFS="$(printf '\t')" read -r kind path; do
     dir) [ -d "$path" ] || fail "manifest lists folder $path but it is missing" ;;
     esac
 done <"$manifest"
-ok "tarball installs; manifest, desktop entry, icon and autostart are in place"
+ok "tarball installs; manifest, desktop entry and autostart are in place"
 
 # Installing again over itself must not duplicate or lose entries.
 sh "$pkg/install.sh" >/dev/null
