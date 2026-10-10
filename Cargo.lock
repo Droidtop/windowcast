@@ -6875,6 +6875,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "windowcast-accounts",
  "windowcast-agent-linux",
  "windowcast-agent-windows",
  "windowcast-client-core",

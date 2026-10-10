@@ -84,6 +84,10 @@ pub struct HostSettings {
     pub away_port: u16,
     /// Hand a window to RDP when a client asks for it (sharp text).
     pub rdp: bool,
+    /// Account sign-in (docs/ACCOUNTS.md): password sources, OIDC
+    /// providers, LDAP, Kerberos, policy. Absent: only PIN-paired devices
+    /// connect.
+    pub accounts: Option<windowcast_accounts::Config>,
 }
 
 impl Default for HostSettings {
@@ -102,6 +106,7 @@ impl Default for HostSettings {
             away: false,
             away_port: windowcast_transport::remote::DEFAULT_PORT,
             rdp: true,
+            accounts: None,
         }
     }
 }

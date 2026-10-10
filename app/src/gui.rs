@@ -32,6 +32,9 @@ pub fn run(roles: Roles, host: Role<HostRole>, client: Role<ClientRole>) -> Resu
         client,
         address: "127.0.0.1:47100".into(),
         pin: String::new(),
+        username: String::new(),
+        password: String::new(),
+        new_account: Default::default(),
         clipboard: String::new(),
         show_client: true,
         error: None,
@@ -45,6 +48,12 @@ struct App {
     client: Role<ClientRole>,
     address: String,
     pin: String,
+    /// Signing in with an account on the client.
+    username: String,
+    password: String,
+    /// A local account being made on the host: name, password, groups
+    /// (comma-separated).
+    new_account: (String, String, String),
     clipboard: String,
     /// The client window, when both roles run (closing it hides it).
     show_client: bool,
@@ -188,7 +197,7 @@ impl App {
                     "{} host on {} - identity {}",
                     crate::platform::NAME,
                     host.listen,
-                    short(&snapshot.identity)
+                    windowcast_client::fingerprint(&snapshot.identity)
                 ))
                 .weak(),
             );
@@ -322,10 +331,15 @@ impl App {
             }
             for client in &snapshot.clients {
                 ui.label(format!(
-                    "{} connected from {} for {} s",
+                    "{} connected from {} for {} s{}",
                     short(&client.peer),
                     client.address,
-                    client.seconds
+                    client.seconds,
+                    client
+                        .account
+                        .as_ref()
+                        .map(|a| format!(", signed in as {a}"))
+                        .unwrap_or_default()
                 ));
             }
             for peer in &snapshot.trusted {
@@ -337,6 +351,80 @@ impl App {
                         }
                     }
                 });
+            }
+            ui.separator();
+
+            ui.heading("Accounts");
+            let mut sign_in = settings.accounts.is_some();
+            if ui
+                .checkbox(&mut sign_in, "Clients may sign in with an account")
+                .changed()
+            {
+                settings.accounts = sign_in.then(windowcast_accounts::Config::default);
+            }
+            ui.label(
+                RichText::new(
+                    "Identity providers (OpenID Connect), LDAP, Kerberos and the access policy                      are set in config.json under host.accounts (docs/ACCOUNTS.md).",
+                )
+                .weak(),
+            );
+            if let Some(accounts) = &snapshot.accounts {
+                let (local, registered) = (&accounts.local, &accounts.registered);
+                for (name, groups) in local {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{name} {}", groups.join(", ")));
+                        if ui.button("Remove").clicked() {
+                            if let Err(e) = host.remove_account(name) {
+                                self.error = Some(e);
+                            }
+                        }
+                    });
+                }
+                ui.horizontal(|ui| {
+                    let (name, password, groups) = &mut self.new_account;
+                    ui.add(
+                        egui::TextEdit::singleline(name)
+                            .desired_width(100.0)
+                            .hint_text("name"),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(password)
+                            .password(true)
+                            .desired_width(100.0)
+                            .hint_text("password"),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(groups)
+                            .desired_width(140.0)
+                            .hint_text("groups, comma-separated"),
+                    );
+                    if ui.button("Add account").clicked() {
+                        let groups: Vec<String> = groups
+                            .split(',')
+                            .map(|g| g.trim().to_owned())
+                            .filter(|g| !g.is_empty())
+                            .collect();
+                        match host.add_account(name, password, &groups) {
+                            Ok(()) => self.new_account = Default::default(),
+                            Err(e) => self.error = Some(e),
+                        }
+                    }
+                });
+                for device in registered {
+                    ui.horizontal(|ui| {
+                        ui.label(format!(
+                            "{} signed in as {}, {} days left",
+                            short(&device.peer),
+                            device.account,
+                            device.days_left
+                        ));
+                        if ui.button("Forget").clicked() {
+                            if let Err(e) = host.unregister(&device.peer) {
+                                self.error = Some(e);
+                            }
+                        }
+                    });
+                }
             }
             if let Some(error) = &self.error {
                 ui.colored_label(ui.visuals().error_fg_color, error);
@@ -414,6 +502,76 @@ impl App {
                         self.pin.clear();
                     }
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Or sign in");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.username)
+                            .desired_width(100.0)
+                            .hint_text("user"),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.password)
+                            .password(true)
+                            .desired_width(100.0)
+                            .hint_text("password"),
+                    );
+                    if ui.button("Sign in").clicked() {
+                        client.sign_in_in_background(
+                            self.address.trim().to_owned(),
+                            windowcast_client::SignIn::Password {
+                                username: self.username.trim().to_owned(),
+                                password: std::mem::take(&mut self.password),
+                            },
+                            None,
+                        );
+                    }
+                    if ui.button("Other ways to sign in").clicked() {
+                        client.ask_sign_in_options(self.address.trim().to_owned());
+                    }
+                });
+                if let Some((address, options)) = &snapshot.sign_in_options {
+                    ui.label(format!(
+                        "{address}: host {}{}",
+                        options.fingerprint,
+                        if options.trusted {
+                            ""
+                        } else {
+                            " (not trusted yet: check this matches the host's window)"
+                        }
+                    ));
+                    let accept = (!options.trusted).then(|| options.host_id.clone());
+                    ui.horizontal(|ui| {
+                        for provider in &options.providers {
+                            if ui.button(format!("Sign in with {}", provider.name)).clicked() {
+                                client.sign_in_with_provider(
+                                    address.clone(),
+                                    provider.clone(),
+                                    accept.clone(),
+                                );
+                            }
+                        }
+                        if options.kerberos_service.is_some()
+                            && ui.button("Sign in with Kerberos").clicked()
+                        {
+                            client.sign_in_in_background(
+                                address.clone(),
+                                windowcast_client::SignIn::Kerberos,
+                                accept.clone(),
+                            );
+                        }
+                    });
+                }
+                if let Some(pending) = &snapshot.pending_trust {
+                    ui.horizontal(|ui| {
+                        ui.label(format!(
+                            "{} is new to this client. Its identity is {}: sign in only if                              the host's window shows the same.",
+                            pending.address, pending.fingerprint
+                        ));
+                        if ui.button("It matches: sign in").clicked() {
+                            client.trust_and_sign_in(pending.clone());
+                        }
+                    });
+                }
                 if let Some(error) = &snapshot.error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }

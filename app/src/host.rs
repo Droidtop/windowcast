@@ -181,6 +181,24 @@ pub struct HostClient {
     pub peer: String,
     pub address: String,
     pub seconds: u64,
+    /// The account it acts for, as "name (method via provider)".
+    pub account: Option<String>,
+}
+
+/// Account sign-in as the host window shows it.
+#[derive(Clone)]
+pub struct HostAccounts {
+    /// The host's own accounts: name and groups.
+    pub local: Vec<(String, Vec<String>)>,
+    pub registered: Vec<HostRegistration>,
+}
+
+/// A device registered by an account sign-in.
+#[derive(Clone)]
+pub struct HostRegistration {
+    pub peer: String,
+    pub account: String,
+    pub days_left: u64,
 }
 
 /// Everything the host window shows.
@@ -193,6 +211,9 @@ pub struct HostSnapshot {
     pub streams: Vec<HostStream>,
     pub clients: Vec<HostClient>,
     pub trusted: Vec<String>,
+    /// Account sign-in on, with the host's local accounts (name and
+    /// groups) and the devices sign-ins registered.
+    pub accounts: Option<HostAccounts>,
     /// Away from the LAN: off, or what the rendezvous knows.
     pub away: Option<windowcast_host::remote::RemoteStatus>,
 }
@@ -242,6 +263,9 @@ impl HostRole {
             data_dir: data_dir.join("host"),
         };
         let control = HostControl::open(&config).map_err(|e| e.to_string())?;
+        control
+            .set_accounts(settings.accounts.clone())
+            .map_err(|e| format!("account sign-in: {e}"))?;
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind(&listen))
             .map_err(|e| format!("cannot listen on {listen}: {e}"))?;
@@ -324,8 +348,32 @@ impl HostRole {
                 peer: client.peer.to_hex(),
                 address: client.address.clone(),
                 seconds: client.since.elapsed().as_secs(),
+                account: client.account.as_ref().map(describe),
             })
             .collect();
+        let accounts = self.control.accounts().map(|accounts| {
+            let mut local: Vec<(String, Vec<String>)> = accounts
+                .local()
+                .list()
+                .filter(|a| !a.revoked)
+                .map(|a| (a.username.clone(), a.groups.clone()))
+                .collect();
+            local.sort();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let registered = self
+                .control
+                .registered()
+                .into_iter()
+                .map(|(peer, registration)| HostRegistration {
+                    peer: peer.to_hex(),
+                    account: describe(&registration.account),
+                    days_left: registration.expires.saturating_sub(now) / 86_400,
+                })
+                .collect();
+            HostAccounts { local, registered }
+        });
         let (pin, trusted) = self
             .runtime
             .block_on(async { (self.control.pin().await, self.control.trusted().await) });
@@ -337,6 +385,7 @@ impl HostRole {
             streams: self.streams(&titles),
             clients,
             trusted: trusted.iter().map(|peer| peer.to_hex()).collect(),
+            accounts,
             away: self
                 .away
                 .lock()
@@ -445,6 +494,11 @@ impl HostRole {
     /// and clipboard sharing switch at once.
     pub fn apply(&self, settings: HostSettings) -> Result<(), String> {
         platform::configure(&self.source.agent, &settings)?;
+        if settings.accounts != self.store.get().host.accounts {
+            self.control
+                .set_accounts(settings.accounts.clone())
+                .map_err(|e| format!("account sign-in: {e}"))?;
+        }
         self.source.input.store(settings.input, Ordering::SeqCst);
         self.source
             .clipboard
@@ -468,10 +522,50 @@ impl HostRole {
         });
     }
 
+    /// Makes a local account (sign-in must be on).
+    pub fn add_account(&self, name: &str, password: &str, groups: &[String]) -> Result<(), String> {
+        let accounts = self
+            .control
+            .accounts()
+            .ok_or("turn account sign-in on first")?;
+        if name.trim().is_empty() || password.is_empty() {
+            return Err("an account needs a name and a password".into());
+        }
+        accounts
+            .local()
+            .create(name.trim(), password, groups)
+            .map_err(|e| e.to_string())?;
+        accounts.save_local().map_err(|e| e.to_string())
+    }
+
+    /// Removes a local account; the devices it registered stop at their
+    /// next connection.
+    pub fn remove_account(&self, name: &str) -> Result<(), String> {
+        let accounts = self.control.accounts().ok_or("account sign-in is off")?;
+        accounts.local().remove(name).map_err(|e| e.to_string())?;
+        accounts.save_local().map_err(|e| e.to_string())
+    }
+
+    /// Forgets a device registered by a sign-in.
+    pub fn unregister(&self, peer: &str) -> Result<(), String> {
+        let peer = windowcast_identity::PeerId::from_hex(peer).map_err(|e| e.to_string())?;
+        self.control.unregister(&peer).map_err(|e| e.to_string())
+    }
+
     pub fn forget(&self, peer: &str) -> Result<(), String> {
         let peer = windowcast_identity::PeerId::from_hex(peer).map_err(|e| e.to_string())?;
         self.runtime
             .block_on(self.control.forget(&peer))
             .map_err(|e| e.to_string())
     }
+}
+
+/// An account as the host window shows it.
+fn describe(account: &windowcast_accounts::Account) -> String {
+    format!(
+        "{} ({} via {})",
+        account.name,
+        account.method.name(),
+        account.provider
+    )
 }

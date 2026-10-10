@@ -10,9 +10,11 @@ use std::time::{Duration, Instant};
 
 use windowcast_client::{Client, ClientSession, Event};
 use windowcast_client_windows::{Placement, Shared, StreamSource, StreamStats};
+use windowcast_client::{Client, ClientError, ClientSession, Event, SignIn, SignInOptions};
+use windowcast_client_windows::{Placement, Shared, StreamStats};
 use windowcast_protocol::selection::{self, BackendRule, WindowMatch};
 use windowcast_protocol::{
-    BackendKind, StreamLimits, StreamQuality, VideoCodec, WindowId, WindowInfo,
+    BackendKind, OidcProviderInfo, StreamLimits, StreamQuality, VideoCodec, WindowId, WindowInfo,
 };
 
 use crate::config::{AppLimits, SavedHost, Store};
@@ -66,6 +68,21 @@ struct State {
     streams: HashMap<u64, Stream>,
     log: VecDeque<String>,
     clipboard: Option<String>,
+    /// What the host at an address offers for signing in, when asked.
+    sign_in_options: Option<(String, SignInOptions)>,
+    /// A sign-in waiting for the user to confirm the host's identity.
+    pending_trust: Option<PendingTrust>,
+}
+
+/// A sign-in stopped because this client does not know the host yet: the
+/// user compares the fingerprint with the one the host shows, then signs
+/// in again trusting it.
+#[derive(Clone)]
+pub struct PendingTrust {
+    pub address: String,
+    pub host_id: String,
+    pub fingerprint: String,
+    sign_in: SignIn,
 }
 
 /// One of the host's windows, as the client window lists it.
@@ -107,6 +124,8 @@ pub struct ClientSnapshot {
     pub streams: Vec<ClientStream>,
     pub log: Vec<String>,
     pub clipboard: Option<String>,
+    pub sign_in_options: Option<(String, SignInOptions)>,
+    pub pending_trust: Option<PendingTrust>,
 }
 
 /// Stream window settings for this run only (command-line options), over
@@ -212,6 +231,118 @@ impl ClientRole {
                 }
             }
         }
+        self.connected(address, result)
+    }
+
+    /// Asks the host at `address` what it offers for signing in, on a
+    /// thread of its own; the answer shows in the snapshot.
+    pub fn ask_sign_in_options(self: &Arc<Self>, address: String) {
+        let role = Arc::clone(self);
+        std::thread::spawn(move || match role.client.sign_in_options(&address) {
+            Ok(options) => {
+                role.state.lock().expect("state").sign_in_options = Some((address, options));
+            }
+            Err(e) => {
+                role.state.lock().expect("state").error =
+                    Some(format!("could not ask {address} about signing in: {e}"))
+            }
+        });
+    }
+
+    /// Signs in with an account on a thread of its own, trusting the host
+    /// `accept` (hex) if the user confirmed it. A host this client does
+    /// not know yet stops the sign-in for the user to confirm it
+    /// ([`PendingTrust`]). Replaces any current session.
+    pub fn sign_in_in_background(
+        self: &Arc<Self>,
+        address: String,
+        sign_in: SignIn,
+        accept: Option<String>,
+    ) {
+        let role = Arc::clone(self);
+        std::thread::spawn(move || {
+            let _ = role.sign_in(&address, sign_in, accept.as_deref());
+        });
+    }
+
+    /// Signs in with an OpenID Connect provider in the browser, then with
+    /// its ID token, on a thread of its own.
+    pub fn sign_in_with_provider(
+        self: &Arc<Self>,
+        address: String,
+        provider: OidcProviderInfo,
+        accept: Option<String>,
+    ) {
+        let role = Arc::clone(self);
+        std::thread::spawn(move || {
+            let browser = match role.client.oidc_browser(&provider) {
+                Ok(browser) => browser,
+                Err(e) => {
+                    role.state.lock().expect("state").error = Some(e.to_string());
+                    return;
+                }
+            };
+            role.log(format!(
+                "sign in with {} at {}",
+                provider.name,
+                browser.url()
+            ));
+            open_in_browser(browser.url());
+            match browser.finish(Duration::from_secs(300)) {
+                Ok(id_token) => {
+                    let sign_in = SignIn::Oidc {
+                        provider: provider.name.clone(),
+                        id_token,
+                    };
+                    let _ = role.sign_in(&address, sign_in, accept.as_deref());
+                }
+                Err(e) => {
+                    role.state.lock().expect("state").error =
+                        Some(format!("{}: {e}", provider.name));
+                }
+            }
+        });
+    }
+
+    /// Signs in (blocking).
+    pub fn sign_in(
+        self: &Arc<Self>,
+        address: &str,
+        sign_in: SignIn,
+        accept: Option<&str>,
+    ) -> Result<(), String> {
+        self.disconnect();
+        {
+            let mut state = self.state.lock().expect("state");
+            state.connecting = true;
+            state.pending_trust = None;
+        }
+        let result = self.client.connect_account(address, &sign_in, accept);
+        if let Err(ClientError::HostNotTrusted(host_id)) = &result {
+            let mut state = self.state.lock().expect("state");
+            state.connecting = false;
+            state.pending_trust = Some(PendingTrust {
+                address: address.to_owned(),
+                fingerprint: windowcast_client::fingerprint(host_id),
+                host_id: host_id.clone(),
+                sign_in,
+            });
+            return Err("the host is not trusted yet".into());
+        }
+        self.connected(address, result)
+    }
+
+    /// Signs in again with what stopped at an unknown host, trusting it.
+    pub fn trust_and_sign_in(self: &Arc<Self>, pending: PendingTrust) {
+        self.sign_in_in_background(pending.address, pending.sign_in, Some(pending.host_id));
+    }
+
+    /// Takes over a session that just connected (or the error).
+    fn connected(
+        self: &Arc<Self>,
+        address: &str,
+        result: Result<ClientSession, ClientError>,
+    ) -> Result<(), String> {
         let mut state = self.state.lock().expect("state");
         state.connecting = false;
         let session = match result {
@@ -359,6 +490,8 @@ impl ClientRole {
                 }
                 Event::WindowResized { .. } | Event::WindowFocused { .. } => {}
                 Event::Clipboard { text } => state.clipboard = Some(text),
+                // This app asks for no SSH certificates.
+                Event::SshCertificate { .. } => {}
                 Event::StreamQuality { window, quality } => {
                     if let Some(stream) = state.streams.get_mut(&window) {
                         stream.quality = Some(quality);
@@ -709,6 +842,8 @@ impl ClientRole {
             streams,
             log: state.log.iter().cloned().collect(),
             clipboard: state.clipboard.clone(),
+            sign_in_options: state.sign_in_options.clone(),
+            pending_trust: state.pending_trust.clone(),
         }
     }
 
@@ -733,5 +868,18 @@ impl ClientRole {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+}
+
+/// Opens `url` in the user's browser.
+fn open_in_browser(url: &str) {
+    #[cfg(windows)]
+    let opened = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn();
+    #[cfg(not(windows))]
+    let opened = std::process::Command::new("xdg-open").arg(url).spawn();
+    if let Err(e) = opened {
+        eprintln!("could not open a browser ({e}); open {url}");
     }
 }
