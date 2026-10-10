@@ -18,6 +18,20 @@ android {
         }
     }
 
+    // Debug builds share one key when android/viewer/debug.keystore exists (the Android
+    // debug alias and passwords), so a new debug APK installs over an older one.
+    signingConfigs {
+        getByName("debug") {
+            val shared = file("debug.keystore")
+            if (shared.exists()) {
+                storeFile = shared
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

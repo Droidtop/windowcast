@@ -20,13 +20,12 @@ import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ListView
+import android.widget.ScrollView
 import android.widget.TextView
 import dev.windowcast.AudioPlayer
 import dev.windowcast.Codec
@@ -72,7 +71,8 @@ class MainActivity : Activity() {
     private lateinit var address: EditText
     private lateinit var pin: EditText
     private lateinit var status: TextView
-    private lateinit var list: ListView
+    /** One row per window the host listed. */
+    private lateinit var list: LinearLayout
     private lateinit var surface: SurfaceView
     private lateinit var terminalView: TerminalView
     private lateinit var launchLine: EditText
@@ -84,18 +84,19 @@ class MainActivity : Activity() {
     private var terminalSession: TerminalSession? = null
     /** The fingerprint of an SSH server the user was shown and has not trusted yet. */
     private var pendingFingerprint: String? = null
-    private lateinit var form: LinearLayout
+    private lateinit var form: ScrollView
     private lateinit var sendMicrophone: CheckBox
     @Volatile private var microphone: Microphone? = null
 
     private var client: WindowcastClient? = null
-    private var session: WindowcastSession? = null
+    @Volatile private var session: WindowcastSession? = null
     private var decoder: WindowRenderer? = null
     private var audio: AudioPlayer? = null
     @Volatile private var soundPackets = 0L
     private var windows: List<WindowInfo> = emptyList()
     private var watching: WindowInfo? = null
-    @Volatile private var listening = false
+    /** The thread reading the current session's events; replacing or clearing it stops the old one. */
+    @Volatile private var listener: Thread? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -168,10 +169,8 @@ class MainActivity : Activity() {
                 clipboard.setPrimaryClip(ClipData.newPlainText("windowcast", text))
             }
         }
-        list = ListView(this).apply {
-            setOnItemClickListener { _, _, position, _ -> watch(windows[position]) }
-        }
-        form = LinearLayout(this).apply {
+        list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 32, 32, 32)
             addView(address, MATCH_PARENT, WRAP_CONTENT)
@@ -188,8 +187,10 @@ class MainActivity : Activity() {
             addView(sshPort, MATCH_PARENT, WRAP_CONTENT)
             addView(sshPassword, MATCH_PARENT, WRAP_CONTENT)
             addView(sshButton, MATCH_PARENT, WRAP_CONTENT)
-            addView(list, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+            addView(list, MATCH_PARENT, WRAP_CONTENT)
         }
+        // The whole form scrolls, so a list of windows is never squeezed into what the form leaves.
+        form = ScrollView(this).apply { addView(column, MATCH_PARENT, WRAP_CONTENT) }
         surface = SurfaceView(this).apply {
             visibility = View.GONE
             setOnTouchListener { view, event -> touch(view, event) }
@@ -211,23 +212,42 @@ class MainActivity : Activity() {
     }
 
     private fun connect(address: String, pin: String?) {
-        status.text = "Connecting to $address…"
+        startSession("Connecting to $address…", "Could not connect") { c ->
+            c.connect(address, pin) to { s -> (if (s.paired) "Paired with " else "Connected to ") + s.hostId.take(16) + "…" }
+        }
+    }
+
+    /**
+     * The one way a session starts, for a PIN connect and an account sign-in alike: the old
+     * reader is stopped and joined before the old session closes (it may be inside nextEvent
+     * on it, Droidtop/tracker#447), then [open] makes the new session and the text for its
+     * status line.
+     */
+    private fun startSession(
+        progress: String,
+        failure: String,
+        open: (WindowcastClient) -> Pair<WindowcastSession, (WindowcastSession) -> String>,
+    ) {
+        val c = client ?: return
+        status.text = progress
         worker.execute {
             try {
                 stopMicrophone()
+                stopListening()
                 session?.close()
-                val s = client!!.connect(address, pin)
+                session = null
+                val (s, done) = open(c)
                 // Windows the rules send to RDP (text) come as pictures.
                 s.acceptPictures(true)
                 session = s
                 main.post {
-                    status.text = (if (s.paired) "Paired with " else "Connected to ") + s.hostId.take(16) + "…"
+                    status.text = done(s)
                     if (sendMicrophone.isChecked) startMicrophone()
                 }
                 listen(s)
                 s.requestWindows()
             } catch (e: Exception) {
-                main.post { status.text = "Could not connect: ${e.message}" }
+                main.post { status.text = "$failure: ${e.message}" }
             }
         }
     }
@@ -405,26 +425,8 @@ class MainActivity : Activity() {
     }
 
     private fun connectAccount(address: String, signIn: SignIn, accept: String?) {
-        val c = client ?: return
-        status.text = "Signing in to $address…"
-        // The same session start as connect() (Droidtop/tracker#447 changes how the old
-        // session is closed there; this follows it when that lands).
-        worker.execute {
-            try {
-                stopMicrophone()
-                session?.close()
-                val s = c.connectAccount(address, signIn, accept)
-                s.acceptPictures(true)
-                session = s
-                main.post {
-                    status.text = "Signed in to " + s.hostId.take(16) + "…"
-                    if (sendMicrophone.isChecked) startMicrophone()
-                }
-                listen(s)
-                s.requestWindows()
-            } catch (e: Exception) {
-                main.post { status.text = "Could not sign in: ${e.message}" }
-            }
+        startSession("Signing in to $address…", "Could not sign in") { c ->
+            c.connectAccount(address, signIn, accept) to { s -> "Signed in to " + s.hostId.take(16) + "…" }
         }
     }
 
@@ -451,11 +453,18 @@ class MainActivity : Activity() {
         m.stop()
     }
 
-    /** Reads session events on their own thread. */
+    /** Tells the reader to stop and, off the main thread, waits for it (it polls every 500 ms). */
+    private fun stopListening(wait: Boolean = true) {
+        val t = listener ?: return
+        listener = null
+        if (wait && t !== Thread.currentThread() && Looper.myLooper() != Looper.getMainLooper()) t.join(2000)
+    }
+
+    /** Reads session events on their own thread; it ends when it is no longer [listener] or [s] closes. */
     private fun listen(s: WindowcastSession) {
-        listening = true
-        Thread({
-            while (listening) {
+        val reader = Thread({
+            val me = Thread.currentThread()
+            while (listener === me && s.isOpen) {
                 when (val event = s.nextEvent(500) ?: continue) {
                     is Event.Windows -> main.post { showWindows(event.windows) }
                     is Event.StreamStarted -> main.post { startDecoding(event) }
@@ -466,22 +475,34 @@ class MainActivity : Activity() {
                         clipboard.setPrimaryClip(ClipData.newPlainText("windowcast", event.text))
                     }
                     is Event.Closed -> {
-                        main.post { status.text = "Disconnected"; stopMicrophone(); stopDecoding() }
+                        if (listener === me) main.post { status.text = "Disconnected"; stopMicrophone(); stopDecoding() }
                         break
                     }
                     else -> {}
                 }
             }
-        }, "windowcast-events").start()
+        }, "windowcast-events")
+        listener = reader
+        reader.start()
     }
 
     private fun showWindows(list: List<WindowInfo>) {
         windows = list
-        this.list.adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_list_item_1,
-            list.map { "${it.title}  (${it.appId}, ${it.width}x${it.height})" },
-        )
+        this.list.removeAllViews()
+        for (window in list) {
+            // The agent lists a window it cannot stream as 0x0.
+            val capturable = window.width > 0 && window.height > 0
+            this.list.addView(TextView(this).apply {
+                text = "${window.title}  (${window.appId}, " + (if (capturable) "${window.width}x${window.height})" else "can't capture)")
+                textSize = 18f
+                setPadding(16, 24, 16, 24)
+                isFocusable = true
+                isClickable = true
+                setOnClickListener {
+                    if (capturable) watch(window) else status.text = "${window.title} can't be captured on this host"
+                }
+            }, MATCH_PARENT, WRAP_CONTENT)
+        }
         status.text = "${list.size} windows. Tap one to watch it."
     }
 
@@ -566,10 +587,20 @@ class MainActivity : Activity() {
             try {
                 val pid = s.launch(argv)
                 s.requestWindows()
-                main.post { status.text = "Started ${argv[0]}" + if (pid > 0) " (process $pid)" else "" }
+                main.post {
+                    status.text = "Started ${argv[0]}" + if (pid > 0) " (process $pid)" else ""
+                    refreshWindowsSoon()
+                }
             } catch (e: Exception) {
                 main.post { status.text = "Could not start it: ${e.message}" }
             }
+        }
+    }
+
+    /** The new window is not mapped when the launch returns: ask for the list again a few times. */
+    private fun refreshWindowsSoon() {
+        for (delay in REFRESH_DELAYS_MS) {
+            main.postDelayed({ session?.let { s -> worker.execute { s.requestWindows() } } }, delay)
         }
     }
 
@@ -626,6 +657,7 @@ class MainActivity : Activity() {
         terminalView.detach()
         terminalView.visibility = View.GONE
         form.visibility = View.VISIBLE
+        showIdleStatus()
         val t = terminalSession
         terminalSession = null
         if (t != null) worker.execute { t.close() }
@@ -685,6 +717,11 @@ class MainActivity : Activity() {
         showForm()
     }
 
+    /** What the status line says when nothing is going on, so no old message outlives its screen. */
+    private fun showIdleStatus() {
+        status.text = if (session?.isOpen == true) "${windows.size} windows. Tap one to watch it." else "Not connected"
+    }
+
     private fun showForm() {
         surface.visibility = View.GONE
         form.visibility = View.VISIBLE
@@ -701,6 +738,7 @@ class MainActivity : Activity() {
         if (surface.visibility == View.VISIBLE && window != null && s != null) {
             worker.execute { s.stopWindow(window.id) }
             stopDecoding()
+            showIdleStatus()
         } else {
             super.onBackPressed()
         }
@@ -708,7 +746,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         inputWorker.shutdown()
-        listening = false
+        stopListening(wait = false)
         terminalView.detach()
         terminalSession?.close()
         decoder?.stop()
@@ -724,5 +762,6 @@ class MainActivity : Activity() {
         private const val RECORD_REQUEST = 1
         /** How long a browser sign-in may take before it is given up. */
         private const val SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000
+        private val REFRESH_DELAYS_MS = longArrayOf(1000, 2500, 5000, 10000)
     }
 }
