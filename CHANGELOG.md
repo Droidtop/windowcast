@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.24.0] - 2026-10-10
 
 ### Added
 - RemoteApp launches through a session (docs/BACKENDS.md, "RemoteApp"): a program the client's rules give RDP, launched on a Windows host, runs as a RemoteApp of that host's own Remote Desktop. The client logs in itself (the host hands over the login and Remote Desktop's certificate to pin) and each window Windows reports joins the session's window list (ids with `REMOTE_APP_WINDOW` set), with its own picture and input. `ChannelKind::Launch` gains `remote_app` and the host may answer `CommandMessage::RemoteApp`; protocol version 8.
