@@ -137,6 +137,14 @@ The Android library and viewer: build client-core with
 then `./gradlew :windowcast:assembleRelease :viewer:assembleDebug` in
 `android/` (CI does both, `.github/workflows/android.yml`).
 
+Debug builds of the viewer are signed with `android/viewer/debug.keystore`,
+committed on purpose: it only identifies debug builds, so each new debug
+APK installs over the last one (its passwords are Android's usual
+`android`, alias `androiddebugkey`). It is not a release key and grants
+nothing; release builds keep their own signing. Debug installs from 0.23.0
+or earlier were signed with each build machine's own key and need one
+uninstall first.
+
 Trying it: run `windowcast-app --role host` on one machine and
 `windowcast-app --role client` on another (or both roles on one), enter
 the host's PIN in the client window and pick a window to stream; or

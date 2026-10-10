@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `windowcast-testhost --content text` (or `game`, `video`, `general`) sets its window's content hint, so the default rules can pick RDP for it (`WithContent`; Droidtop/tracker#449).
+- The viewer's debug APKs are signed with one committed key, `android/viewer/debug.keystore`, so a new debug build installs over the last. It identifies debug builds only; release builds keep their own signing. Debug installs of 0.22.0 or 0.23.0 need one uninstall first.
+
+### Fixed
+- Android library: no native call runs under a lock the UI needs, and a handle is freed only after the last call on it returns (`NativeHandle`): terminal input no longer waits behind `terminalWait` (ANRs), and closing a session during `nextEvent` no longer crashes (Droidtop/tracker#446, #447). The library's unit tests run in CI.
+- Viewer: Connect again stops the old event thread before closing its session; the window list scrolls and shows several rows, refreshes after "Start on the host", and marks windows it cannot capture; the status line resets after Back (Droidtop/tracker#447, #448).
+
 ## [0.23.0] - 2026-10-10
 
 ### Added
