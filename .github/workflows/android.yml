@@ -111,8 +111,10 @@ jobs:
           Start-Service TermService -ErrorAction SilentlyContinue
           $password = "Wc-" + [guid]::NewGuid().ToString("N") + "-9a"
           Write-Output "::add-mask::$password"
-          net user wcrdp $password /add | Out-Null
-          net localgroup "Remote Desktop Users" wcrdp /add | Out-Null
+          # New-LocalUser, not net user: net user asks before taking a
+          # password longer than 14 characters, and gets no answer here.
+          New-LocalUser -Name wcrdp -Password (ConvertTo-SecureString $password -AsPlainText -Force) -PasswordNeverExpires | Out-Null
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member wcrdp
           $env:WINDOWCAST_TEST_WINDOWS_RDP_USER = "wcrdp"
           $env:WINDOWCAST_TEST_WINDOWS_RDP_PASSWORD = $password
           cargo test -p windowcast-rdp --no-fail-fast -- --nocapture
