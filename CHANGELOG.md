@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- A RemoteApp launch is waited for as long as the host allows Windows to start the program (100 s), not the 15 s other channels get: on CI Notepad took 12.7 s in one run and longer in the next, and the client gave up ("the host did not answer"). 0.34.0 was tagged but not released because of it.
+
 ## [0.34.0] - 2026-10-14
 
 ### Changed

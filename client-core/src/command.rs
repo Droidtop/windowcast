@@ -20,6 +20,11 @@ use crate::{Client, ClientError, ClientSession};
 /// How long a host or server has to answer an open.
 const OPEN_WITHIN: Duration = Duration::from_secs(15);
 
+/// How long a host has to answer a launch it may run as a RemoteApp: it
+/// logs in to its Remote Desktop and waits for Windows to start the
+/// program, which it allows 90 s (`windowcast_rdp::remoteapp_windows`).
+const REMOTE_APP_WITHIN: Duration = Duration::from_secs(100);
+
 /// The `TERM` the screen model understands.
 pub const TERM: &str = "xterm-256color";
 
@@ -108,6 +113,12 @@ impl ClientSession {
     }
 
     fn open(&self, kind: ChannelKind) -> Result<(Channel, Opened), ClientError> {
+        let within = match &kind {
+            ChannelKind::Launch {
+                remote_app: true, ..
+            } => REMOTE_APP_WITHIN,
+            _ => OPEN_WITHIN,
+        };
         let routes = Arc::clone(&self.shared.channels);
         let id = ChannelId(routes.next.fetch_add(1, Ordering::SeqCst));
         let (channel, end) = Channel::pair(None);
@@ -127,7 +138,7 @@ impl ClientSession {
             routes.forget(id);
             return Err(e.into());
         }
-        let opened = match opened_rx.recv_timeout(OPEN_WITHIN) {
+        let opened = match opened_rx.recv_timeout(within) {
             Ok(Ok(opened)) => opened,
             Ok(Err(reason)) => return Err(ClientError::Refused(reason)),
             Err(_) => {
