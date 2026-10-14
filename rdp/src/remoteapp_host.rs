@@ -1,7 +1,7 @@
 //! Launches served as RemoteApps of Windows' own Remote Desktop
-//! (docs/BACKENDS.md, "RemoteApp"): the host hands the client a login for
-//! its Remote Desktop, pins Remote Desktop's certificate, and the client
-//! runs the program there itself (`client::ClientConfig::remote_app`).
+//! (docs/BACKENDS.md, "RemoteApp"): the host logs in to its own Remote
+//! Desktop, pinning its certificate, and runs the program there itself
+//! (`crate::remoteapp_windows`), its windows joining the host's list.
 //!
 //! The decisions (when it is on, which Windows user, the host-made
 //! accounts and their passwords) are here for every platform; the system
@@ -9,11 +9,13 @@
 //! system reports that it serves no RemoteApps.
 
 use std::collections::BTreeMap;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
-use windowcast_host::command::{Principal, RemoteAppLogin, RemoteApps};
-use windowcast_protocol::HandoffTarget;
+use windowcast_host::command::{Principal, RemoteAppRefusal, RemoteApps};
+
+use crate::remoteapp_windows::{Login as AppLogin, RemoteAppWindows, StartError};
 
 /// Whether launches may become RemoteApps. Off unless the host's owner
 /// turns it on: a RemoteApp runs in a Remote Desktop session of its own,
@@ -34,8 +36,8 @@ pub enum Availability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Login {
     /// The user the client signed in as (the host's Windows account), with
-    /// the password the client keeps for the session; for any other
-    /// sign-in, the user the host runs as, with a password the user types.
+    /// the password the client signed in with; for any other sign-in, the
+    /// user the host runs as, with a password the user types.
     #[default]
     SignedInUser,
     /// A local user the host makes per windowcast account (and per
@@ -94,13 +96,17 @@ pub struct WindowsRemoteApps {
     setting: RwLock<Setting>,
     /// Where host-made accounts' protected passwords are kept.
     data_dir: PathBuf,
+    /// The RemoteApps running, whose windows the host lists
+    /// (`remoteapp_windows::WithRemoteApps`).
+    windows: Arc<RemoteAppWindows>,
 }
 
 impl WindowsRemoteApps {
-    pub fn new(data_dir: PathBuf, setting: Setting) -> Self {
+    pub fn new(data_dir: PathBuf, setting: Setting, windows: Arc<RemoteAppWindows>) -> Self {
         WindowsRemoteApps {
             setting: RwLock::new(setting),
             data_dir,
+            windows,
         }
     }
 
@@ -120,40 +126,63 @@ pub fn current_user() -> Result<String, String> {
 }
 
 impl WindowsRemoteApps {
-    fn login(
+    /// Logs in to this computer's Remote Desktop for `who` and runs `argv`
+    /// there.
+    fn run(
         &self,
         who: &Principal,
+        argv: &[String],
+        password: Option<&str>,
         login: Login,
         status: &Status,
-    ) -> Result<RemoteAppLogin, String> {
+    ) -> Result<(), RemoteAppRefusal> {
+        let refused = RemoteAppRefusal::Refused;
         let port = status
             .port
-            .ok_or("Remote Desktop is off on this computer")?;
+            .ok_or_else(|| refused("Remote Desktop is off on this computer".into()))?;
         let certificate = crate::tls::remote_desktop_certificate(port)
-            .map_err(|e| format!("could not reach Remote Desktop: {e}"))?;
-        let (username, password, sign_in_password) = match login {
-            Login::SignedInUser => match &who.account {
-                Some(account) if account.provider == "os" => {
-                    (account.name.clone(), String::new(), true)
+            .map_err(|e| refused(format!("could not reach Remote Desktop: {e}")))?;
+        let (username, password, typed) = match login {
+            Login::SignedInUser => {
+                let user = match &who.account {
+                    Some(account) if account.provider == "os" => account.name.clone(),
+                    _ => system::current_user().map_err(refused)?,
+                };
+                match password {
+                    Some(password) => (user, password.to_owned(), true),
+                    None => return Err(RemoteAppRefusal::PasswordNeeded(user)),
                 }
-                _ => (system::current_user()?, String::new(), false),
-            },
+            }
             Login::HostAccount => {
                 let name = host_account_name(who);
-                let password = self.host_account(&name)?;
+                let password = self.host_account(&name).map_err(refused)?;
                 (name, password, false)
             }
         };
-        Ok(RemoteAppLogin {
-            target: HandoffTarget {
-                address: String::new(),
-                port,
-                username,
-                password,
-                certificate_sha256: Some(certificate),
-            },
-            sign_in_password,
-        })
+        let (domain, user) = match username.split_once('\\') {
+            Some((domain, user)) => (Some(domain.to_owned()), user.to_owned()),
+            None => (None, username.clone()),
+        };
+        // A loopback address of its own: Remote Desktop clients refuse
+        // 127.0.0.1, the server takes the whole range.
+        let address = SocketAddr::from((Ipv4Addr::new(127, 0, 0, 2), port));
+        self.windows
+            .start(
+                argv,
+                AppLogin {
+                    address,
+                    username: user,
+                    domain,
+                    password,
+                    certificate: Some(certificate),
+                },
+            )
+            .map_err(|e| match e {
+                // A password the client gave that Windows did not take:
+                // ask the user.
+                StartError::Login(_) if typed => RemoteAppRefusal::PasswordNeeded(username),
+                StartError::Login(reason) | StartError::Other(reason) => refused(reason),
+            })
     }
 
     /// The password of the host-made user `name`, making the user (or
@@ -178,17 +207,24 @@ impl WindowsRemoteApps {
 }
 
 impl RemoteApps for WindowsRemoteApps {
-    fn launch(&self, who: &Principal, _argv: &[String]) -> Option<Result<RemoteAppLogin, String>> {
+    fn launch(
+        &self,
+        who: &Principal,
+        argv: &[String],
+        password: Option<&str>,
+    ) -> Option<Result<(), RemoteAppRefusal>> {
         let setting = *self.setting.read().expect("setting");
         let status = match system::status() {
             Ok(status) => status,
-            Err(e) if setting.availability == Availability::On => return Some(Err(e)),
+            Err(e) if setting.availability == Availability::On => {
+                return Some(Err(RemoteAppRefusal::Refused(e)))
+            }
             Err(_) => return None,
         };
         match setting.availability {
             Availability::Off => None,
             Availability::Auto if !status.auto() => None,
-            _ => Some(self.login(who, setting.login, &status)),
+            _ => Some(self.run(who, argv, password, setting.login, &status)),
         }
     }
 }

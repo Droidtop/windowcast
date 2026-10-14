@@ -18,10 +18,13 @@ use windowcast_protocol::{
 use crate::config::{HostSettings, Store};
 use crate::platform::{self, Agent};
 
-/// The agent, with input and clipboard sharing switched by the host's
-/// settings.
+/// The agent, with the host's RemoteApps beside its windows, and input and
+/// clipboard sharing switched by the host's settings.
 struct Gated {
-    agent: Agent,
+    /// The platform's agent itself, for its settings.
+    agent: Arc<Agent>,
+    /// The agent's windows and the host's RemoteApps' (`WithRemoteApps`).
+    windows: Arc<dyn WindowSource>,
     input: Arc<AtomicBool>,
     clipboard: AtomicBool,
     microphone: Arc<AtomicBool>,
@@ -65,19 +68,19 @@ impl windowcast_host::gamepad::GamepadSink for GatedPads {
 
 impl WindowSource for Gated {
     fn list_windows(&self) -> Vec<WindowInfo> {
-        self.agent.list_windows()
+        self.windows.list_windows()
     }
 
     fn encoders(&self) -> Vec<VideoCodec> {
-        self.agent.encoders()
+        self.windows.encoders()
     }
 
     fn backends(&self) -> Vec<BackendKind> {
-        self.agent.backends()
+        self.windows.backends()
     }
 
     fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
-        self.agent.open(window, codec)
+        self.windows.open(window, codec)
     }
 
     fn open_desktop(
@@ -85,30 +88,30 @@ impl WindowSource for Gated {
         window: WindowId,
         codec: VideoCodec,
     ) -> Result<Box<dyn FrameSource>, String> {
-        self.agent.open_desktop(window, codec)
+        self.windows.open_desktop(window, codec)
     }
 
     fn open_pictures(
         &self,
         window: WindowId,
     ) -> Option<Result<Box<dyn windowcast_host::PictureSource>, String>> {
-        self.agent.open_pictures(window)
+        self.windows.open_pictures(window)
     }
 
     fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
         if self.input.load(Ordering::SeqCst) {
-            self.agent.input(event, focus);
+            self.windows.input(event, focus);
         }
     }
     fn cursor(&self) -> Option<windowcast_host::CursorState> {
-        self.agent.cursor()
+        self.windows.cursor()
     }
     fn cursor_image(&self, shape: u64) -> Option<windowcast_protocol::CursorImage> {
-        self.agent.cursor_image(shape)
+        self.windows.cursor_image(shape)
     }
 
     fn gamepads(&self) -> Option<Result<Box<dyn windowcast_host::gamepad::GamepadSink>, String>> {
-        Some(self.agent.gamepads()?.map(|sink| {
+        Some(self.windows.gamepads()?.map(|sink| {
             Box::new(GatedPads {
                 sink,
                 allowed: Arc::clone(&self.input),
@@ -120,7 +123,7 @@ impl WindowSource for Gated {
         // While sharing is off the host reports a clipboard that never
         // changes, so turning it on mid-session shares from then on.
         if self.clipboard.load(Ordering::SeqCst) {
-            self.agent.clipboard()
+            self.windows.clipboard()
         } else {
             Some((0, String::new()))
         }
@@ -128,12 +131,12 @@ impl WindowSource for Gated {
 
     fn set_clipboard(&self, text: &str) {
         if self.clipboard.load(Ordering::SeqCst) {
-            self.agent.set_clipboard(text);
+            self.windows.set_clipboard(text);
         }
     }
 
     fn host_state(&self) -> HostState {
-        self.agent.host_state()
+        self.windows.host_state()
     }
 
     fn set_private_session(
@@ -141,14 +144,14 @@ impl WindowSource for Gated {
         start: bool,
         password: Option<&str>,
     ) -> Result<(), windowcast_host::PrivateRefusal> {
-        self.agent.set_private_session(start, password)
+        self.windows.set_private_session(start, password)
     }
 
     fn open_audio(
         &self,
         window: WindowId,
     ) -> Option<Result<Box<dyn windowcast_host::audio::AudioSource>, String>> {
-        self.agent.open_audio(window)
+        self.windows.open_audio(window)
     }
 
     fn microphone(
@@ -157,7 +160,7 @@ impl WindowSource for Gated {
         if !self.microphone.load(Ordering::SeqCst) {
             return Some(Err("this host does not take clients' microphones".into()));
         }
-        Some(self.agent.microphone()?.map(|sink| {
+        Some(self.windows.microphone()?.map(|sink| {
             Box::new(GatedMicrophone {
                 sink,
                 allowed: Arc::clone(&self.microphone),
@@ -307,7 +310,14 @@ impl HostRole {
             .block_on(tokio::net::TcpListener::bind(&listen))
             .map_err(|e| format!("cannot listen on {listen}: {e}"))?;
         println!("host listening on {listen}");
+        let agent = Arc::new(agent);
+        let remote_app_windows =
+            Arc::new(windowcast_rdp::remoteapp_windows::RemoteAppWindows::default());
         let source = Arc::new(Gated {
+            windows: Arc::new(windowcast_rdp::remoteapp_windows::WithRemoteApps::new(
+                Arc::clone(&agent) as Arc<dyn WindowSource>,
+                Arc::clone(&remote_app_windows),
+            )),
             agent,
             input: Arc::new(AtomicBool::new(settings.input)),
             clipboard: AtomicBool::new(settings.clipboard),
@@ -326,6 +336,7 @@ impl HostRole {
         let remote_apps = Arc::new(windowcast_rdp::remoteapp_host::WindowsRemoteApps::new(
             config.data_dir.clone(),
             settings.remote_apps.setting(),
+            remote_app_windows,
         ));
         control.set_remote_apps(Some(Arc::clone(&remote_apps) as _));
         runtime.spawn(windowcast_host::serve_with(
@@ -426,7 +437,7 @@ impl HostRole {
         let (pin, trusted) = self
             .runtime
             .block_on(async { (self.control.pin().await, self.control.trusted().await) });
-        let private_session = self.source.agent.host_state().private_session;
+        let private_session = self.source.windows.host_state().private_session;
         HostSnapshot {
             private_session,
             pin,

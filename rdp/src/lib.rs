@@ -7,8 +7,11 @@
 //!   client (mstsc, FreeRDP, ours) shows that window and types into it.
 //! - [`client`]: a client for RDP hosts (ours, Windows' own Remote Desktop,
 //!   any other), its picture as RGBA and its input from windowcast's.
-//! - [`remoteapp`]: RemoteApp on the client, one program's window
-//!   instead of the desktop.
+//! - [`remoteapp`]: the RemoteApp side of an RDP client: one program's
+//!   windows instead of the desktop.
+//! - [`remoteapp_host`], [`remoteapp_windows`]: launches a Windows host
+//!   runs as RemoteApps of its own Remote Desktop, their windows listed
+//!   and carried like the host's own.
 //! - [`private_session`]: a Windows host's session moved to a Remote
 //!   Desktop connection of its own, out of sight of its screen.
 //! - [`tls`]: the host's TLS identity, pinned by fingerprint.
@@ -21,6 +24,8 @@ pub mod private_session;
 pub mod remoteapp;
 #[cfg(feature = "host")]
 pub mod remoteapp_host;
+#[cfg(feature = "host")]
+pub mod remoteapp_windows;
 pub mod tls;
 
 #[cfg(feature = "host")]

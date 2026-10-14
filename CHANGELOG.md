@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- RemoteApp launches run on the host (docs/BACKENDS.md, "RemoteApp"; Droidtop/tracker#457 step 5, protocol 15): the host logs in to its own Remote Desktop and runs the program, and its windows join the host's window list (`windowcast_rdp::remoteapp_windows`: `RemoteAppWindows`, `WithRemoteApps`), so any client streams them on any carrier, as video (`windowcast_host::video::EncodedPictures`, OpenH264) or RDP pictures, and switches them like any window. `ChannelKind::Launch` carries the client's Windows password for that one login; the host answers `PasswordNeeded` instead of handing out a login (`CommandMessage::RemoteApp` is gone). `RemoteApps::launch` takes the password and runs the program.
+
+### Removed
+- client-core's own RemoteApp connections (`REMOTE_APP_WINDOW` windows, its RDP login and picture cutting): the host does that now. A client no longer needs to show RDP pictures or be on the host's network for a RemoteApp launch.
+
 ## [0.33.0] - 2026-10-14
 
 ### Added

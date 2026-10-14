@@ -239,6 +239,121 @@ impl OpenH264 {
     }
 }
 
+/// Frames per second an [`EncodedPictures`] stream runs at, at most.
+const PICTURES_FPS: u32 = 30;
+
+/// A window whose pictures come whole ([`crate::PictureSource`], such as
+/// a RemoteApp window cut from its session's desktop) as an H.264 stream,
+/// with OpenH264: a carrier like any captured window's.
+pub struct EncodedPictures {
+    pictures: Box<dyn crate::PictureSource>,
+    encoder: Option<OpenH264>,
+    size: (usize, usize),
+    last_sent: std::time::Instant,
+    quality: crate::quality::Quality,
+    rate: (u32, u32),
+    scaled: Vec<u8>,
+}
+
+impl EncodedPictures {
+    pub fn new(pictures: Box<dyn crate::PictureSource>) -> Self {
+        EncodedPictures {
+            pictures,
+            encoder: None,
+            size: (0, 0),
+            last_sent: std::time::Instant::now(),
+            quality: crate::quality::Quality::default(),
+            rate: (0, 0),
+            scaled: Vec::new(),
+        }
+    }
+
+    /// Bits and frames a second for `size`: 8 Mbit/s at 1920x1080, scaled
+    /// by area, and lower when adaptive quality holds the stream down.
+    fn rate(&self, size: (usize, usize)) -> (u32, u32) {
+        let area = (size.0 * size.1) as u64;
+        let nominal = (8_000_000u64 * area / (1920 * 1080)).clamp(500_000, 50_000_000) as u32;
+        let bitrate = self
+            .quality
+            .bitrate
+            .map_or(nominal, |held| held.min(nominal));
+        let fps = self
+            .quality
+            .fps
+            .map_or(PICTURES_FPS, |fps| fps.min(PICTURES_FPS))
+            .max(1);
+        (bitrate, fps)
+    }
+}
+
+impl crate::FrameSource for EncodedPictures {
+    fn describe(&self) -> String {
+        "OpenH264 (software)".into()
+    }
+
+    fn frame_rate(&self) -> u32 {
+        PICTURES_FPS
+    }
+
+    fn set_quality(&mut self, quality: crate::quality::Quality) {
+        self.quality = quality;
+    }
+
+    fn next_frame(&mut self, mut keyframe: bool) -> Option<crate::EncodedFrame> {
+        loop {
+            let picture = self.pictures.next_picture()?;
+            let source = Bgra {
+                data: &picture.data,
+                width: picture.width as usize,
+                height: picture.height as usize,
+                stride: picture.stride,
+            };
+            let size = scaled(source.width, source.height, self.quality.scale);
+            if size.0 < 2 || size.1 < 2 {
+                continue;
+            }
+            let rate = self.rate(size);
+            let mut announce = None;
+            if size != self.size || self.encoder.is_none() {
+                self.encoder = Some(OpenH264::new(rate.0, rate.1).ok()?);
+                self.size = size;
+                self.rate = rate;
+                announce = Some((size.0 as u32, size.1 as u32));
+                keyframe = true;
+            }
+            let encoder = self.encoder.as_mut().expect("encoder");
+            if rate != self.rate {
+                let _ = encoder.set_rate(rate.0, rate.1);
+                self.rate = rate;
+            }
+            let source = if size == even(source.width, source.height) {
+                source
+            } else {
+                scale_bgra(&source, size, &mut self.scaled)
+            };
+            match encoder.encode(size.0, size.1, keyframe, |i420| {
+                to_i420(&source, i420);
+                Ok(())
+            }) {
+                Ok(Some(data)) => {
+                    let duration = self.last_sent.elapsed();
+                    self.last_sent = std::time::Instant::now();
+                    return Some(crate::EncodedFrame {
+                        data,
+                        duration,
+                        size: announce,
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("encoding a window's pictures failed: {e}");
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

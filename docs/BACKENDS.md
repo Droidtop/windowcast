@@ -107,12 +107,14 @@ with Remote Desktop Services licences. So:
 - **(b) Windows RemoteApps, opt-in.** A Windows host's owner may turn on
   RemoteApp launches: a launched program the client's rules give RDP then
   runs as a RemoteApp of Windows' own Remote Desktop, in a Remote Desktop
-  session of its own and not on the host's screen. The client logs in to
-  the host's Remote Desktop itself, asks for the program (the `rail`
-  channel), and each window Windows describes in its window orders
-  becomes a window in the client's window list, drawn from the RemoteApp
-  desktop's picture, with input mapped to it. Off by default on every
-  Windows edition.
+  session of its own and not on the host's screen. The host logs in to
+  its own Remote Desktop as that RemoteApp's client, asks for the program
+  (the `rail` channel), and each window Windows describes in its window
+  orders becomes a window in the host's window list, drawn from the
+  RemoteApp desktop's picture, with input mapped to it: any client
+  streams it on any carrier, as it would a window on the host's screen
+  (`windowcast_rdp::remoteapp_windows`). Off by default on every Windows
+  edition.
 
 Whole-desktop RDP stays what a client gets when it asks for the desktop
 (`StreamTarget::Desktop`).
@@ -155,38 +157,43 @@ How it works:
 
 1. The client evaluates its rules on the program as a window would be
    (`app_id` from the program's file name, content from
-   `selection::classify`). If they give `Rdp`, the client shows pictures,
-   and the host is on the same network, the `Launch` asks for a RemoteApp.
+   `selection::classify`). If they give `Rdp`, the `Launch` asks for a
+   RemoteApp, with the Windows password the client has (below).
 2. The host serves it as a RemoteApp only when its owner turned RemoteApp
    launches on (below) and Remote Desktop is on; otherwise, and by
    default, it starts the program in the user's own session as a plain
    launch, and the program's windows stream as usual, over (a) when the
    rules give them RDP.
-3. The host answers with a `HandoffTarget` for its Remote Desktop: the
-   address, port 3389 (or the configured port), the Windows user to log
-   in as, a password only for a host-made account, and the SHA-256 of
-   Remote Desktop's certificate, which the host reads by connecting to
-   itself, so the client pins it.
-4. The client logs in with TLS and NLA and runs the program; the windows
-   it reports join the window list. When the program's last window
-   closes, the client ends the RDP connection.
+3. The host logs in to its own Remote Desktop (loopback, port 3389 or
+   the configured one) with TLS and NLA, pinning the certificate it read
+   by connecting to itself, as the Windows user below, and runs the
+   program there. Without the password it needs it answers
+   `PasswordNeeded` with the user's name, and the client asks the user.
+4. The launch is answered once Windows started the program. The windows
+   it reports join the host's window list (the host sends the list as it
+   changes); each streams like the host's own windows, as video encoded
+   from its pictures or as RDP pictures, and takes input over the
+   session. When the program's last window closes, the host ends the
+   RDP connection. RemoteApp windows have no sound yet.
 
 ### Logging in: one host setting
 
 - **As the signed-in user (default).** A client that signed in with the
   host's own Windows account (the `os` account source: PAM or
   LogonUserW) reuses that password: the client keeps it in memory for
-  the session only and never stores it, and the host hands over only the
-  user name. A client that signed in another way (PIN pairing, OIDC,
-  LDAP, a windowcast account) is asked for the Windows password when it
-  launches (`ClientError::PasswordNeeded`, which the app turns into a
-  prompt); a PIN-paired device logs in as the user the host runs as.
+  the session only, never stores it, and sends it with the launch, which
+  the host uses for that one login and keeps nowhere. A client that
+  signed in another way (PIN pairing, OIDC, LDAP, a windowcast account)
+  is asked for the Windows password when the host answers
+  `PasswordNeeded` (`ClientError::PasswordNeeded`, which the app and the
+  viewer turn into a prompt); a PIN-paired device logs in as the user
+  the host runs as.
   Kerberos with the user's ticket on a domain-joined host is planned and
   not built.
 - **Host-made account.** The host creates one local Windows user per
   windowcast account (and one per PIN-paired device), with a random
   password the host keeps protected by DPAPI, adds it to "Remote Desktop
-  Users", and hands that login over. Launches then need no Windows
+  Users", and logs in with it. Launches then need no Windows
   password from the user; it suits Windows Server and hosts many people
   use. Creating users needs the host to run with administrator rights;
   without them the host says so and refuses the RemoteApp.
@@ -363,6 +370,8 @@ selector is the next step.
   logs in to its own Remote Desktop as the RemoteApp client and serves
   those windows as host windows, so they too are carried by any carrier
   and switch like any other, instead of reaching the client over RDP only.
+  Built (protocol 15): `RemoteApps::launch` runs it on the host, and
+  `WithRemoteApps` lists its windows and carries them.
 
 ## A locked host (Droidtop/tracker#467)
 

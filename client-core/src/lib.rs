@@ -16,15 +16,13 @@
 mod command;
 pub mod ffi;
 pub mod ffi_terminal;
-mod remote_app;
 mod selector;
 
 pub use command::SshSession;
-pub use remote_app::REMOTE_APP_WINDOW;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -714,8 +712,6 @@ struct Shared {
     host_ip: Option<std::net::IpAddr>,
     /// Windows streamed over RDP: their connections.
     rdp: Mutex<HashMap<WindowId, Arc<RdpStream>>>,
-    /// The window keys and text go to: the last one a pointer event named.
-    focus: Mutex<Option<WindowId>>,
     /// A picture a caller could not take (its buffer was too small),
     /// handed out again first.
     held_pictures: Mutex<HashMap<WindowId, RgbaPicture>>,
@@ -723,14 +719,9 @@ struct Shared {
     channels: Arc<command::Routes>,
     /// Where events go, for those that start on this side (RemoteApps).
     event_tx: Mutex<mpsc::Sender<Event>>,
-    /// RemoteApp connections, and the next one's key.
-    remote_apps: Mutex<Vec<remote_app::Conn>>,
-    remote_keys: AtomicU32,
-    /// RemoteApp windows being shown, with the number of the last picture
-    /// each was given.
-    remote_viewing: Mutex<HashMap<WindowId, u64>>,
-    /// The password this client signed in with, for RemoteApps logging in
-    /// as the same Windows user. In memory only.
+    /// The password this client signed in with, for a RemoteApp launch or
+    /// a private session that logs in as the host's Windows user. In
+    /// memory only.
     sign_in_password: Mutex<Option<String>>,
     /// The last carrier generation asked for, per window.
     generations: Mutex<HashMap<WindowId, u32>>,
@@ -950,13 +941,9 @@ impl ClientSession {
             limits: Mutex::default(),
             host_ip,
             rdp: Mutex::default(),
-            focus: Mutex::default(),
             held_pictures: Mutex::default(),
             channels: Arc::default(),
             event_tx: Mutex::new(event_tx.clone()),
-            remote_apps: Mutex::default(),
-            remote_keys: AtomicU32::new(1),
-            remote_viewing: Mutex::default(),
             sign_in_password: Mutex::default(),
             generations: Mutex::default(),
             carriers: Mutex::default(),
@@ -1074,10 +1061,6 @@ impl ClientSession {
             .lock()
             .expect("shown")
             .insert(window, codecs.to_vec());
-        if remote_app::split(window).is_some() {
-            self.start_remote_window(window);
-            return Ok(());
-        }
         let backend = {
             let windows = self.windows.lock().expect("windows");
             let rules = self.rules.lock().expect("rules");
@@ -1282,11 +1265,6 @@ impl ClientSession {
         backend: BackendKind,
         codecs: &[VideoCodec],
     ) -> Result<u32, ClientError> {
-        if remote_app::split(window).is_some() {
-            return Err(ClientError::Refused(
-                "a RemoteApp window has only its RDP connection".into(),
-            ));
-        }
         if backend == BackendKind::Rdp
             && (self.shared.host_ip.is_none() || !self.pictures.load(Ordering::SeqCst))
         {
@@ -1405,31 +1383,10 @@ impl ClientSession {
 
     /// Sends input to the host. Pointer and touch events go to the window
     /// they name (one this session streams); keys, text and gamepads to the
-    /// last such window.
+    /// last such window. Input goes over the session whatever carries the
+    /// window's picture, under the session's rules (docs/BACKENDS.md, "One
+    /// window, any carrier"), a RemoteApp window's too.
     pub fn send_input(&self, event: InputEvent) -> Result<(), ClientError> {
-        let named = input_window(&event);
-        let window = {
-            let mut focus = self.shared.focus.lock().expect("focus");
-            if named.is_some() {
-                *focus = named;
-            }
-            *focus
-        };
-        // Input goes over the session whatever carries the window's
-        // picture, under the session's rules (docs/BACKENDS.md, "One window,
-        // any carrier"). Only a RemoteApp window of this client's own
-        // (opt-in Windows RemoteApp) is driven over its RDP connection;
-        // gamepads always go over the session.
-        let pointer_or_keys = !matches!(
-            event,
-            InputEvent::Gamepad { .. } | InputEvent::GamepadGone { .. }
-        );
-        if pointer_or_keys {
-            if let Some(w) = window.filter(|w| remote_app::split(*w).is_some()) {
-                self.remote_input(w, event);
-                return Ok(());
-            }
-        }
         self.send(ControlMessage::Input(event))
     }
 
@@ -1460,9 +1417,6 @@ impl ClientSession {
     /// [`Self::next_picture`] handed it out: where a view that opens late
     /// starts, since a window that does not change sends nothing.
     pub fn latest_picture(&self, window: WindowId) -> Option<RgbaPicture> {
-        if remote_app::split(window).is_some() {
-            return self.remote_latest_picture(window);
-        }
         let rdp = self.shared.rdp.lock().expect("rdp").get(&window).cloned()?;
         rdp.latest_picture()
     }
@@ -1479,9 +1433,6 @@ impl ClientSession {
             .remove(&window)
         {
             return PicturePoll::Picture(picture);
-        }
-        if remote_app::split(window).is_some() {
-            return self.remote_next_picture(window, timeout);
         }
         let Some(rdp) = self.shared.rdp.lock().expect("rdp").get(&window).cloned() else {
             return PicturePoll::Ended;
@@ -1521,10 +1472,6 @@ impl ClientSession {
         };
         for popup in owned {
             let _ = self.stop_window(popup);
-        }
-        if remote_app::split(window).is_some() {
-            self.stop_remote_window(window);
-            return Ok(());
         }
         self.shared.rdp.lock().expect("rdp").remove(&window);
         self.send(ControlMessage::StreamStopRequest(StreamTarget::Window(
@@ -1731,16 +1678,6 @@ impl Drop for ClientSession {
 }
 
 /// The window an input event names, if it names one.
-fn input_window(event: &InputEvent) -> Option<WindowId> {
-    match event {
-        InputEvent::PointerMove { window, .. }
-        | InputEvent::PointerButton { window, .. }
-        | InputEvent::PointerScroll { window, .. }
-        | InputEvent::Touch { window, .. } => Some(*window),
-        _ => None,
-    }
-}
-
 /// Logs in to the RDP server the host started for `window`, on a thread of
 /// its own, then announces the stream (or its refusal, telling the host to
 /// stop serving it).
@@ -1847,8 +1784,6 @@ async fn pump_events(
             }
             ControlMessage::ListWindowsResponse(list) => {
                 *windows.lock().expect("windows") = list.clone();
-                let mut list = list;
-                list.extend(remote_app::infos(&shared));
                 Event::Windows { windows: list }
             }
             ControlMessage::StreamStartResponse {

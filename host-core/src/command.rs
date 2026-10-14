@@ -30,24 +30,31 @@ pub struct Principal {
     pub account: Option<Account>,
 }
 
-/// What a host hands a client for a RemoteApp launch: its Remote
-/// Desktop's login (docs/BACKENDS.md, "RemoteApp").
-#[derive(Debug, Clone)]
-pub struct RemoteAppLogin {
-    pub target: windowcast_protocol::HandoffTarget,
-    /// The password is the one the client signed in with.
-    pub sign_in_password: bool,
+/// Why a RemoteApp launch did not start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteAppRefusal {
+    /// Its login needs this Windows user's password, which the client did
+    /// not give (or gave wrong).
+    PasswordNeeded(String),
+    /// Anything else, for the user.
+    Refused(String),
 }
 
-/// Serves launches as RemoteApps of the host's Remote Desktop (Windows
-/// hosts; `windowcast_rdp::remoteapp_host`). Called off the session's task:
-/// it may take a moment.
+/// Serves launches as RemoteApps of the host's Remote Desktop, run by the
+/// host itself (docs/BACKENDS.md, "RemoteApp"; Windows hosts,
+/// `windowcast_rdp::remoteapp_host`): the program's windows join the
+/// host's window list. Called off the session's task: it may take a while.
 pub trait RemoteApps: Send + Sync + 'static {
-    /// The login for running `argv` as a RemoteApp for `who`; `None` when
-    /// this host does not serve it as one now (the launch then runs in the
-    /// host's own session), an `Err` with the reason for the user when it
-    /// should but cannot.
-    fn launch(&self, who: &Principal, argv: &[String]) -> Option<Result<RemoteAppLogin, String>>;
+    /// Runs `argv` as a RemoteApp for `who`, with the Windows `password`
+    /// the client gave; `Ok` once Windows started it. `None` when this
+    /// host does not serve it as one now (the launch then runs in the
+    /// host's own session).
+    fn launch(
+        &self,
+        who: &Principal,
+        argv: &[String],
+        password: Option<&str>,
+    ) -> Option<Result<(), RemoteAppRefusal>>;
 }
 
 /// The one check every channel passes. An `Err` is the reason shown to the
@@ -233,16 +240,17 @@ impl Channels {
             CommandMessage::Open { id, kind } => {
                 if let Some(answer) = self.remote_app(&kind).await {
                     match answer {
-                        Ok(login) => {
-                            self.send(CommandMessage::RemoteApp {
-                                id,
-                                target: login.target,
-                                sign_in_password: login.sign_in_password,
-                            })
-                            .await?;
+                        Ok(()) => {
+                            self.send(CommandMessage::Opened { id, pid: None }).await?;
                             self.send(CommandMessage::Exited { id, code: None }).await?;
                         }
-                        Err(reason) => self.send(CommandMessage::Refused { id, reason }).await?,
+                        Err(RemoteAppRefusal::PasswordNeeded(username)) => {
+                            self.send(CommandMessage::PasswordNeeded { id, username })
+                                .await?
+                        }
+                        Err(RemoteAppRefusal::Refused(reason)) => {
+                            self.send(CommandMessage::Refused { id, reason }).await?
+                        }
                     }
                     return Ok(());
                 }
@@ -292,22 +300,23 @@ impl Channels {
     /// A launch that asked for a RemoteApp, when this host serves it as
     /// one: the login, or why not. `None` for everything else, which opens
     /// as usual.
-    async fn remote_app(&self, kind: &ChannelKind) -> Option<Result<RemoteAppLogin, String>> {
+    async fn remote_app(&self, kind: &ChannelKind) -> Option<Result<(), RemoteAppRefusal>> {
         let ChannelKind::Launch {
             argv,
             remote_app: true,
+            password,
         } = kind
         else {
             return None;
         };
         let provider = Arc::clone(self.remote_apps.as_ref()?);
         if let Err(reason) = self.authorizer.authorize(&self.principal, kind) {
-            return Some(Err(reason));
+            return Some(Err(RemoteAppRefusal::Refused(reason)));
         }
-        let (who, argv) = (self.principal.clone(), argv.clone());
-        tokio::task::spawn_blocking(move || provider.launch(&who, &argv))
+        let (who, argv, password) = (self.principal.clone(), argv.clone(), password.clone());
+        tokio::task::spawn_blocking(move || provider.launch(&who, &argv, password.as_deref()))
             .await
-            .unwrap_or_else(|e| Some(Err(e.to_string())))
+            .unwrap_or_else(|e| Some(Err(RemoteAppRefusal::Refused(e.to_string()))))
     }
 
     async fn send(&self, message: CommandMessage) -> Result<(), TransportError> {

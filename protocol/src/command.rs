@@ -68,9 +68,17 @@ pub enum ChannelKind {
     ///
     /// With `remote_app` the client asks for it as a RemoteApp of the
     /// host's Remote Desktop (docs/BACKENDS.md, "RemoteApp"): a host that
-    /// serves it answers `RemoteApp` with the login, and the client runs
-    /// the program there itself; a host that does not starts it as usual.
-    Launch { argv: Vec<String>, remote_app: bool },
+    /// serves it runs the program there itself, and its windows join the
+    /// host's window list like any other; a host that does not starts it
+    /// as usual. `password` is the Windows password for the RemoteApp's
+    /// login, when the client has one (the one it signed in with, or one
+    /// the user typed after `PasswordNeeded`); held in memory for that one
+    /// login only.
+    Launch {
+        argv: Vec<String>,
+        remote_app: bool,
+        password: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,16 +88,10 @@ pub enum CommandMessage {
     /// Host: the channel is open (for a launch: the application started,
     /// with its process id when the system gives one).
     Opened { id: ChannelId, pid: Option<u32> },
-    /// Host, for a launch that asked for a RemoteApp: log in to the host's
-    /// Remote Desktop at `target` and run the program there. An empty
-    /// password means the user's own: the password the client signed in
-    /// with when `sign_in_password` is set (the host's Windows account),
-    /// else one the user is asked for. The channel then ends.
-    RemoteApp {
-        id: ChannelId,
-        target: crate::HandoffTarget,
-        sign_in_password: bool,
-    },
+    /// Host, for a launch it serves as a RemoteApp: its login needs the
+    /// Windows password of `username`; ask the user and launch again with
+    /// it. No channel was opened.
+    PasswordNeeded { id: ChannelId, username: String },
     /// Host: no channel was opened. The reason is for the user.
     Refused { id: ChannelId, reason: String },
     /// Either way: bytes of the channel's stream.
@@ -150,18 +152,12 @@ mod tests {
                 kind: ChannelKind::Launch {
                     argv: vec!["firefox".into()],
                     remote_app: true,
+                    password: Some("secret".into()),
                 },
             },
-            CommandMessage::RemoteApp {
+            CommandMessage::PasswordNeeded {
                 id,
-                target: crate::HandoffTarget {
-                    address: String::new(),
-                    port: 3389,
-                    username: "mech".into(),
-                    password: String::new(),
-                    certificate_sha256: Some([7; 32]),
-                },
-                sign_in_password: true,
+                username: "mech".into(),
             },
             CommandMessage::Data {
                 id,
