@@ -552,6 +552,47 @@ pub unsafe extern "C" fn windowcast_session_next_picture(
     picture.data.len() as i64
 }
 
+/// The pointer shape `shape` names (a "cursor" event's `shape`): RGBA,
+/// rows from the top, `width * 4` bytes each, into `out`. Returns its
+/// length, WINDOWCAST_BUFFER_TOO_SMALL (`*width` and `*height` say its
+/// size), or WINDOWCAST_ERROR for a shape the host has not sent.
+/// `hotspot` gets the point in the image that is the pointer's position.
+///
+/// # Safety
+/// `session` must be valid; `out` must have room for `cap` bytes;
+/// `width`, `height` and `hotspot` (two values) must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_cursor_image(
+    session: *const ClientSession,
+    shape: u64,
+    out: *mut u8,
+    cap: usize,
+    width: *mut u32,
+    height: *mut u32,
+    hotspot: *mut u32,
+) -> i64 {
+    let (Some(session), Some(width), Some(height)) =
+        (session.as_ref(), width.as_mut(), height.as_mut())
+    else {
+        return WINDOWCAST_ERROR;
+    };
+    if hotspot.is_null() {
+        return WINDOWCAST_ERROR;
+    }
+    let Some(image) = session.cursor_image(shape) else {
+        return WINDOWCAST_ERROR;
+    };
+    *width = image.width;
+    *height = image.height;
+    *hotspot = image.hotspot.0;
+    *hotspot.add(1) = image.hotspot.1;
+    if image.rgba.len() > cap || out.is_null() {
+        return WINDOWCAST_BUFFER_TOO_SMALL;
+    }
+    std::ptr::copy_nonoverlapping(image.rgba.as_ptr(), out, image.rgba.len());
+    image.rgba.len() as i64
+}
+
 /// 0 for success, WINDOWCAST_ERROR for a failure.
 fn status<T, E>(result: Result<T, E>) -> i64 {
     match result {

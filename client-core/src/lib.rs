@@ -35,9 +35,9 @@ use windowcast_accounts::oidc::{BrowserSignIn, DeviceSignIn, OidcError};
 use windowcast_identity::{Identity, PeerId, TrustStore};
 use windowcast_protocol::selection::{self, BackendRule};
 use windowcast_protocol::{
-    AccountCredential, AccountOffer, BackendKind, ControlMessage, HandoffTarget, InputEvent,
-    OidcProviderInfo, SignInMethod, StreamBackend, StreamLimits, StreamOptions, StreamQuality,
-    StreamTarget, VideoCodec, WindowId, WindowInfo,
+    AccountCredential, AccountOffer, BackendKind, ControlMessage, CursorImage, HandoffTarget,
+    InputEvent, OidcProviderInfo, SignInMethod, StreamBackend, StreamLimits, StreamOptions,
+    StreamQuality, StreamTarget, VideoCodec, WindowId, WindowInfo,
 };
 use windowcast_rdp::client::RdpStream;
 pub use windowcast_rdp::client::RgbaPicture;
@@ -606,6 +606,19 @@ pub enum Event {
     HostState {
         locked: bool,
     },
+    /// The host's pointer over a streamed window moved, changed shape, or
+    /// showed or hid (docs/BACKENDS.md, "The session owns the window"):
+    /// `x` and `y` are fractions of the window's picture, as input
+    /// positions are, and `shape` names an image
+    /// [`ClientSession::cursor_image`] has. The host leaves the pointer out
+    /// of its pictures, so the client draws it, the same on every carrier.
+    Cursor {
+        window: u64,
+        x: f32,
+        y: f32,
+        visible: bool,
+        shape: u64,
+    },
     /// The host's clipboard text changed.
     Clipboard {
         text: String,
@@ -711,6 +724,21 @@ struct Shared {
     generations: Mutex<HashMap<WindowId, u32>>,
     /// Each window's carrier on screen and, during a switch, the next.
     carriers: Mutex<HashMap<WindowId, Carriers>>,
+    /// The host's pointer: where it is over each streamed window, and the
+    /// shapes the host sent, by id.
+    cursors: Mutex<HashMap<WindowId, Cursor>>,
+    cursor_shapes: Mutex<HashMap<u64, CursorImage>>,
+}
+
+/// The host's pointer over one streamed window, as last sent.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Cursor {
+    /// Where it is, in fractions of the window's picture.
+    pub x: f32,
+    pub y: f32,
+    pub visible: bool,
+    /// Its shape, for [`ClientSession::cursor_image`].
+    pub shape: u64,
 }
 
 /// One carrier of a window's stream.
@@ -920,6 +948,8 @@ impl ClientSession {
             sign_in_password: Mutex::default(),
             generations: Mutex::default(),
             carriers: Mutex::default(),
+            cursors: Mutex::default(),
+            cursor_shapes: Mutex::default(),
         });
         let windows = Arc::new(Mutex::new(Vec::new()));
 
@@ -1369,6 +1399,29 @@ impl ClientSession {
             }
         }
         self.send(ControlMessage::Input(event))
+    }
+
+    /// The host's pointer over `window` as last sent; `None` before the
+    /// host sent any (a host that draws its pointer into its pictures
+    /// sends none).
+    pub fn cursor(&self, window: WindowId) -> Option<Cursor> {
+        self.shared
+            .cursors
+            .lock()
+            .expect("cursors")
+            .get(&window)
+            .copied()
+    }
+
+    /// The pointer shape `shape` names ([`Event::Cursor`]): RGBA, rows from
+    /// the top, and its hotspot.
+    pub fn cursor_image(&self, shape: u64) -> Option<CursorImage> {
+        self.shared
+            .cursor_shapes
+            .lock()
+            .expect("cursor shapes")
+            .get(&shape)
+            .cloned()
     }
 
     /// The newest picture of a window streamed over RDP, whether or not
@@ -1858,6 +1911,7 @@ async fn pump_events(
                 }
                 shared.rdp.lock().expect("rdp").remove(&window);
                 shared.carriers.lock().expect("carriers").remove(&window);
+                shared.cursors.lock().expect("cursors").remove(&window);
                 Event::StreamStopped { window: window.0 }
             }
             ControlMessage::WindowResized {
@@ -1873,6 +1927,43 @@ async fn pump_events(
             ControlMessage::HostState(state) => Event::HostState {
                 locked: state.locked,
             },
+            ControlMessage::CursorShape(image) => {
+                shared
+                    .cursor_shapes
+                    .lock()
+                    .expect("cursor shapes")
+                    .insert(image.id, image);
+                continue;
+            }
+            ControlMessage::Cursor {
+                window,
+                x,
+                y,
+                visible,
+                shape,
+            } => {
+                let cursor = Cursor {
+                    x,
+                    y,
+                    visible,
+                    shape,
+                };
+                let mut cursors = shared.cursors.lock().expect("cursors");
+                // Over one window at a time: it leaves the others.
+                for (other, last) in cursors.iter_mut() {
+                    if *other != window {
+                        last.visible = false;
+                    }
+                }
+                cursors.insert(window, cursor);
+                Event::Cursor {
+                    window: window.0,
+                    x,
+                    y,
+                    visible,
+                    shape,
+                }
+            }
             ControlMessage::Clipboard(text) => Event::Clipboard { text },
             ControlMessage::SshCertificateResponse(answer) => match answer {
                 Ok(certificate) => Event::SshCertificate {

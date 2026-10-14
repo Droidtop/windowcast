@@ -12,9 +12,13 @@
 //!   user's pointer and keys into windowcast input when that is switched on.
 //! - `audio`: the window's sound, Opus decoded and played through WASAPI
 //!   on a thread beside it.
+//! - `cursor`: the host's pointer shape, shown as the stream window's own
+//!   pointer while input goes to the host.
 
 #[cfg(windows)]
 mod audio;
+#[cfg(windows)]
+pub mod cursor;
 #[cfg(windows)]
 mod decoder;
 #[cfg(windows)]

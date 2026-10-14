@@ -626,7 +626,11 @@ impl ClientRole {
                     }
                     self.log(format!("window {window}: stream stopped"));
                 }
-                Event::WindowResized { .. } | Event::WindowFocused { .. } => {}
+                // Each stream window takes the host's pointer from the
+                // session itself (client-windows' cursor).
+                Event::WindowResized { .. }
+                | Event::WindowFocused { .. }
+                | Event::Cursor { .. } => {}
                 Event::HostState { locked } => {
                     state.host_locked = locked;
                     drop(state);

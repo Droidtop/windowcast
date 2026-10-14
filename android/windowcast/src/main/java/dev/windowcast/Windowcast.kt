@@ -3,6 +3,7 @@ package dev.windowcast
 import java.io.Closeable
 import java.io.File
 import java.io.IOException
+import java.nio.ByteBuffer
 import org.json.JSONObject
 
 /** Video codecs, numbered as in windowcast.h. */
@@ -51,6 +52,12 @@ sealed interface Event {
     data class WindowFocused(val window: Long) : Event
     /** The host computer was locked or unlocked; its windows keep streaming while it is locked. */
     data class HostState(val locked: Boolean) : Event
+    /**
+     * The host's pointer over a streamed window: [x] and [y] are fractions of its picture, and
+     * [shape] names an image [WindowcastSession.cursorImage] gives. The host leaves the pointer out
+     * of its pictures, so the client draws it.
+     */
+    data class Cursor(val window: Long, val x: Float, val y: Float, val visible: Boolean, val shape: Long) : Event
     data class Clipboard(val text: String) : Event
     data object Closed : Event
 
@@ -93,6 +100,13 @@ sealed interface Event {
                 "window_resized" -> WindowResized(o.getLong("window"), o.getInt("width"), o.getInt("height"))
                 "window_focused" -> WindowFocused(o.getLong("window"))
                 "host_state" -> HostState(o.getBoolean("locked"))
+                "cursor" -> Cursor(
+                    o.getLong("window"),
+                    o.getDouble("x").toFloat(),
+                    o.getDouble("y").toFloat(),
+                    o.getBoolean("visible"),
+                    o.getLong("shape"),
+                )
                 "clipboard" -> Clipboard(o.getString("text"))
                 "closed" -> Closed
                 else -> null
@@ -196,6 +210,9 @@ class WindowcastClient(dataDir: File) : Closeable {
         handle = 0L
     }
 }
+
+/** A pointer shape: [argb] pixels, rows from the top, for a Bitmap, and the point that is its position. */
+class CursorImage(val width: Int, val height: Int, val hotspotX: Int, val hotspotY: Int, val argb: IntArray)
 
 /** Shows one streamed window: [WindowDecoder] for video, [WindowPictures] for RDP. */
 interface WindowRenderer {
@@ -307,6 +324,26 @@ class WindowcastSession internal constructor(handle: Long) : Closeable {
         if (pid == Native.PASSWORD_NEEDED) throw PasswordNeededException(Native.lastError())
         if (pid < 0) throw IOException(if (isOpen) Native.lastError() else "the session is closed")
         return pid
+    }
+
+    /** The pointer shape [shape] names ([Event.Cursor]), or null for one the host has not sent. */
+    fun cursorImage(shape: Long): CursorImage? {
+        var buffer = ByteBuffer.allocateDirect(64 * 64 * 4)
+        val info = IntArray(4)
+        var len = withHandle(Native.ERROR) { Native.cursorImage(it, shape, buffer, info) }
+        if (len == Native.BUFFER_TOO_SMALL) {
+            buffer = ByteBuffer.allocateDirect(info[0] * info[1] * 4)
+            len = withHandle(Native.ERROR) { Native.cursorImage(it, shape, buffer, info) }
+        }
+        if (len < 0) return null
+        val argb = IntArray(info[0] * info[1]) { i ->
+            val r = buffer.get(i * 4).toInt() and 0xff
+            val g = buffer.get(i * 4 + 1).toInt() and 0xff
+            val b = buffer.get(i * 4 + 2).toInt() and 0xff
+            val a = buffer.get(i * 4 + 3).toInt() and 0xff
+            (a shl 24) or (r shl 16) or (g shl 8) or b
+        }
+        return CursorImage(info[0], info[1], info[2], info[3], argb)
     }
 
     /** The next event, or null after [timeoutMs] without one, and for good once the session is closed. */

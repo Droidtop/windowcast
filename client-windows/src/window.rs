@@ -2,7 +2,8 @@
 //! pulls the window's frames from client-core, decodes them on the GPU and
 //! presents them. F11 switches between a normal window and borderless
 //! fullscreen on the display the window is on. With input switched on,
-//! the pointer (mapped onto the picture) and keys go to the host.
+//! the pointer (mapped onto the picture) and keys go to the host, and the
+//! pointer takes the host's shape (`crate::cursor`).
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Once};
@@ -21,6 +22,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_F11};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::cursor::Pointers;
 use crate::decoder::Decoder;
 use crate::present::{self, Presenter};
 use crate::{Display, Placement, Shared, SharedStats, StreamSource};
@@ -116,6 +118,11 @@ struct WindowState {
     restore: RECT,
     toggle_fullscreen: bool,
     closed: bool,
+    /// The host's pointer as this window shows it: `None` while the host
+    /// sends none (the arrow), `Some(None)` while it is hidden.
+    host_pointer: Option<Option<HCURSOR>>,
+    /// Cursors made from the host's shapes; kept until the window is gone.
+    pointers: Pointers,
 }
 
 const CLASS: PCWSTR = w!("windowcast-stream");
@@ -221,6 +228,8 @@ fn run(
         },
         toggle_fullscreen: false,
         closed: false,
+        host_pointer: None,
+        pointers: Pointers::default(),
     });
     let name: Vec<u16> = format!("{title} - windowcast\0").encode_utf16().collect();
     let hwnd = unsafe {
@@ -468,9 +477,24 @@ fn show(
             state.toggle_fullscreen = false;
             toggle_fullscreen(hwnd, state);
         }
-        state.send_input = shared.send_input.load(Ordering::SeqCst);
+        let send_input = shared.send_input.load(Ordering::SeqCst);
+        let mut pointer_changed = send_input != state.send_input;
+        state.send_input = send_input;
         for event in state.input.drain(..) {
             let _ = session.send_input(event);
+        }
+        let host_pointer = session.cursor(window).map(|cursor| {
+            cursor
+                .visible
+                .then(|| state.pointers.get(session, cursor.shape))
+                .flatten()
+        });
+        if host_pointer != state.host_pointer {
+            state.host_pointer = host_pointer;
+            pointer_changed = true;
+        }
+        if pointer_changed {
+            show_pointer(hwnd, state);
         }
         let size = client_size(hwnd);
         let resized = size != state.client;
@@ -530,6 +554,26 @@ fn show(
             &mut shown_then,
             &mut bytes_then,
         );
+    }
+}
+
+/// The pointer this window shows over its picture: the host's while input
+/// goes to the host and the host sends it, the arrow otherwise.
+fn shown_pointer(state: &WindowState) -> HCURSOR {
+    match (state.send_input, state.host_pointer) {
+        (true, Some(shape)) => shape.unwrap_or_default(),
+        _ => unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or_default(),
+    }
+}
+
+/// Shows the pointer now if the mouse is over the window: Windows asks
+/// again (WM_SETCURSOR) only when the mouse moves.
+fn show_pointer(hwnd: HWND, state: &WindowState) {
+    let mut at = windows::Win32::Foundation::POINT::default();
+    unsafe {
+        if GetCursorPos(&mut at).is_ok() && WindowFromPoint(at) == hwnd {
+            SetCursor(Some(shown_pointer(state)));
+        }
     }
 }
 
@@ -678,6 +722,10 @@ unsafe extern "system" fn window_proc(
         WM_LBUTTONDBLCLK if !state.send_input => {
             state.toggle_fullscreen = true;
             return LRESULT(0);
+        }
+        WM_SETCURSOR if (lparam.0 & 0xffff) as u32 == HTCLIENT => {
+            unsafe { SetCursor(Some(shown_pointer(state))) };
+            return LRESULT(1);
         }
         _ => {}
     }

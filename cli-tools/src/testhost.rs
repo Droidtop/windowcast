@@ -5,7 +5,7 @@
 //!
 //! Usage: `windowcast-testhost [--listen ADDR:PORT] [--no-pairing] [--tone]
 //! [--microphone-level] [--content general|text|game|video] [--carriers native,rdp]
-//! [--pattern moving|still] [--locked]`
+//! [--pattern moving|still] [--locked] [--cursor]`
 //! (`--carriers`: the carriers offered, both by default; `--carriers native`
 //! refuses a switch to RDP pictures, for trying a refused switch; `--content`: the
 //! window's content hint, which the default rules turn into a backend, so
@@ -16,13 +16,15 @@
 //! of "text" sent once a second, so a client's selector moves it to RDP
 //! pictures by itself; `--locked`: the host says it is locked for the first
 //! 30 s of every minute and unlocked for the rest, for trying how a client
-//! shows a locked host, which keeps streaming).
+//! shows a locked host, which keeps streaming; `--cursor`: the host's pointer
+//! circles the window as a small arrow, for trying how a client draws it).
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use windowcast_cli_tools::testpattern::{
     parse_content, StillTextSource, TestPatternSource, TestPatternWithTone, WithContent,
+    WithPointer,
 };
 use windowcast_host::audio::{AudioSource, MicrophoneSink};
 use windowcast_host::{
@@ -51,6 +53,12 @@ impl WindowSource for MeasuringMicrophone {
     }
     fn host_state(&self) -> HostState {
         self.0.host_state()
+    }
+    fn cursor(&self) -> Option<windowcast_host::CursorState> {
+        self.0.cursor()
+    }
+    fn cursor_image(&self, shape: u64) -> Option<windowcast_protocol::CursorImage> {
+        self.0.cursor_image(shape)
     }
     fn microphone(&self) -> Option<Result<Box<dyn MicrophoneSink>, String>> {
         println!("microphone: a client started sending");
@@ -99,6 +107,12 @@ impl WindowSource for LockedHalfTheTime {
         let locked = self.1.elapsed().as_secs() % 60 < 30;
         HostState { locked }
     }
+    fn cursor(&self) -> Option<windowcast_host::CursorState> {
+        self.0.cursor()
+    }
+    fn cursor_image(&self, shape: u64) -> Option<windowcast_protocol::CursorImage> {
+        self.0.cursor_image(shape)
+    }
 }
 
 /// Prints the level of what plays into it once a second; keeps nothing.
@@ -143,6 +157,7 @@ async fn main() {
     let mut rdp = true;
     let mut still = false;
     let mut locked = false;
+    let mut pointer = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -173,6 +188,7 @@ async fn main() {
                 other => panic!("--pattern needs moving or still, not {other:?}"),
             },
             "--locked" => locked = true,
+            "--cursor" => pointer = true,
             other => panic!("unknown argument {other}"),
         }
     }
@@ -194,6 +210,12 @@ async fn main() {
     let source: Arc<dyn WindowSource> = match content {
         Some(content) => Arc::new(WithContent::new(source, content)),
         None => source,
+    };
+    let source: Arc<dyn WindowSource> = if pointer {
+        println!("the host's pointer circles the window");
+        Arc::new(WithPointer::new(source))
+    } else {
+        source
     };
     let source: Arc<dyn WindowSource> = if measure {
         Arc::new(MeasuringMicrophone(source))

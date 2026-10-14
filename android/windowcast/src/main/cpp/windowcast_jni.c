@@ -253,6 +253,23 @@ Java_dev_windowcast_Native_nextPicture(JNIEnv *env, jclass cls, jlong session, j
     return len;
 }
 
+/* The pointer shape `shape` names, RGBA into the direct buffer; info[0..3]
+ * get its width, height and hotspot. Returns the length or a WINDOWCAST_*
+ * status. */
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_cursorImage(JNIEnv *env, jclass cls, jlong session, jlong shape,
+                                       jobject buffer, jintArray info) {
+    uint8_t *out = (*env)->GetDirectBufferAddress(env, buffer);
+    jlong cap = (*env)->GetDirectBufferCapacity(env, buffer);
+    if (!out || cap < 0) return WINDOWCAST_ERROR;
+    uint32_t width = 0, height = 0, hotspot[2] = {0, 0};
+    int64_t len = windowcast_session_cursor_image(SESSION(session), (uint64_t)shape, out,
+                                                  (size_t)cap, &width, &height, hotspot);
+    jint values[4] = {(jint)width, (jint)height, (jint)hotspot[0], (jint)hotspot[1]};
+    (*env)->SetIntArrayRegion(env, info, 0, 4, values);
+    return len;
+}
+
 /* ---- The command stream: terminals and launches (windowcast.h). ---- */
 
 #define TERMINAL(h) ((WindowcastTerminal *)(intptr_t)(h))

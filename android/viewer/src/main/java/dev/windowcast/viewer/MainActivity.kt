@@ -28,6 +28,8 @@ import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
+import android.graphics.Bitmap
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -89,6 +91,14 @@ class MainActivity : Activity() {
     private class Switch(val generation: Int, val backend: String, var renderer: WindowRenderer? = null)
 
     private var switching: Switch? = null
+
+    /**
+     * The host's pointer, drawn over the watched window where the host says it is (the host
+     * leaves it out of its pictures, so it looks the same on every carrier), and its shapes.
+     */
+    private lateinit var pointer: ImageView
+    private val pointerShapes = mutableMapOf<Long, Pair<Bitmap, Pair<Int, Int>>>()
+    private var lastCursor: Event.Cursor? = null
 
     /**
      * The renderer drawing on each surface: stopped when that surface is destroyed, before the
@@ -263,6 +273,12 @@ class MainActivity : Activity() {
         }
         watchSurface(surface)
         watchSurface(spare)
+        pointer = ImageView(this).apply {
+            visibility = View.GONE
+            isClickable = false
+            isFocusable = false
+            scaleType = ImageView.ScaleType.FIT_XY
+        }
         clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
             val text = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()
@@ -273,6 +289,7 @@ class MainActivity : Activity() {
             addView(form, MATCH_PARENT, MATCH_PARENT)
             addView(surface, MATCH_PARENT, MATCH_PARENT)
             addView(spare, MATCH_PARENT, MATCH_PARENT)
+            addView(pointer, WRAP_CONTENT, WRAP_CONTENT)
             addView(terminalView, MATCH_PARENT, MATCH_PARENT)
         })
 
@@ -617,6 +634,7 @@ class MainActivity : Activity() {
                         if (popups.containsKey(event.window)) closePopup(event.window)
                         else if (event.window == watching?.id) stopDecoding()
                     }
+                    is Event.Cursor -> main.post { if (event.window == watching?.id) showPointer(event) }
                     is Event.HostState -> main.post {
                         tell(
                             if (event.locked) {
@@ -1136,7 +1154,53 @@ class MainActivity : Activity() {
         status.text = if (session?.isOpen == true) "${windows.size} windows. Tap one to watch it." else "Not connected"
     }
 
+    /**
+     * Draws the host's pointer at [cursor] over the watched window: its shape scaled as the
+     * window's picture is, its hotspot on the point. A shape not seen before is fetched off the
+     * main thread first.
+     */
+    private fun showPointer(cursor: Event.Cursor) {
+        lastCursor = cursor
+        val window = watching
+        if (!cursor.visible || !streaming() || window == null) {
+            pointer.visibility = View.GONE
+            return
+        }
+        val shape = pointerShapes[cursor.shape]
+        if (shape == null) {
+            val s = session ?: return
+            worker.execute {
+                val image = s.cursorImage(cursor.shape) ?: return@execute
+                val bitmap = Bitmap.createBitmap(image.argb, image.width, image.height, Bitmap.Config.ARGB_8888)
+                main.post {
+                    pointerShapes[cursor.shape] = bitmap to (image.hotspotX to image.hotspotY)
+                    lastCursor?.let { if (it.shape == cursor.shape) showPointer(it) }
+                }
+            }
+            return
+        }
+        val (bitmap, hotspot) = shape
+        val scale = surface.width.toFloat() / window.width.coerceAtLeast(1)
+        val width = (bitmap.width * scale).toInt().coerceAtLeast(1)
+        val height = (bitmap.height * scale).toInt().coerceAtLeast(1)
+        if (pointer.drawable == null || (pointer.tag as? Long) != cursor.shape) {
+            pointer.setImageBitmap(bitmap)
+            pointer.tag = cursor.shape
+        }
+        val params = pointer.layoutParams
+        if (params.width != width || params.height != height) {
+            params.width = width
+            params.height = height
+            pointer.layoutParams = params
+        }
+        pointer.translationX = cursor.x * surface.width - hotspot.first * scale
+        pointer.translationY = cursor.y * surface.height - hotspot.second * scale
+        pointer.visibility = View.VISIBLE
+    }
+
     private fun showForm() {
+        pointer.visibility = View.GONE
+        lastCursor = null
         surface.visibility = View.GONE
         form.visibility = View.VISIBLE
         // The stream's title (window name and counters) goes with the stream.

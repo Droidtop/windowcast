@@ -8,8 +8,12 @@ use std::time::{Duration, Instant};
 use openh264::encoder::{Encoder, EncoderConfig, FrameRate, IntraFramePeriod};
 use openh264::formats::YUVBuffer;
 use openh264::OpenH264API;
-use windowcast_host::{EncodedFrame, FrameSource, Picture, PictureSource, WindowSource};
-use windowcast_protocol::{BackendKind, ContentHint, InputEvent, VideoCodec, WindowId, WindowInfo};
+use windowcast_host::{
+    CursorState, EncodedFrame, FrameSource, Handoff, Picture, PictureSource, WindowSource,
+};
+use windowcast_protocol::{
+    BackendKind, ContentHint, CursorImage, HostState, InputEvent, VideoCodec, WindowId, WindowInfo,
+};
 
 pub const WINDOW: WindowId = WindowId(1);
 pub const WIDTH: usize = 640;
@@ -271,6 +275,12 @@ impl WindowSource for WithContent {
     fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
         self.inner.input(event, focus)
     }
+    fn cursor(&self) -> Option<windowcast_host::CursorState> {
+        self.inner.cursor()
+    }
+    fn cursor_image(&self, shape: u64) -> Option<windowcast_protocol::CursorImage> {
+        self.inner.cursor_image(shape)
+    }
 
     fn host_state(&self) -> windowcast_protocol::HostState {
         self.inner.host_state()
@@ -434,6 +444,123 @@ fn draw(frame: u64) -> Vec<u8> {
         }
     }
     yuv
+}
+
+/// Another source whose windows are placed (at the desktop's top-left when
+/// the source does not say where), with a host pointer that circles the
+/// first window once every 4 s as a small drawn arrow: for trying how a
+/// client draws the host's pointer (`windowcast-testhost --cursor`).
+pub struct WithPointer {
+    inner: Arc<dyn WindowSource>,
+    since: Instant,
+}
+
+/// The test pointer's one shape.
+pub const POINTER_SHAPE: u64 = 7;
+
+impl WithPointer {
+    pub fn new(inner: Arc<dyn WindowSource>) -> Self {
+        WithPointer {
+            inner,
+            since: Instant::now(),
+        }
+    }
+
+    /// A 12 by 16 arrow, white with a black edge, its point the hotspot.
+    pub fn arrow() -> CursorImage {
+        let (width, height) = (12u32, 16u32);
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            let edge = y * 2 / 3;
+            for x in 0..width {
+                let pixel = if x > edge || y == height - 1 && x > 0 {
+                    [0, 0, 0, 0]
+                } else if x == 0 || x == edge || y == height - 2 {
+                    [0, 0, 0, 255]
+                } else {
+                    [255, 255, 255, 255]
+                };
+                rgba.extend_from_slice(&pixel);
+            }
+        }
+        CursorImage {
+            id: POINTER_SHAPE,
+            width,
+            height,
+            hotspot: (0, 0),
+            rgba,
+        }
+    }
+}
+
+impl WindowSource for WithPointer {
+    fn list_windows(&self) -> Vec<WindowInfo> {
+        let mut windows = self.inner.list_windows();
+        for window in &mut windows {
+            window.position.get_or_insert((0, 0));
+        }
+        windows
+    }
+
+    fn encoders(&self) -> Vec<VideoCodec> {
+        self.inner.encoders()
+    }
+
+    fn backends(&self) -> Vec<BackendKind> {
+        self.inner.backends()
+    }
+
+    fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
+        self.inner.open(window, codec)
+    }
+
+    fn handoff(&self, kind: BackendKind, window: WindowId) -> Option<Result<Handoff, String>> {
+        self.inner.handoff(kind, window)
+    }
+
+    fn open_pictures(&self, window: WindowId) -> Option<Result<Box<dyn PictureSource>, String>> {
+        self.inner.open_pictures(window)
+    }
+
+    fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
+        self.inner.input(event, focus)
+    }
+
+    fn host_state(&self) -> HostState {
+        self.inner.host_state()
+    }
+
+    fn open_audio(
+        &self,
+        window: WindowId,
+    ) -> Option<Result<Box<dyn windowcast_host::audio::AudioSource>, String>> {
+        self.inner.open_audio(window)
+    }
+
+    fn microphone(
+        &self,
+    ) -> Option<Result<Box<dyn windowcast_host::audio::MicrophoneSink>, String>> {
+        self.inner.microphone()
+    }
+
+    fn cursor(&self) -> Option<CursorState> {
+        let window = self.list_windows().into_iter().next()?;
+        let (left, top) = window.position.unwrap_or_default();
+        let turn = self.since.elapsed().as_secs_f32() / 4.0 * std::f32::consts::TAU;
+        let (cx, cy) = (window.width as f32 / 2.0, window.height as f32 / 2.0);
+        Some(CursorState {
+            position: (
+                left + (cx + cx * 0.6 * turn.cos()) as i32,
+                top + (cy + cy * 0.6 * turn.sin()) as i32,
+            ),
+            visible: true,
+            shape: POINTER_SHAPE,
+        })
+    }
+
+    fn cursor_image(&self, shape: u64) -> Option<CursorImage> {
+        (shape == POINTER_SHAPE).then(Self::arrow)
+    }
 }
 
 #[cfg(test)]

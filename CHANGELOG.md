@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- The session's pointer (docs/BACKENDS.md, "The session owns the window"; Droidtop/tracker#457 step 4b, protocol 13): `ControlMessage::Cursor` and `CursorShape`, `WindowSource::cursor` and `cursor_image`. Windows hosts capture without the pointer and send it while a window streams. client-core: `Event::Cursor`, `ClientSession::cursor` and `cursor_image`, and `windowcast_session_cursor_image` in C. The Windows client shows the host's pointer shape over its stream windows while it sends input; the viewer draws it over the watched window. `windowcast-testhost --cursor` circles a drawn pointer over its window.
+
 ## [0.31.0] - 2026-10-14
 
 ### Added
