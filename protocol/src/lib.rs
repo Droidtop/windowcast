@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped on any incompatible change to the message shapes below. A peer
 /// that receives a mismatched version should refuse the session rather
 /// than guess at how to interpret an unknown wire format.
-pub const PROTOCOL_VERSION: u16 = 11;
+pub const PROTOCOL_VERSION: u16 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
@@ -448,6 +448,9 @@ pub enum ControlMessage {
     },
     /// Which streamed window has keyboard focus on the host now.
     WindowFocused(WindowId),
+    /// The state of the host computer, sent when it changes (and when a
+    /// session starts, if it is not the default).
+    HostState(HostState),
 
     /// The sender is closing the session. Handled inside
     /// `windowcast-transport`: the receiver's session ends at once instead
@@ -474,6 +477,15 @@ pub enum ControlMessage {
     /// application launches on the host. Authorized by the host separately
     /// from streaming windows, because a shell is far more than a picture.
     Command(command::CommandMessage),
+}
+
+/// The state of the host computer as a whole, beside its windows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostState {
+    /// The host is locked (its lock screen is up). Its windows keep
+    /// streaming; input reaches them as window messages, which some
+    /// programs ignore (docs/BACKENDS.md, "A locked host").
+    pub locked: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -848,6 +860,7 @@ mod tests {
                 },
             }),
             ControlMessage::Clipboard("copied".into()),
+            ControlMessage::HostState(HostState { locked: true }),
         ];
         for message in messages {
             assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);

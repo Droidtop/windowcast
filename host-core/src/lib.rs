@@ -30,7 +30,7 @@ use windowcast_identity::{Identity, PeerId, TrustStore};
 use windowcast_protocol::selection;
 use windowcast_protocol::{AccountCredential, OidcProviderInfo, SignInMethod};
 use windowcast_protocol::{
-    BackendKind, ControlMessage, InputEvent, StreamBackend, StreamLimits, StreamOptions,
+    BackendKind, ControlMessage, HostState, InputEvent, StreamBackend, StreamLimits, StreamOptions,
     StreamQuality, StreamTarget, VideoCodec, WindowId, WindowInfo,
 };
 use windowcast_transport::remote::RemotePeers;
@@ -143,6 +143,12 @@ pub trait WindowSource: Send + Sync + 'static {
 
     /// Replaces the clipboard's text with the client's.
     fn set_clipboard(&self, _text: &str) {}
+
+    /// The host computer's state (locked or not), sent to clients when it
+    /// changes. Asked every [`WINDOWS_POLL`] on a blocking thread.
+    fn host_state(&self) -> HostState {
+        HostState::default()
+    }
 }
 
 /// A window being served by a backend with its own connection: where the
@@ -982,6 +988,10 @@ impl Host {
             decision.clone(),
             Arc::clone(&listed),
         )));
+        let _host_state_task = AbortOnDrop(tokio::spawn(push_host_state(
+            Arc::clone(&self.source),
+            Arc::clone(&session),
+        )));
         if let Some(discovery_id) = control.discovery_id.clone() {
             session
                 .send_control(&ControlMessage::Rendezvous { discovery_id })
@@ -1425,6 +1435,29 @@ async fn push_windows(
             return;
         }
         *last = Some(windows);
+    }
+}
+
+/// Tells the client the host's state whenever it changes; at the start
+/// only when it is not the default (an unlocked host says nothing).
+async fn push_host_state(source: Arc<dyn WindowSource>, session: Arc<Session>) {
+    let mut last = HostState::default();
+    loop {
+        let asked = Arc::clone(&source);
+        let Ok(state) = tokio::task::spawn_blocking(move || asked.host_state()).await else {
+            return;
+        };
+        if state != last {
+            if session
+                .send_control(&ControlMessage::HostState(state))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            last = state;
+        }
+        tokio::time::sleep(WINDOWS_POLL).await;
     }
 }
 

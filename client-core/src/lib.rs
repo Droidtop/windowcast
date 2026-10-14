@@ -599,6 +599,13 @@ pub enum Event {
     WindowFocused {
         window: u64,
     },
+    /// The host computer was locked or unlocked. Its windows keep
+    /// streaming while it is locked; input reaches them as window
+    /// messages, which some programs (most games) ignore. Not sent for a
+    /// host that is unlocked when the session starts.
+    HostState {
+        locked: bool,
+    },
     /// The host's clipboard text changed.
     Clipboard {
         text: String,
@@ -1863,6 +1870,9 @@ async fn pump_events(
                 height,
             },
             ControlMessage::WindowFocused(window) => Event::WindowFocused { window: window.0 },
+            ControlMessage::HostState(state) => Event::HostState {
+                locked: state.locked,
+            },
             ControlMessage::Clipboard(text) => Event::Clipboard { text },
             ControlMessage::SshCertificateResponse(answer) => match answer {
                 Ok(certificate) => Event::SshCertificate {

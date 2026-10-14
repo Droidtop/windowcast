@@ -8,7 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A locked host keeps streaming (docs/BACKENDS.md, "A locked host"; Droidtop/tracker#467). The host tells clients when it is locked or unlocked: `ControlMessage::HostState` (protocol 12), `WindowSource::host_state`, client-core `Event::HostState { locked }` (`host_state` in the C interface's events). The Windows agent asks Remote Desktop Services; the app and the viewer say "This PC is locked; its windows keep streaming". `windowcast-testhost --locked` says it is locked for the first 30 s of every minute.
+- Input while a Windows host is locked goes to the window as posted messages (SendInput is refused then): pointer moves, buttons and wheel to the child window under the point, keys as WM_KEYDOWN/WM_KEYUP with their scan codes, text as WM_CHAR. Best effort: programs that read raw input or the key state (most games) do not see it.
 - Linux packages (Droidtop/tracker#118): with each release, a portable `.tar.zst`, one runnable `.run` file (uruntime), a `.deb` and an `.rpm` for x86_64 and aarch64 holding `windowcast-agent-linux`, `windowcast-app`, `windowcast-client` and `windowcast-testhost`, with `install.sh` (per user, no root, `--autostart` optional) and `uninstall.sh` (removes exactly what the install manifest lists; `--purge` also deletes the device's data) and `SHA256SUMS-linux`. Built by `.github/workflows/linux-packages.yml` from `packaging/linux`. The systemd user unit `windowcast-agent.service` ships in the packages, not enabled.
+
+### Changed
+- The desktop backend serves the window's own capture while the Windows host's screen is locked (a cut of the screen would show the lock screen), and the screen's again once it is unlocked.
+
+### Removed
+- 0.30.0's refusal on a locked Windows host ("the host computer is locked; unlock it to stream its windows"): window capture goes on while locked, as `agent-windows/tests/lock.rs` and `agent-linux/tests/lock.rs` now check on CI.
+
+### Fixed
+- The locked-session test no longer crashes as its process exits: it closes its window and joins the window's thread before returning.
 
 ## [0.30.0] - 2026-10-10
 

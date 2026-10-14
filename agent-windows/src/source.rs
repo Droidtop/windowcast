@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use windowcast_host::quality::Quality;
 use windowcast_host::{EncodedFrame, FrameSource, WindowSource};
-use windowcast_protocol::{BackendKind, InputEvent, VideoCodec, WindowId, WindowInfo};
+use windowcast_protocol::{BackendKind, HostState, InputEvent, VideoCodec, WindowId, WindowInfo};
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 
 use crate::capture::{self, Capture};
@@ -16,6 +16,7 @@ use crate::clipboard;
 use crate::convert;
 use crate::encoder::{self, Encoder, EncoderChoice, Settings};
 use crate::input::Injector;
+use crate::lock;
 use crate::windows_list;
 
 /// Agent options, from the command line or a host application.
@@ -153,6 +154,12 @@ impl WindowSource for WindowsSource {
         clipboard::set_text(text);
     }
 
+    fn host_state(&self) -> HostState {
+        HostState {
+            locked: lock::session_locked(),
+        }
+    }
+
     fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
         check_window(window)?;
         Ok(Box::new(self.open_stream(window, codec, false)))
@@ -206,38 +213,23 @@ impl WindowSource for WindowsSource {
     }
 }
 
+/// Windows stream whether or not the PC is locked: their own capture goes
+/// on while the lock screen is up (docs/BACKENDS.md, "A locked host").
 fn check_window(window: WindowId) -> Result<(), String> {
     if !unsafe { IsWindow(Some(windows_list::hwnd(window))) }.as_bool() {
         return Err("no such window".into());
     }
-    if desktop_locked() {
-        return Err(LOCKED.into());
-    }
     Ok(())
-}
-
-/// Why nothing streams while the host is locked: its windows are not drawn
-/// then, so a capture never yields a picture (Droidtop/tracker#467).
-const LOCKED: &str = "the host computer is locked; unlock it to stream its windows";
-
-/// Whether the input desktop is out of this session's reach: the lock
-/// screen (and UAC's secure desktop) is a desktop of its own that a user's
-/// process cannot open.
-fn desktop_locked() -> bool {
-    use windows::Win32::System::StationsAndDesktops::{
-        CloseDesktop, OpenInputDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_SWITCHDESKTOP,
-    };
-    match unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_SWITCHDESKTOP) } {
-        Ok(desktop) => {
-            let _ = unsafe { CloseDesktop(desktop) };
-            false
-        }
-        Err(_) => true,
-    }
 }
 
 struct State {
     capture: Capture,
+    /// Whether `capture` is of the whole screen (a desktop stream while
+    /// the input desktop is in reach).
+    screen: bool,
+    /// When the desktop backend last looked at whether the screen is
+    /// locked.
+    checked: Instant,
     encoder: Box<dyn Encoder>,
     size: (usize, usize),
 }
@@ -313,7 +305,36 @@ impl Timings {
     }
 }
 
+/// How often a desktop stream looks at whether the screen is locked.
+const LOCK_CHECK: Duration = Duration::from_secs(1);
+
 impl WindowStream {
+    /// Whether this stream's pictures come from the whole screen: the
+    /// desktop backend, while the screen shows the desktop.
+    fn wants_screen(&self) -> bool {
+        self.desktop && lock::input_desktop_reachable()
+    }
+
+    /// A new capture of the screen or of the window on its own.
+    fn capture(&self, screen: bool) -> Option<Capture> {
+        let hwnd = windows_list::hwnd(self.window);
+        let capture = if screen {
+            Capture::desktop(hwnd)
+        } else {
+            Capture::window(hwnd)
+        };
+        match capture {
+            Ok(mut capture) => {
+                capture.set_scale(self.quality.scale);
+                Some(capture)
+            }
+            Err(e) => {
+                eprintln!("capture of window {} failed: {e}", self.window.0);
+                None
+            }
+        }
+    }
+
     fn take_pending(&mut self) -> Option<EncodedFrame> {
         let data = self.pending.pop_front()?;
         let duration = self.last_sent.elapsed();
@@ -467,24 +488,13 @@ impl FrameSource for WindowStream {
         capture::init_thread();
         let hwnd = windows_list::hwnd(self.window);
         if self.state.is_none() {
-            let capture = if self.desktop {
-                Capture::desktop(hwnd)
-            } else {
-                Capture::window(hwnd)
-            };
-            let capture = match capture {
-                Ok(mut capture) => {
-                    capture.set_scale(self.quality.scale);
-                    capture
-                }
-                Err(e) => {
-                    eprintln!("capture of window {} failed: {e}", self.window.0);
-                    return None;
-                }
-            };
+            let screen = self.wants_screen();
+            let capture = self.capture(screen)?;
             // The encoder is opened at the first picture's size.
             self.state = Some(State {
                 capture,
+                screen,
+                checked: Instant::now(),
                 encoder: Box::new(NoEncoder),
                 size: (0, 0),
             });
@@ -492,6 +502,37 @@ impl FrameSource for WindowStream {
         loop {
             if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
                 return None;
+            }
+            // A cut of the screen would show the lock screen: while the PC
+            // is locked the desktop backend serves the window's own
+            // capture, and the screen's again once it is unlocked.
+            let due = self
+                .state
+                .as_ref()
+                .is_some_and(|s| self.desktop && s.checked.elapsed() >= LOCK_CHECK);
+            if due {
+                let screen = self.wants_screen();
+                let state = self.state.as_mut().expect("state");
+                state.checked = Instant::now();
+                if screen != state.screen {
+                    println!(
+                        "window {}: {}",
+                        self.window.0,
+                        if screen {
+                            "the screen is unlocked; cutting the window out of it again"
+                        } else {
+                            "the screen is locked; capturing the window on its own"
+                        }
+                    );
+                    if let Some(capture) = self.capture(screen) {
+                        let state = self.state.as_mut().expect("state");
+                        state.capture = capture;
+                        state.screen = screen;
+                        // The encoder opens again for the new capture (its
+                        // size, and whether it takes textures from it).
+                        state.size = (0, 0);
+                    }
+                }
             }
             let (options, generation) = self.options();
             let frame_time = frame_time(fps(&options, &self.quality));

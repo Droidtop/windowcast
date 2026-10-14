@@ -124,6 +124,10 @@ impl WindowSource for Gated {
         }
     }
 
+    fn host_state(&self) -> windowcast_protocol::HostState {
+        self.agent.host_state()
+    }
+
     fn open_audio(
         &self,
         window: WindowId,

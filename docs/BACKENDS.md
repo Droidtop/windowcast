@@ -364,6 +364,71 @@ selector is the next step.
   those windows as host windows, so they too are carried by any carrier
   and switch like any other, instead of reaching the client over RDP only.
 
+## A locked host (Droidtop/tracker#467)
+
+Decided by the owner, 2026-10-10: "A locked host should still allow
+streaming. Otherwise, it's useless for remote access", and "Windowcast
+doesn't have to follow a screen. We stream windows themselves". A host
+never refuses a stream because it is locked (0.30.0 did; that is gone).
+The work comes in pieces: windows keep streaming while locked (below,
+built); unlocking through the secure screen; a private session (a
+session of its own on Windows Pro and up, a headless sway session on
+Linux), offered only where it exists ("We can detect windows pro, and
+offer to use a separate session if it exists").
+
+### What capture and input do while locked
+
+Measured on CI (`agent-windows/tests/lock.rs`, `agent-linux/tests/lock.rs`,
+which now assert it):
+
+- **Windows** (LockWorkStation). The input desktop is out of reach about
+  0.1 s after the call. A window's own capture (Windows.Graphics.Capture)
+  keeps delivering changing pictures, and one started while locked does
+  too; the program keeps painting. A capture of the whole screen started
+  while locked gets one picture and then nothing. SendInput takes no
+  events; messages posted to a window arrive.
+- **Linux** (headless sway, swaylock, ext-session-lock-v1). The toplevel
+  capture keeps showing the window, one started while locked too; the
+  output shows the lock screen; input through the compositor goes to the
+  lock surface. GNOME differs: its PipeWire window capture freezes on the
+  last picture while locked (gnome-shell issue 6771).
+
+### Windows keep streaming while locked (built)
+
+- **The host says so.** `ControlMessage::HostState(HostState { locked })`
+  (protocol 12) is sent when the state changes, and when a session
+  starts on a locked host; an unlocked host says nothing. The Windows
+  agent asks Remote Desktop Services (`WTSSessionInfoEx`) every 400 ms.
+  client-core turns it into `Event::HostState { locked }`; the app and
+  the viewer show "This PC is locked; its windows keep streaming", with
+  the input limits below.
+- **Capture.** Window streams keep their window capture. The desktop
+  backend (the window cut out of the whole screen) would show the lock
+  screen, so while the input desktop is out of reach it serves the
+  window's own capture, and the screen's again once it is back (checked
+  once a second). A window Windows.Graphics.Capture will not take on its
+  own (menus, tooltips) is captured from the screen, so it shows the lock
+  screen while locked.
+- **Input on Windows** goes to the window as posted messages while the
+  input desktop is out of reach (`agent-windows/src/posted.rs`): pointer
+  moves, buttons and wheel to the child window under the point, in its
+  client coordinates; keys as WM_KEYDOWN/WM_KEYUP with their real scan
+  codes, to the window with the keyboard focus in that program's thread
+  (or the child last clicked); text as WM_CHAR. The same rules decide
+  which windows take input. This is best effort, and its limits are
+  known: programs that read raw input, DirectInput or the key state
+  (GetKeyState, GetAsyncKeyState) do not see it, most games and some
+  Chromium and UWP controls among them; clicks on a window's frame do
+  nothing; Shift does not change the character a posted key makes (text
+  sent as text is exact). Gamepads are virtual devices (ViGEmBus), not on
+  the desktop path. The full answer for those programs is the private
+  session, or unlocking through the secure screen.
+- **Linux while locked.** Window capture goes on under sway, so streams
+  go on. The host cannot tell that sway is locked (ext-session-lock has
+  no way to ask), so it sends no `HostState`, a desktop cut shows the
+  lock screen, and input goes to the lock screen. The full answer there
+  is the headless session.
+
 ## Choosing a backend
 
 `windowcast_protocol::selection` holds the rules, so both ends agree:

@@ -3,7 +3,9 @@
 //! codes (the evdev keycodes windowcast sends are the XT set-1 codes for
 //! the main block), typed text as Unicode characters. A touch drives the
 //! pointer (the first finger only). Gamepads do not come here: they are
-//! ViGEmBus pads (`crate::gamepad`).
+//! ViGEmBus pads (`crate::gamepad`). While the input desktop is out of
+//! reach (the PC is locked), SendInput is refused, and each event is
+//! posted to the window as a message instead (`crate::posted`).
 
 use std::sync::Mutex;
 
@@ -16,6 +18,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, XBUTTON1, XBUTTON2,
 };
 
+use crate::lock;
+use crate::posted::Posted;
 use crate::windows_list::hwnd;
 
 /// One wheel notch, as Windows counts it.
@@ -25,10 +29,19 @@ const WHEEL_DELTA: f32 = 120.0;
 pub struct Injector {
     /// The touch that drives the pointer while it is down.
     primary_touch: Mutex<Option<u32>>,
+    /// Input as window messages, while the PC is locked.
+    posted: Posted,
 }
 
 impl Injector {
     pub fn inject(&self, event: &InputEvent, focus: Option<WindowId>) {
+        if let InputEvent::PointerMove { window, x, y } = event {
+            self.posted.remember_pointer(*window, *x, *y);
+        }
+        if !lock::input_desktop_reachable() {
+            self.posted.inject(event, focus);
+            return;
+        }
         match event {
             InputEvent::PointerMove { window, x, y } => move_to(*window, *x, *y),
             InputEvent::PointerButton {
@@ -189,7 +202,7 @@ fn button_data(button: PointerButton) -> u32 {
 
 /// The window's captured area on screen: its visible bounds, which is what
 /// Windows.Graphics.Capture records.
-fn bounds(window: HWND) -> Option<RECT> {
+pub(crate) fn bounds(window: HWND) -> Option<RECT> {
     let mut rect = RECT::default();
     unsafe {
         DwmGetWindowAttribute(

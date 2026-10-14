@@ -275,6 +275,9 @@ impl WindowSource for WithRdp {
     fn set_clipboard(&self, text: &str) {
         self.inner.set_clipboard(text)
     }
+    fn host_state(&self) -> windowcast_protocol::HostState {
+        self.inner.host_state()
+    }
     fn handoff(&self, kind: BackendKind, window: WindowId) -> Option<Result<Handoff, String>> {
         if kind == BackendKind::Rdp {
             if !self.enabled.load(Ordering::SeqCst) {

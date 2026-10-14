@@ -104,8 +104,10 @@ int64_t windowcast_session_send_input(const WindowcastSession *session, const ch
 int64_t windowcast_session_set_clipboard(const WindowcastSession *session, const char *text);
 
 /* Next session event as JSON, tagged by "type": windows, stream_started,
- * stream_refused, stream_stopped, window_resized, window_focused,
- * clipboard, ssh_certificate, closed.
+ * stream_refused, stream_stopped, carrier_started, carrier_refused,
+ * window_resized, window_focused, host_state ({"locked": bool}: the host
+ * computer was locked or unlocked; its windows keep streaming), clipboard,
+ * ssh_certificate, stream_quality, closed.
  * Returns its length, WINDOWCAST_TIMEOUT, or WINDOWCAST_BUFFER_TOO_SMALL
  * with the length needed in *needed (that event is lost). */
 int64_t windowcast_session_next_event(const WindowcastSession *session, uint32_t timeout_ms,

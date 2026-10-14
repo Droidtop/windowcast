@@ -199,8 +199,16 @@ jobs:
             target/release/windowcast-rdp.exe
             target/debug/deps/encoders-*.exe
 
-      - name: Window capture while the session is locked
+      - name: Streaming and input while the session is locked
         # Last: the session stays locked (no password to unlock it with).
         env:
           WINDOWCAST_TEST_LOCK: "1"
         run: cargo test -p windowcast-agent-windows --test lock -- --nocapture
+
+      - name: Crashes, when the locked-session test failed
+        # A crash names its faulting module and offset in the Application log.
+        if: failure()
+        shell: pwsh
+        run: |
+          Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000, 1001 } -MaxEvents 6 -ErrorAction SilentlyContinue |
+            Format-List TimeCreated, Id, Message

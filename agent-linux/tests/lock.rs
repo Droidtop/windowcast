@@ -1,10 +1,11 @@
-//! What window capture does while the session is locked under sway
-//! (Droidtop/tracker#467): the test window, which draws every frame, is
-//! captured on its own and cut out of its output, then swaylock locks the
-//! session (ext-session-lock-v1) and the test reports whether pictures keep
-//! coming and what they show. A locked session stays locked, so it runs
-//! only where `WINDOWCAST_TEST_SWAYLOCK` is set (the last step of the sway
-//! CI job, with sway and swaylock running) and is skipped elsewhere.
+//! A locked sway session keeps streaming its windows (docs/BACKENDS.md, "A
+//! locked host"; Droidtop/tracker#467): the test window, which draws every
+//! frame, is captured on its own and cut out of its output, then swaylock
+//! locks the session (ext-session-lock-v1). The window's own capture keeps
+//! showing the window, one started while locked too; the output shows the
+//! lock screen. A locked session stays locked, so it runs only where
+//! `WINDOWCAST_TEST_SWAYLOCK` is set (the last step of the sway CI job,
+//! with sway and swaylock running) and is skipped elsewhere.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -14,6 +15,10 @@ use windowcast_agent_linux::capture::Capture;
 use windowcast_agent_linux::toplevels;
 
 const TITLE: &str = "windowcast lock test";
+/// The test window's colour (3366cc) and the lock screen's (ff0000), as
+/// BGRA.
+const WINDOW_BGRA: [u8; 4] = [0xcc, 0x66, 0x33, 0xff];
+const LOCK_BGRA: [u8; 4] = [0x00, 0x00, 0xff, 0xff];
 
 fn centre(capture: &mut Capture) -> Option<[u8; 4]> {
     let p = capture.picture()?;
@@ -21,7 +26,8 @@ fn centre(capture: &mut Capture) -> Option<[u8; 4]> {
     Some([p.data[at], p.data[at + 1], p.data[at + 2], p.data[at + 3]])
 }
 
-fn watch(name: &str, capture: &mut Capture, time: Duration) -> usize {
+/// Pictures over `time`, and the last one's centre.
+fn watch(name: &str, capture: &mut Capture, time: Duration) -> (usize, Option<[u8; 4]>) {
     let end = Instant::now() + time;
     let mut pictures = 0;
     let mut last = None;
@@ -32,18 +38,15 @@ fn watch(name: &str, capture: &mut Capture, time: Duration) -> usize {
                 last = centre(capture);
             }
             Ok(false) => {}
-            Err(e) => {
-                println!("{name}: capture failed: {e}");
-                break;
-            }
+            Err(e) => panic!("{name}: capture failed: {e}"),
         }
     }
     println!("{name}: {pictures} pictures in {time:?}, last centre (BGRA) {last:?}");
-    pictures
+    (pictures, last)
 }
 
 #[test]
-fn window_capture_while_the_session_is_locked() {
+fn a_locked_session_keeps_streaming_windows() {
     if std::env::var_os("WINDOWCAST_TEST_SWAYLOCK").is_none() {
         println!("skipped: locks the session; set WINDOWCAST_TEST_SWAYLOCK to run");
         return;
@@ -71,7 +74,7 @@ fn window_capture_while_the_session_is_locked() {
     std::thread::sleep(Duration::from_millis(500));
     let mut own = Capture::window(window).expect("window capture");
     let mut cut = Capture::desktop(window).expect("output capture");
-    let before = watch("unlocked window", &mut own, Duration::from_secs(2));
+    let (before, _) = watch("unlocked window", &mut own, Duration::from_secs(2));
     watch("unlocked output", &mut cut, Duration::from_secs(2));
     assert!(before > 0, "no pictures before locking");
 
@@ -80,20 +83,24 @@ fn window_capture_while_the_session_is_locked() {
         .args(["-f", "-c", "ff0000"])
         .status()
         .expect("swaylock");
-    println!("swaylock -f: {locked}");
+    assert!(locked.success(), "swaylock -f: {locked}");
     std::thread::sleep(Duration::from_secs(1));
-    watch("locked window", &mut own, Duration::from_secs(4));
-    watch("locked output", &mut cut, Duration::from_secs(4));
-    match Capture::window(window) {
-        Ok(mut fresh) => {
-            watch(
-                "window capture started while locked",
-                &mut fresh,
-                Duration::from_secs(4),
-            );
-        }
-        Err(e) => println!("window capture started while locked: {e}"),
+
+    let (pictures, last) = watch("locked window", &mut own, Duration::from_secs(4));
+    assert!(pictures > 0, "the window's capture stopped while locked");
+    assert_eq!(last, Some(WINDOW_BGRA), "the window's capture while locked");
+    // The output, when it sends a picture at all, shows the lock screen.
+    if let (_, Some(last)) = watch("locked output", &mut cut, Duration::from_secs(4)) {
+        assert_eq!(last, LOCK_BGRA, "the output while locked");
     }
+    let mut fresh = Capture::window(window).expect("window capture started while locked");
+    let (pictures, last) = watch(
+        "window capture started while locked",
+        &mut fresh,
+        Duration::from_secs(4),
+    );
+    assert!(pictures > 0, "a capture started while locked shows nothing");
+    assert_eq!(last, Some(WINDOW_BGRA), "a capture started while locked");
     let _ = child.kill();
     let _ = child.wait();
 }

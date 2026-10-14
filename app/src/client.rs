@@ -98,6 +98,8 @@ struct State {
     address: Option<String>,
     connecting: bool,
     error: Option<String>,
+    /// The host said it is locked (its windows keep streaming).
+    host_locked: bool,
     windows: Vec<WindowInfo>,
     streams: HashMap<u64, Stream>,
     log: VecDeque<String>,
@@ -154,6 +156,9 @@ pub struct ClientSnapshot {
     pub rtt_ms: Option<f64>,
     pub connecting: bool,
     pub error: Option<String>,
+    /// The host is locked: its windows keep streaming, and input reaches
+    /// them as window messages.
+    pub host_locked: bool,
     pub windows: Vec<ClientWindow>,
     pub streams: Vec<ClientStream>,
     pub log: Vec<String>,
@@ -445,6 +450,7 @@ impl ClientRole {
         state.session = Some(Arc::clone(&session));
         state.address = Some(address.to_owned());
         state.error = None;
+        state.host_locked = false;
         state.windows.clear();
         let generation = state.generation;
         drop(state);
@@ -621,6 +627,18 @@ impl ClientRole {
                     self.log(format!("window {window}: stream stopped"));
                 }
                 Event::WindowResized { .. } | Event::WindowFocused { .. } => {}
+                Event::HostState { locked } => {
+                    state.host_locked = locked;
+                    drop(state);
+                    self.log(
+                        if locked {
+                            "the host is locked; its windows keep streaming"
+                        } else {
+                            "the host is unlocked"
+                        }
+                        .into(),
+                    );
+                }
                 Event::Clipboard { text } => state.clipboard = Some(text),
                 // This app asks for no SSH certificates.
                 Event::SshCertificate { .. } => {}
@@ -631,6 +649,7 @@ impl ClientRole {
                 }
                 Event::Closed => {
                     state.session = None;
+                    state.host_locked = false;
                     let mut streams = std::mem::take(&mut state.streams);
                     state.error = Some("the host closed the session".into());
                     drop(state);
@@ -1017,6 +1036,7 @@ impl ClientRole {
                 .map(|d| d.as_secs_f64() * 1000.0),
             connecting: state.connecting,
             error: state.error.clone(),
+            host_locked: state.host_locked,
             windows,
             streams,
             log: state.log.iter().cloned().collect(),

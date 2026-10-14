@@ -14,6 +14,11 @@ use crate::config::{HostSettings, Roles};
 use crate::host::{HostRole, HostSnapshot};
 use crate::terminal::SshRequest;
 
+/// What the client says while its host is locked (docs/BACKENDS.md, "A
+/// locked host").
+const LOCKED_HOST: &str = "This PC is locked; its windows keep streaming. Input reaches them as \
+     window messages, which some programs, most games among them, ignore.";
+
 type Role<T> = Option<Result<Arc<T>, String>>;
 
 pub fn run(roles: Roles, host: Role<HostRole>, client: Role<ClientRole>) -> Result<(), String> {
@@ -711,6 +716,9 @@ impl App {
                 }
                 if let Some(error) = &snapshot.error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+                if snapshot.host_locked {
+                    ui.colored_label(ui.visuals().warn_fg_color, LOCKED_HOST);
                 }
                 ui.separator();
 

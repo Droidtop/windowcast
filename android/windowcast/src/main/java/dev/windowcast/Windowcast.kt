@@ -49,6 +49,8 @@ sealed interface Event {
     data class CarrierRefused(val window: Long, val generation: Int, val reason: String) : Event
     data class WindowResized(val window: Long, val width: Int, val height: Int) : Event
     data class WindowFocused(val window: Long) : Event
+    /** The host computer was locked or unlocked; its windows keep streaming while it is locked. */
+    data class HostState(val locked: Boolean) : Event
     data class Clipboard(val text: String) : Event
     data object Closed : Event
 
@@ -90,6 +92,7 @@ sealed interface Event {
                 "carrier_refused" -> CarrierRefused(o.getLong("window"), o.getInt("generation"), o.getString("reason"))
                 "window_resized" -> WindowResized(o.getLong("window"), o.getInt("width"), o.getInt("height"))
                 "window_focused" -> WindowFocused(o.getLong("window"))
+                "host_state" -> HostState(o.getBoolean("locked"))
                 "clipboard" -> Clipboard(o.getString("text"))
                 "closed" -> Closed
                 else -> null

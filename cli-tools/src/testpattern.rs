@@ -272,6 +272,10 @@ impl WindowSource for WithContent {
         self.inner.input(event, focus)
     }
 
+    fn host_state(&self) -> windowcast_protocol::HostState {
+        self.inner.host_state()
+    }
+
     fn open_audio(
         &self,
         window: WindowId,

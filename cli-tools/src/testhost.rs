@@ -5,7 +5,7 @@
 //!
 //! Usage: `windowcast-testhost [--listen ADDR:PORT] [--no-pairing] [--tone]
 //! [--microphone-level] [--content general|text|game|video] [--carriers native,rdp]
-//! [--pattern moving|still]`
+//! [--pattern moving|still] [--locked]`
 //! (`--carriers`: the carriers offered, both by default; `--carriers native`
 //! refuses a switch to RDP pictures, for trying a refused switch; `--content`: the
 //! window's content hint, which the default rules turn into a backend, so
@@ -14,7 +14,9 @@
 //! microphone is taken and its level printed once a second, the sound
 //! itself kept nowhere; `--pattern still`: the window stands still, lines
 //! of "text" sent once a second, so a client's selector moves it to RDP
-//! pictures by itself).
+//! pictures by itself; `--locked`: the host says it is locked for the first
+//! 30 s of every minute and unlocked for the rest, for trying how a client
+//! shows a locked host, which keeps streaming).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,8 +25,10 @@ use windowcast_cli_tools::testpattern::{
     parse_content, StillTextSource, TestPatternSource, TestPatternWithTone, WithContent,
 };
 use windowcast_host::audio::{AudioSource, MicrophoneSink};
-use windowcast_host::{FrameSource, HostConfig, WindowSource, DEFAULT_LISTEN};
-use windowcast_protocol::{InputEvent, VideoCodec, WindowId, WindowInfo};
+use windowcast_host::{
+    FrameSource, Handoff, HostConfig, PictureSource, WindowSource, DEFAULT_LISTEN,
+};
+use windowcast_protocol::{BackendKind, HostState, InputEvent, VideoCodec, WindowId, WindowInfo};
 
 /// Another source, plus a microphone that only measures.
 struct MeasuringMicrophone(Arc<dyn WindowSource>);
@@ -45,6 +49,9 @@ impl WindowSource for MeasuringMicrophone {
     fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
         self.0.input(event, focus)
     }
+    fn host_state(&self) -> HostState {
+        self.0.host_state()
+    }
     fn microphone(&self) -> Option<Result<Box<dyn MicrophoneSink>, String>> {
         println!("microphone: a client started sending");
         Some(Ok(Box::new(Level {
@@ -53,6 +60,44 @@ impl WindowSource for MeasuringMicrophone {
             peak: 0,
             samples: 0,
         })))
+    }
+}
+
+/// Another source on a host that says it is locked for the first 30 s of
+/// every minute (`--locked`); everything else is the source's.
+struct LockedHalfTheTime(Arc<dyn WindowSource>, Instant);
+
+impl WindowSource for LockedHalfTheTime {
+    fn list_windows(&self) -> Vec<WindowInfo> {
+        self.0.list_windows()
+    }
+    fn encoders(&self) -> Vec<VideoCodec> {
+        self.0.encoders()
+    }
+    fn backends(&self) -> Vec<BackendKind> {
+        self.0.backends()
+    }
+    fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
+        self.0.open(window, codec)
+    }
+    fn handoff(&self, kind: BackendKind, window: WindowId) -> Option<Result<Handoff, String>> {
+        self.0.handoff(kind, window)
+    }
+    fn open_pictures(&self, window: WindowId) -> Option<Result<Box<dyn PictureSource>, String>> {
+        self.0.open_pictures(window)
+    }
+    fn open_audio(&self, window: WindowId) -> Option<Result<Box<dyn AudioSource>, String>> {
+        self.0.open_audio(window)
+    }
+    fn microphone(&self) -> Option<Result<Box<dyn MicrophoneSink>, String>> {
+        self.0.microphone()
+    }
+    fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
+        self.0.input(event, focus)
+    }
+    fn host_state(&self) -> HostState {
+        let locked = self.1.elapsed().as_secs() % 60 < 30;
+        HostState { locked }
     }
 }
 
@@ -97,6 +142,7 @@ async fn main() {
     let mut content = None;
     let mut rdp = true;
     let mut still = false;
+    let mut locked = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -126,6 +172,7 @@ async fn main() {
                 Some("still") => still = true,
                 other => panic!("--pattern needs moving or still, not {other:?}"),
             },
+            "--locked" => locked = true,
             other => panic!("unknown argument {other}"),
         }
     }
@@ -166,6 +213,12 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+    };
+    let source: Arc<dyn WindowSource> = if locked {
+        println!("the host says it is locked for the first 30 s of every minute");
+        Arc::new(LockedHalfTheTime(source, Instant::now()))
+    } else {
+        source
     };
     if let Err(e) = windowcast_host::run(config, source).await {
         eprintln!("host stopped: {e}");

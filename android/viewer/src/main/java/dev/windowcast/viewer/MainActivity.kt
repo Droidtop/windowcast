@@ -617,6 +617,16 @@ class MainActivity : Activity() {
                         if (popups.containsKey(event.window)) closePopup(event.window)
                         else if (event.window == watching?.id) stopDecoding()
                     }
+                    is Event.HostState -> main.post {
+                        tell(
+                            if (event.locked) {
+                                "This PC is locked; its windows keep streaming. Input reaches them as window " +
+                                    "messages, which some programs, most games among them, ignore."
+                            } else {
+                                "This PC is unlocked."
+                            },
+                        )
+                    }
                     is Event.Clipboard -> main.post {
                         fromHost = event.text
                         clipboard.setPrimaryClip(ClipData.newPlainText("windowcast", event.text))
