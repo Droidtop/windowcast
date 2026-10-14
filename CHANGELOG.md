@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.31.0] - 2026-10-14
 
 ### Added
 - A locked host keeps streaming (docs/BACKENDS.md, "A locked host"; Droidtop/tracker#467). The host tells clients when it is locked or unlocked: `ControlMessage::HostState` (protocol 12), `WindowSource::host_state`, client-core `Event::HostState { locked }` (`host_state` in the C interface's events). The Windows agent asks Remote Desktop Services; the app and the viewer say "This PC is locked; its windows keep streaming". `windowcast-testhost --locked` says it is locked for the first 30 s of every minute.
