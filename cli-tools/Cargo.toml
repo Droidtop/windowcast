@@ -26,6 +26,7 @@ windowcast-host = { path = "../host-core" }
 windowcast-client-core = { path = "../client-core" }
 windowcast-gamestream = { path = "../gamestream" }
 windowcast-rdp = { path = "../rdp" }
+windowcast-vnc = { path = "../vnc" }
 tokio = { workspace = true, features = ["net"] }
 # Software H.264 for the test pattern host and the client's decode check;
 # builds OpenH264 (BSD-2-Clause) from source.

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped on any incompatible change to the message shapes below. A peer
 /// that receives a mismatched version should refuse the session rather
 /// than guess at how to interpret an unknown wire format.
-pub const PROTOCOL_VERSION: u16 = 15;
+pub const PROTOCOL_VERSION: u16 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
@@ -307,7 +307,7 @@ pub enum BackendKind {
 /// RDP, VNC): normally the same machine as the host agent, on its own port,
 /// with a login made for this one stream and the backend's certificate to
 /// pin, both handed over this paired session.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandoffTarget {
     /// Empty for "the address this session reached the host at".
     pub address: String,
@@ -316,6 +316,52 @@ pub struct HandoffTarget {
     pub password: String,
     /// SHA-256 of the backend's TLS certificate.
     pub certificate_sha256: Option<[u8; 32]>,
+}
+
+/// A third-party client's way in to a window in compatibility mode
+/// (docs/BACKENDS.md, "Third-party clients and RemoteApp").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CompatEndpoint {
+    /// An RDP desktop that is the window (mstsc, FreeRDP): where and how
+    /// to log in, the address left empty for the host's own.
+    Rdp(HandoffTarget),
+    /// A GameStream app (Moonlight): pair with the host (its owner types
+    /// the PIN Moonlight shows), then start this app.
+    GameStream {
+        https_port: u16,
+        app_id: u32,
+        title: String,
+    },
+    /// A VNC server that is the window, with its password.
+    Vnc { port: u16, password: String },
+}
+
+impl CompatEndpoint {
+    /// How a person points a third-party client at it, `host` being the
+    /// host's address.
+    pub fn describe(&self, host: &str) -> String {
+        match self {
+            CompatEndpoint::Rdp(target) => {
+                let address = if target.address.is_empty() {
+                    host
+                } else {
+                    &target.address
+                };
+                format!(
+                    "RDP (Remote Desktop Connection, FreeRDP): {address}:{}, user {}, password {}",
+                    target.port, target.username, target.password
+                )
+            }
+            CompatEndpoint::GameStream { title, .. } => format!(
+                "Moonlight: add {host}, pair it (type the PIN Moonlight shows on the host), \
+                 then start \"{title}\""
+            ),
+            CompatEndpoint::Vnc { port, password } => format!(
+                "VNC: {host}:{port} (display :{}), password {password}",
+                port.saturating_sub(5900)
+            ),
+        }
+    }
 }
 
 /// What the client asks for with a stream.
@@ -474,6 +520,19 @@ pub enum ControlMessage {
         reason: String,
         /// Asking again with the user's Windows password may work.
         password_needed: bool,
+    },
+    /// Turns compatibility mode on or off for a window this session
+    /// streams (docs/BACKENDS.md, "Third-party clients and RemoteApp").
+    CompatibilityRequest {
+        window: WindowId,
+        on: bool,
+    },
+    /// The window's compatibility mode now: its endpoints (none: off), or
+    /// why it could not be turned on.
+    Compatibility {
+        window: WindowId,
+        endpoints: Vec<CompatEndpoint>,
+        refused: Option<String>,
     },
 
     /// The host's pointer over a streamed window (docs/BACKENDS.md, "The
@@ -925,6 +984,21 @@ mod tests {
             ControlMessage::PrivateSessionRequest {
                 start: true,
                 password: Some("secret".into()),
+            },
+            ControlMessage::Compatibility {
+                window: WindowId(9),
+                endpoints: vec![
+                    CompatEndpoint::Vnc {
+                        port: 5901,
+                        password: "pw".into(),
+                    },
+                    CompatEndpoint::GameStream {
+                        https_port: 47984,
+                        app_id: 3,
+                        title: "Notepad".into(),
+                    },
+                ],
+                refused: None,
             },
         ];
         for message in messages {

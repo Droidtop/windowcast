@@ -162,6 +162,21 @@ streams a window and only while the host allows input, and they are
 unplugged when the session ends. The clipboard is shared both ways while
 a session is open.
 
+## Compatibility mode: third-party clients, each with its own login
+
+A window in compatibility mode (docs/BACKENDS.md) is also served to
+clients that are not windowcast sessions, which cannot use the pinned
+identities above, so each endpoint has its own authentication, made for
+that window and gone when compatibility mode ends: an RDP server with
+TLS and NLA and a random 144-bit password; Moonlight's GameStream
+pairing, completed only by the PIN typed in the host application;
+VNC Authentication with a random eight-character password (DES, all RFB
+offers: weaker than the others, and the host says so by listing it).
+Only a session already streaming the window, and allowed to drive
+windows, can turn it on; the host's owner can turn it on from the host.
+Each endpoint drives only its one window, under the host's input
+setting.
+
 ## Authorization is separate from authentication
 
 A pinned identity proves *who* is connecting, not *what* they're allowed to

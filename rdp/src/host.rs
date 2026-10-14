@@ -171,7 +171,11 @@ impl WithRdp {
         self.enabled.store(on, Ordering::SeqCst);
     }
 
-    fn start(&self, window: WindowId) -> Result<Handoff, String> {
+    /// An RDP server for `window` alone, with a login made for it: for a
+    /// windowcast client (which sends its input over the session) or, with
+    /// `input`, for a third-party client (compatibility mode), whose input
+    /// goes through the host's input rules.
+    fn start(&self, window: WindowId, input: bool) -> Result<Handoff, String> {
         // Raw pictures first, so a host without them refuses here rather
         // than after the client has logged in.
         match self.inner.open_pictures(window) {
@@ -196,7 +200,7 @@ impl WithRdp {
             identity: Arc::clone(&self.identity),
             stats: Arc::new(HostStats::default()),
             stop: Arc::clone(&stop),
-            input: false,
+            input,
         };
         std::thread::spawn(move || {
             if let Err(e) = serve_window(listener, server) {
@@ -296,7 +300,7 @@ impl WindowSource for WithRdp {
             if !self.enabled.load(Ordering::SeqCst) {
                 return Some(Err("this host does not offer RDP".into()));
             }
-            Some(self.start(window))
+            Some(self.start(window, false))
         } else {
             self.inner.handoff(kind, window)
         }
@@ -467,6 +471,25 @@ impl RdpServerInputHandler for WindowInput {
             }),
             MouseEvent::RelMove { .. } => {}
         }
+    }
+}
+
+/// Compatibility mode's RDP endpoint (docs/BACKENDS.md, "Third-party
+/// clients and RemoteApp"): the window as the whole desktop of an RDP
+/// server of its own, for mstsc, FreeRDP or any RDP client, with a login
+/// made for it and the client's own input.
+impl windowcast_host::compat::CompatProvider for WithRdp {
+    fn open(
+        &self,
+        window: WindowId,
+        _title: &str,
+    ) -> Result<(windowcast_protocol::CompatEndpoint, Box<dyn Send + Sync>), String> {
+        let handoff = self.start(window, true)?;
+        let guard = handoff.guard;
+        Ok((
+            windowcast_protocol::CompatEndpoint::Rdp(handoff.target),
+            Box::new(std::sync::Mutex::new(guard)),
+        ))
     }
 }
 

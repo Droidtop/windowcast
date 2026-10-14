@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Compatibility mode (docs/BACKENDS.md, "Third-party clients and RemoteApp"; Droidtop/tracker#457, protocol 16): a window a client streams, or one the host's owner picks, is also offered to third-party clients: an RDP desktop of the window (mstsc, FreeRDP) with a login made for it, a GameStream app for Moonlight (pairing by the PIN typed on the host), and a VNC server with a password made for it. `windowcast_host::compat` (`Compatibility`, `CompatProvider`), `CompatibilityRequest` and `Compatibility`; client-core `ClientSession::set_compatibility`, `Event::Compatibility`, `windowcast_session_set_compatibility`; the app's per-stream checkbox and host section (with Moonlight's PIN), the viewer's menu item.
+- `windowcast-vnc`: RFB 3.8 for one window, VNC Authentication, Raw updates of what changed, DesktopSize, any true-colour pixel format, keys and pointer.
+- `windowcast_gamestream::compat`: the windows in compatibility mode as Moonlight's apps, the server started on first use.
+
 ## [0.34.1] - 2026-10-14
 
 ### Fixed

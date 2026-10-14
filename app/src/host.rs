@@ -245,6 +245,11 @@ pub struct HostSnapshot {
     /// The private session as the agent says it: off (not offered), why
     /// this computer cannot have one, offered, or on.
     pub private_session: PrivateSession,
+    /// Windows in compatibility mode: the window, its title, how
+    /// third-party clients reach it, and whether the owner turned it on.
+    pub compatibility: Vec<(WindowId, String, Vec<String>, bool)>,
+    /// Moonlight clients waiting for their PIN to be typed here.
+    pub gamestream_pairing: Vec<String>,
 }
 
 /// Counters at the last rate sample of one stream.
@@ -264,6 +269,8 @@ pub struct HostRole {
     served: Arc<windowcast_rdp::host::WithRdp>,
     /// Launches as RemoteApps of this computer's Remote Desktop.
     remote_apps: Arc<windowcast_rdp::remoteapp_host::WindowsRemoteApps>,
+    /// Compatibility mode's GameStream endpoint, for Moonlight's pairing.
+    gamestream: Arc<windowcast_gamestream::compat::GameStreamCompat>,
     store: Arc<Store>,
     pub listen: String,
     /// Each encoder option and the codecs it has on this machine.
@@ -339,6 +346,22 @@ impl HostRole {
             remote_app_windows,
         ));
         control.set_remote_apps(Some(Arc::clone(&remote_apps) as _));
+        // Compatibility mode: each window in it is also an RDP desktop, a
+        // GameStream app and a VNC server, for third-party clients, with
+        // their input under the host's input setting (`Gated`).
+        let gated = Arc::clone(&source) as Arc<dyn WindowSource>;
+        let gamestream = Arc::new(windowcast_gamestream::compat::GameStreamCompat::new(
+            &format!("windowcast on {}", platform::NAME),
+            Arc::clone(&gated),
+            config.data_dir.join("gamestream"),
+            bind,
+            runtime.clone(),
+        ));
+        control.compatibility().set_providers(vec![
+            Arc::clone(&served) as Arc<dyn windowcast_host::compat::CompatProvider>,
+            Arc::clone(&gamestream) as _,
+            Arc::new(windowcast_vnc::VncCompat::new(gated, bind)),
+        ]);
         runtime.spawn(windowcast_host::serve_with(
             listener,
             Arc::clone(&control),
@@ -350,6 +373,7 @@ impl HostRole {
             source,
             served,
             remote_apps,
+            gamestream,
             store,
             listen,
             encoders,
@@ -389,7 +413,7 @@ impl HostRole {
             .iter()
             .map(|window| (window.id.0, window.title.clone()))
             .collect();
-        let windows = windows
+        let windows: Vec<HostWindow> = windows
             .into_iter()
             .map(|info| {
                 let default_backend = selection::choose_backend(&info, &[]);
@@ -438,8 +462,40 @@ impl HostRole {
             .runtime
             .block_on(async { (self.control.pin().await, self.control.trusted().await) });
         let private_session = self.source.windows.host_state().private_session;
+        let host = self
+            .listen
+            .rsplit_once(':')
+            .map_or("this computer", |(host, _)| host)
+            .replace("0.0.0.0", "this computer's address");
+        let compatibility = self
+            .control
+            .compatibility()
+            .list()
+            .into_iter()
+            .map(|(window, endpoints, by_host)| {
+                let title = windows
+                    .iter()
+                    .find(|w| w.info.id == window)
+                    .map_or_else(|| format!("window {}", window.0), |w| w.info.title.clone());
+                let described = endpoints.iter().map(|e| e.describe(&host)).collect();
+                (window, title, described, by_host)
+            })
+            .collect();
+        let gamestream_pairing = self
+            .gamestream
+            .server()
+            .map(|server| {
+                server
+                    .pairing_requests()
+                    .into_iter()
+                    .map(|r| format!("{} ({})", r.device_name, r.address))
+                    .collect()
+            })
+            .unwrap_or_default();
         HostSnapshot {
             private_session,
+            compatibility,
+            gamestream_pairing,
             pin,
             identity: self.control.peer_id().to_hex(),
             offered: self.source.encoders(),
@@ -574,6 +630,26 @@ impl HostRole {
         self.set_away(settings.away, settings.away_port);
         self.store.update(|config| config.host = settings);
         Ok(())
+    }
+
+    /// Puts `window` in compatibility mode on the owner's behalf (until
+    /// the owner takes it out), or takes it out.
+    pub fn set_compatibility(&self, window: WindowId, title: &str, on: bool) -> Result<(), String> {
+        let compat = self.control.compatibility();
+        if on {
+            compat.turn_on(window, title, windowcast_host::compat::Owner::Host)?;
+        } else {
+            compat.turn_off(window, windowcast_host::compat::Owner::Host);
+        }
+        Ok(())
+    }
+
+    /// The owner typed the PIN a Moonlight client shows. False when no
+    /// client was waiting for one.
+    pub fn enter_gamestream_pin(&self, pin: &str) -> bool {
+        self.gamestream
+            .server()
+            .is_some_and(|server| server.enter_pin(pin, None))
     }
 
     pub fn pairing(&self, open: bool) {

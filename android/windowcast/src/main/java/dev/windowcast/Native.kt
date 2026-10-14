@@ -47,6 +47,7 @@ internal object Native {
     @JvmStatic external fun acceptPictures(session: Long, on: Boolean): Long
     @JvmStatic external fun followPopups(session: Long, on: Boolean): Long
     @JvmStatic external fun privateSession(session: Long, start: Boolean, password: String?): Long
+    @JvmStatic external fun setCompatibility(session: Long, window: Long, on: Boolean): Long
     /** The pointer shape [shape] as RGBA into [buffer]; info gets its width, height and hotspot. */
     @JvmStatic external fun cursorImage(session: Long, shape: Long, buffer: ByteBuffer, info: IntArray): Long
     /** The next RGBA picture of an RDP window into [buffer]; size gets its width and height. */

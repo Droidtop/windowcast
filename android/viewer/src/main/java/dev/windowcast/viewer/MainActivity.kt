@@ -104,6 +104,9 @@ class MainActivity : Activity() {
     private var hostPrivate = "off"
     private var hostLocked = false
 
+    /** The watched window is in compatibility mode. */
+    private var compatibility = false
+
     /**
      * The renderer drawing on each surface: stopped when that surface is destroyed, before the
      * callback returns, so no decoder writes to a surface that is gone (#463).
@@ -662,6 +665,9 @@ class MainActivity : Activity() {
                             }
                         }
                     }
+                    is Event.Compatibility -> main.post {
+                        if (event.window == watching?.id) showCompatibility(event)
+                    }
                     is Event.PrivateSessionRefused -> main.post {
                         if (event.passwordNeeded) askPrivatePassword(event.reason) else tell("No private session: ${event.reason}")
                     }
@@ -722,6 +728,8 @@ class MainActivity : Activity() {
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menu.add(Menu.NONE, MENU_VIDEO, Menu.NONE, "Show as video")
         menu.add(Menu.NONE, MENU_PICTURES, Menu.NONE, "Show as RDP pictures")
+        menu.add(Menu.NONE, MENU_COMPATIBILITY, Menu.NONE, "Compatibility mode")
+            .setCheckable(true)
         menu.add(Menu.NONE, MENU_PRIVATE_START, Menu.NONE, "Use a private session")
         menu.add(Menu.NONE, MENU_PRIVATE_END, Menu.NONE, "End the private session")
         return true
@@ -731,6 +739,10 @@ class MainActivity : Activity() {
         val on = streaming() && switching == null
         menu.findItem(MENU_VIDEO)?.isVisible = on && carrier != "Native"
         menu.findItem(MENU_PICTURES)?.isVisible = on && carrier != "Rdp"
+        menu.findItem(MENU_COMPATIBILITY)?.let {
+            it.isVisible = streaming()
+            it.isChecked = compatibility
+        }
         val connected = session?.isOpen == true
         menu.findItem(MENU_PRIVATE_START)?.isVisible = connected && hostPrivate == "available"
         menu.findItem(MENU_PRIVATE_END)?.isVisible = connected && hostPrivate == "active"
@@ -740,6 +752,13 @@ class MainActivity : Activity() {
     /** Switches the watched window's carrier, keeping it on screen until the new one shows. */
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         when (item.itemId) {
+            MENU_COMPATIBILITY -> {
+                val s = session ?: return true
+                val window = watching ?: return true
+                val on = !compatibility
+                worker.execute { s.setCompatibility(window.id, on) }
+                return true
+            }
             MENU_PRIVATE_START -> {
                 AlertDialog.Builder(this)
                     .setTitle("Use a private session?")
@@ -876,6 +895,28 @@ class MainActivity : Activity() {
             } catch (e: Exception) {
                 main.post { status.text = "Could not start it: ${e.message}" }
             }
+        }
+    }
+
+    /**
+     * The watched window's compatibility mode changed: how other programs (Remote Desktop, Moonlight,
+     * VNC viewers) reach it, shown so they can be typed in, or why it was refused.
+     */
+    private fun showCompatibility(event: Event.Compatibility) {
+        compatibility = event.endpoints.isNotEmpty()
+        invalidateOptionsMenu()
+        val refused = event.refused
+        when {
+            refused != null -> tell("No compatibility mode: $refused")
+            event.endpoints.isEmpty() -> tell("Compatibility mode is off.")
+            else -> AlertDialog.Builder(this)
+                .setTitle("Compatibility mode")
+                .setMessage(
+                    "While you stream this window, other programs can show it too:\n\n" +
+                        event.endpoints.joinToString("\n\n"),
+                )
+                .setPositiveButton("OK", null)
+                .show()
         }
     }
 
@@ -1263,6 +1304,7 @@ class MainActivity : Activity() {
     }
 
     private fun showForm() {
+        compatibility = false
         pointer.visibility = View.GONE
         lastCursor = null
         surface.visibility = View.GONE
@@ -1321,6 +1363,7 @@ class MainActivity : Activity() {
         private const val MENU_PICTURES = 2
         private const val MENU_PRIVATE_START = 3
         private const val MENU_PRIVATE_END = 4
+        private const val MENU_COMPATIBILITY = 5
         /** The activity's label in the manifest: the title when no stream is showing. */
         private const val APP_TITLE = "windowcast viewer"
         /** How long a browser sign-in may take before it is given up. */

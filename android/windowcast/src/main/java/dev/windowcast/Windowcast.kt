@@ -60,6 +60,11 @@ sealed interface Event {
     /** A private session did not start: why, and whether asking with the Windows password may work. */
     data class PrivateSessionRefused(val reason: String, val passwordNeeded: Boolean) : Event
     /**
+     * A window's compatibility mode now: one line per way a third-party client (RDP, Moonlight,
+     * VNC) reaches it, for a person to read (none: off), or why it could not be turned on.
+     */
+    data class Compatibility(val window: Long, val endpoints: List<String>, val refused: String?) : Event
+    /**
      * The host's pointer over a streamed window: [x] and [y] are fractions of its picture, and
      * [shape] names an image [WindowcastSession.cursorImage] gives. The host leaves the pointer out
      * of its pictures, so the client draws it.
@@ -112,6 +117,14 @@ sealed interface Event {
                     if (o.isNull("private_session_reason")) null else o.optString("private_session_reason"),
                 )
                 "private_session_refused" -> PrivateSessionRefused(o.getString("reason"), o.getBoolean("password_needed"))
+                "compatibility" -> {
+                    val lines = o.getJSONArray("described")
+                    Compatibility(
+                        o.getLong("window"),
+                        (0 until lines.length()).map { lines.getString(it) },
+                        if (o.isNull("refused")) null else o.optString("refused"),
+                    )
+                }
                 "cursor" -> Cursor(
                     o.getLong("window"),
                     o.getDouble("x").toFloat(),
@@ -336,6 +349,14 @@ class WindowcastSession internal constructor(handle: Long) : Closeable {
         if (pid == Native.PASSWORD_NEEDED) throw PasswordNeededException(Native.lastError())
         if (pid < 0) throw IOException(if (isOpen) Native.lastError() else "the session is closed")
         return pid
+    }
+
+    /**
+     * Puts a window this session streams in compatibility mode ([on]) or takes it out: third-party
+     * clients (RDP, Moonlight, VNC) can then reach it too. Answered by [Event.Compatibility].
+     */
+    fun setCompatibility(window: Long, on: Boolean) {
+        withHandle(Unit) { Native.setCompatibility(it, window, on) }
     }
 
     /**

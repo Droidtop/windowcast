@@ -11,6 +11,7 @@
 
 pub mod audio;
 pub mod command;
+pub mod compat;
 pub mod gamepad;
 pub mod quality;
 pub mod remote;
@@ -69,6 +70,18 @@ impl PrivateRefusal {
             reason: reason.into(),
             password_needed: false,
         }
+    }
+}
+
+/// Lets go of the compatibility mode a session held when it ends.
+struct CompatSession {
+    compat: Arc<compat::Compatibility>,
+    serial: u64,
+}
+
+impl Drop for CompatSession {
+    fn drop(&mut self) {
+        self.compat.session_ended(self.serial);
     }
 }
 
@@ -403,6 +416,8 @@ pub struct HostControl {
     command_authorizer: std::sync::RwLock<Arc<dyn command::CommandAuthorizer>>,
     /// Serves launches as RemoteApps; `None` starts every launch here.
     remote_apps: std::sync::RwLock<Option<Arc<dyn command::RemoteApps>>>,
+    /// Windows in compatibility mode and the endpoints the host has.
+    compat: Arc<compat::Compatibility>,
     serial: AtomicU64,
     command_serial: Arc<AtomicU64>,
     /// The clients' discovery IDs, for reaching them away from the LAN.
@@ -517,6 +532,7 @@ impl HostControl {
             commands: Default::default(),
             command_authorizer: std::sync::RwLock::new(Arc::new(command::PairedDevices)),
             remote_apps: std::sync::RwLock::new(None),
+            compat: Arc::default(),
             serial: AtomicU64::new(1),
             command_serial: Arc::new(AtomicU64::new(1)),
             remote_peers: RemotePeers::load(&config.data_dir.join("remote-peers.json")),
@@ -748,6 +764,12 @@ impl HostControl {
     /// Serves launches that ask for it as RemoteApps of this host's Remote
     /// Desktop from now on (`None`: every launch starts in the host's own
     /// session). Sessions starting later use it.
+    /// Compatibility mode: the endpoints the host has, and its windows in
+    /// it (the host's owner turns a window on or off here).
+    pub fn compatibility(&self) -> &Arc<compat::Compatibility> {
+        &self.compat
+    }
+
     pub fn set_remote_apps(&self, remote_apps: Option<Arc<dyn command::RemoteApps>>) {
         *self.remote_apps.write().expect("remote apps") = remote_apps;
     }
@@ -1062,6 +1084,11 @@ impl Host {
             Arc::clone(&self.source),
             Arc::clone(&session),
         )));
+        // Compatibility mode this client turned on ends with its session.
+        let _compat = CompatSession {
+            compat: Arc::clone(&control.compat),
+            serial,
+        };
         // A private session this client started ends with its session.
         let private = EndPrivate {
             source: Arc::clone(&self.source),
@@ -1169,7 +1196,62 @@ impl Host {
                         ))
                         .await?;
                 }
+                ControlMessage::CompatibilityRequest { window, on } => {
+                    let refused = |reason: &str| ControlMessage::Compatibility {
+                        window,
+                        endpoints: Vec::new(),
+                        refused: Some(reason.to_owned()),
+                    };
+                    let answer = if !on {
+                        control
+                            .compat
+                            .turn_off(window, compat::Owner::Session(serial));
+                        ControlMessage::Compatibility {
+                            window,
+                            endpoints: control.compat.endpoints(window).unwrap_or_default(),
+                            refused: None,
+                        }
+                    } else if !streams.contains_key(&window) {
+                        refused(
+                            "only a window this session streams can be put in compatibility mode",
+                        )
+                    } else if decision.input == Some(false) {
+                        refused(
+                            "compatibility mode hands the window's input to other programs, and \
+                             this account may not drive windows",
+                        )
+                    } else {
+                        let title = listed
+                            .lock()
+                            .await
+                            .iter()
+                            .flatten()
+                            .find(|w| w.id == window)
+                            .map_or_else(|| format!("window {}", window.0), |w| w.title.clone());
+                        let compat = Arc::clone(&control.compat);
+                        let opened = tokio::task::spawn_blocking(move || {
+                            compat.turn_on(window, &title, compat::Owner::Session(serial))
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                        match opened {
+                            Ok(endpoints) => {
+                                println!("{peer} put window {} in compatibility mode", window.0);
+                                ControlMessage::Compatibility {
+                                    window,
+                                    endpoints,
+                                    refused: None,
+                                }
+                            }
+                            Err(reason) => refused(&reason),
+                        }
+                    };
+                    session.send_control(&answer).await?;
+                }
                 ControlMessage::StreamStopRequest(StreamTarget::Window(window)) => {
+                    control
+                        .compat
+                        .turn_off(window, compat::Owner::Session(serial));
                     streamed.lock().expect("streamed").retain(|w| *w != window);
                     if let Some(ended) = streams.remove(&window) {
                         end_stream(&session, window, ended).await?;
@@ -1186,6 +1268,9 @@ impl Host {
                         }
                     }
                     if entry.carriers.is_empty() {
+                        control
+                            .compat
+                            .turn_off(window, compat::Owner::Session(serial));
                         streamed.lock().expect("streamed").retain(|w| *w != window);
                         let ended = streams.remove(&window).expect("listed");
                         end_stream(&session, window, ended).await?;

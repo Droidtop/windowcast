@@ -616,6 +616,16 @@ pub enum Event {
         reason: String,
         password_needed: bool,
     },
+    /// A window's compatibility mode now ([`ClientSession::set_compatibility`]):
+    /// how third-party clients reach it (none: off; an RDP endpoint's empty
+    /// address filled in with the host's), each also in words, or why it
+    /// could not be turned on.
+    Compatibility {
+        window: u64,
+        endpoints: Vec<windowcast_protocol::CompatEndpoint>,
+        described: Vec<String>,
+        refused: Option<String>,
+    },
     /// The host's pointer over a streamed window moved, changed shape, or
     /// showed or hid (docs/BACKENDS.md, "The session owns the window"):
     /// `x` and `y` are fractions of the window's picture, as input
@@ -1030,6 +1040,16 @@ impl ClientSession {
     /// Asks for the window list; it arrives as [`Event::Windows`].
     pub fn request_windows(&self) -> Result<(), ClientError> {
         self.send(ControlMessage::ListWindowsRequest)
+    }
+
+    /// Puts a window this session streams in compatibility mode (`on`), or
+    /// takes it out: third-party clients (RDP, Moonlight, VNC) may then
+    /// reach it too, each through the host's own login for it
+    /// (docs/BACKENDS.md, "Third-party clients and RemoteApp"). It ends
+    /// when this session stops streaming the window. Answered by an
+    /// [`Event::Compatibility`].
+    pub fn set_compatibility(&self, window: WindowId, on: bool) -> Result<(), ClientError> {
+        self.send(ControlMessage::CompatibilityRequest { window, on })
     }
 
     /// Starts (`start`) or ends a private session on the host
@@ -1913,6 +1933,26 @@ async fn pump_events(
                 reason,
                 password_needed,
             },
+            ControlMessage::Compatibility {
+                window,
+                mut endpoints,
+                refused,
+            } => {
+                let host = shared.host_ip.map(|ip| ip.to_string()).unwrap_or_default();
+                for endpoint in &mut endpoints {
+                    if let windowcast_protocol::CompatEndpoint::Rdp(target) = endpoint {
+                        if target.address.is_empty() {
+                            target.address = host.clone();
+                        }
+                    }
+                }
+                Event::Compatibility {
+                    window: window.0,
+                    described: endpoints.iter().map(|e| e.describe(&host)).collect(),
+                    endpoints,
+                    refused,
+                }
+            }
             ControlMessage::CursorShape(image) => {
                 shared
                     .cursor_shapes

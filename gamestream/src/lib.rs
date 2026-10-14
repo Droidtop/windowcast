@@ -16,9 +16,12 @@
 //! - [`stream`]: a host's launched stream; [`windows`]: a windowcast host's
 //!   windows as the apps it offers.
 //! - [`audio`], [`fec`]: the sound packets and their parity.
+//! - [`compat`]: compatibility mode's GameStream endpoint, the windows in
+//!   it as Moonlight's apps.
 
 pub mod audio;
 pub mod client;
+pub mod compat;
 pub mod control;
 pub mod crypto;
 pub mod fec;

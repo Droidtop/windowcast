@@ -19,6 +19,8 @@ windowcast-terminal = { path = "../terminal" }
 windowcast-identity = { path = "../identity" }
 windowcast-transport = { path = "../transport" }
 windowcast-rdp = { path = "../rdp" }
+windowcast-gamestream = { path = "../gamestream" }
+windowcast-vnc = { path = "../vnc" }
 windowcast-accounts = { path = "../accounts" }
 tokio = { workspace = true, features = ["net"] }
 serde.workspace = true

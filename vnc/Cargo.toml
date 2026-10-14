@@ -1,0 +1,13 @@
+[package]
+name = "windowcast-vnc"
+description = "VNC for windowcast: compatibility mode's VNC endpoint, one window as an RFB server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+windowcast-protocol = { path = "../protocol" }
+windowcast-host = { path = "../host-core" }
+rand_core.workspace = true
+# DES for VNC Authentication (RustCrypto; MIT or Apache-2.0).
+des = "0.9"

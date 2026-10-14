@@ -28,6 +28,9 @@ struct Stream {
     shared: Arc<Shared>,
     /// The host's last quality report.
     quality: Option<StreamQuality>,
+    /// Compatibility mode: how third-party clients reach the window, or
+    /// why it was refused; `None` while off.
+    compatibility: Option<(Vec<String>, Option<String>)>,
     #[cfg(windows)]
     window: Option<windowcast_client_windows::StreamWindow>,
 }
@@ -41,6 +44,7 @@ impl Stream {
             refused: None,
             shared: Arc::default(),
             quality: None,
+            compatibility: None,
             #[cfg(windows)]
             window: None,
         }
@@ -148,6 +152,9 @@ pub struct ClientStream {
     pub quality: Option<StreamQuality>,
     /// The user's ceilings for this window's app.
     pub limits: StreamLimits,
+    /// Compatibility mode: how third-party clients reach the window, or
+    /// why it was refused; `None` while off.
+    pub compatibility: Option<(Vec<String>, Option<String>)>,
 }
 
 /// Everything the client window shows.
@@ -679,6 +686,28 @@ impl ClientRole {
                     self.log(format!("no private session: {reason}"));
                 }
                 Event::Clipboard { text } => state.clipboard = Some(text),
+                Event::Compatibility {
+                    window,
+                    described,
+                    refused,
+                    ..
+                } => {
+                    let on = !described.is_empty() || refused.is_some();
+                    if let Some(stream) = state.streams.get_mut(&window) {
+                        stream.compatibility = on.then(|| (described.clone(), refused.clone()));
+                    }
+                    drop(state);
+                    self.log(match (&refused, described.is_empty()) {
+                        (Some(reason), _) => {
+                            format!("window {window}: no compatibility mode: {reason}")
+                        }
+                        (None, true) => format!("window {window}: compatibility mode off"),
+                        (None, false) => format!(
+                            "window {window}: compatibility mode on: {}",
+                            described.join("; ")
+                        ),
+                    });
+                }
                 // This app asks for no SSH certificates.
                 Event::SshCertificate { .. } => {}
                 Event::StreamQuality { window, quality } => {
@@ -1013,6 +1042,13 @@ impl ClientRole {
         }
     }
 
+    /// Puts a streamed window in compatibility mode, or takes it out.
+    pub fn set_compatibility(&self, window: u64, on: bool) -> Result<(), String> {
+        self.session()?
+            .set_compatibility(windowcast_protocol::WindowId(window), on)
+            .map_err(|e| e.to_string())
+    }
+
     /// Starts or ends a private session on the host, with the host user's
     /// Windows password when the host asked for it.
     pub fn private_session(&self, start: bool, password: Option<&str>) -> Result<(), String> {
@@ -1065,6 +1101,7 @@ impl ClientRole {
                 codec: stream.codec,
                 stats: stream.shared.stats.lock().expect("stats").clone(),
                 quality: stream.quality,
+                compatibility: stream.compatibility.clone(),
                 limits: state
                     .windows
                     .iter()

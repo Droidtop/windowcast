@@ -7432,12 +7432,14 @@ dependencies = [
  "windowcast-agent-windows",
  "windowcast-client-core",
  "windowcast-client-windows",
+ "windowcast-gamestream",
  "windowcast-host",
  "windowcast-identity",
  "windowcast-protocol",
  "windowcast-rdp",
  "windowcast-terminal",
  "windowcast-transport",
+ "windowcast-vnc",
  "windows 0.62.2",
 ]
 
@@ -7461,6 +7463,7 @@ dependencies = [
  "windowcast-rdp",
  "windowcast-terminal",
  "windowcast-transport",
+ "windowcast-vnc",
 ]
 
 [[package]]
@@ -7662,6 +7665,16 @@ dependencies = [
  "windowcast-pairing",
  "windowcast-protocol",
  "windowcast-rendezvous",
+]
+
+[[package]]
+name = "windowcast-vnc"
+version = "0.34.1"
+dependencies = [
+ "des",
+ "rand_core 0.6.4",
+ "windowcast-host",
+ "windowcast-protocol",
 ]
 
 [[package]]

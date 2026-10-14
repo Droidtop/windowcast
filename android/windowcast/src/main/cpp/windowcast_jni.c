@@ -254,6 +254,12 @@ Java_dev_windowcast_Native_nextPicture(JNIEnv *env, jclass cls, jlong session, j
 }
 
 JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_setCompatibility(JNIEnv *env, jclass cls, jlong session, jlong window,
+                                            jboolean on) {
+    return windowcast_session_set_compatibility(SESSION(session), (uint64_t)window, on ? 1 : 0);
+}
+
+JNIEXPORT jlong JNICALL
 Java_dev_windowcast_Native_privateSession(JNIEnv *env, jclass cls, jlong session, jboolean start,
                                           jstring password) {
     const char *password_c = password ? (*env)->GetStringUTFChars(env, password, NULL) : NULL;

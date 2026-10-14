@@ -227,6 +227,24 @@ pub unsafe extern "C" fn windowcast_session_request_windows(session: *const Clie
     }
 }
 
+/// Puts a window this session streams in compatibility mode (`on`
+/// non-zero) or takes it out. Answered by a `compatibility` event. Returns
+/// 0 or WINDOWCAST_ERROR.
+///
+/// # Safety
+/// `session` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_set_compatibility(
+    session: *const ClientSession,
+    window: u64,
+    on: u32,
+) -> i64 {
+    let Some(session) = session.as_ref() else {
+        return WINDOWCAST_ERROR;
+    };
+    status(session.set_compatibility(WindowId(window), on != 0))
+}
+
 /// Starts (`start` non-zero) or ends a private session on the host.
 /// `password` (or NULL) is the Windows password of the user the host runs
 /// as, for a host that asks for it. The answer arrives as a `host_state`

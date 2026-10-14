@@ -109,7 +109,9 @@ int64_t windowcast_session_set_clipboard(const WindowcastSession *session, const
  * "private_session": "off", "unavailable", "available" or "active",
  * "private_session_reason": why it is unavailable}: the host computer was
  * locked or unlocked, its windows keep streaming; or its private session
- * changed), private_session_refused ({"reason", "password_needed"}), cursor
+ * changed), private_session_refused ({"reason", "password_needed"}),
+ * compatibility ({"window", "endpoints", "described": one line each for a
+ * person, "refused"}), cursor
  * ({"window", "x", "y", "visible", "shape"}: the host's pointer over a
  * streamed window, in fractions of its picture; draw it there with
  * windowcast_session_cursor_image's shape), clipboard, ssh_certificate,
@@ -149,6 +151,12 @@ int64_t windowcast_session_follow_popups(const WindowcastSession *session, uint3
 int64_t windowcast_session_next_picture(const WindowcastSession *session, uint64_t window,
                                         uint32_t timeout_ms, uint8_t *out, size_t cap,
                                         uint32_t *width, uint32_t *height);
+
+/* Puts a window this session streams in compatibility mode (on non-zero),
+ * so third-party clients (RDP, Moonlight, VNC) can reach it too, or takes
+ * it out. Answered by a compatibility event. Returns 0 or WINDOWCAST_ERROR. */
+int64_t windowcast_session_set_compatibility(const WindowcastSession *session, uint64_t window,
+                                             uint32_t on);
 
 /* Starts (start non-zero) or ends a private session on the host: its
  * programs run where nobody at the computer sees them. password (or NULL)

@@ -366,6 +366,34 @@ selector is the next step.
   rules. Seamless windows for those clients (RDP rail) are not pursued:
   seamless windows are a property of windowcast sessions, the same on
   every carrier. This replaces always-on compatibility endpoints.
+
+  Built (protocol 16; `windowcast_host::compat`). A session turns it on
+  for a window it streams (`CompatibilityRequest`; refused for a window
+  it does not stream, or an account that may not drive windows), and it
+  ends when that session stops streaming the window; the host's owner
+  turns it on for any window in the host application and off again. The
+  answer (`Compatibility`) says how a person points each third-party
+  client at the window:
+  - **RDP**: `WithRdp` serves the window as the whole desktop of an RDP
+    server of its own, on a port of its own, TLS and NLA with a login made
+    for it (user `windowcast`, a random password), taking the client's
+    keys and pointer.
+  - **GameStream**: the host's GameStream face (`windowcast_gamestream`,
+    on the standard ports 47984, 47989 and 48010) starts the first time a
+    window needs it and stays up; its app list is the windows in
+    compatibility mode. Moonlight pairs by the PIN it shows, typed in the
+    host application.
+  - **VNC**: `windowcast_vnc` serves the window as an RFB 3.8 framebuffer
+    (RFC 6143) on the first free port from 5900, with VNC Authentication
+    by a password made for it (eight characters, what the protocol
+    carries), Raw updates of what changed, DesktopSize when the window
+    changes size, any true-colour pixel format, and the viewer's keys
+    (characters as text, shortcuts and other keys as keys) and pointer.
+
+  The client app shows "Compatibility mode" per stream with these
+  details, the viewer a menu item and a dialog. Every endpoint's input
+  goes through the host's "Clients may drive streamed windows" setting.
+  Not built: sound for RDP and VNC clients (Moonlight gets the window's).
 - Windows RemoteApp launches (opt-in, above) move to the host: the host
   logs in to its own Remote Desktop as the RemoteApp client and serves
   those windows as host windows, so they too are carried by any carrier

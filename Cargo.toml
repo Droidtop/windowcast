@@ -13,6 +13,7 @@ members = [
     "gamestream",
     "rdp",
     "rendezvous",
+    "vnc",
     "transport",
     "host-core",
     "client-core",

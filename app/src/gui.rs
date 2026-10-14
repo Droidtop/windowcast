@@ -45,6 +45,8 @@ pub fn run(roles: Roles, host: Role<HostRole>, client: Role<ClientRole>) -> Resu
         ssh: SshRequest::default(),
         launch_line: String::new(),
         windows_password: String::new(),
+        compat_window: 0,
+        moonlight_pin: String::new(),
         show_client: true,
         error: None,
     };
@@ -68,6 +70,9 @@ struct App {
     launch_line: String,
     /// The Windows password a RemoteApp launch asked for; cleared once used.
     windows_password: String,
+    /// The window chosen for compatibility mode, and a Moonlight PIN.
+    compat_window: u64,
+    moonlight_pin: String,
     /// The client window, when both roles run (closing it hides it).
     show_client: bool,
     error: Option<String>,
@@ -197,6 +202,83 @@ impl App {
 
     /// Shells and application launches: on the connected host, and on any
     /// SSH server.
+    /// Compatibility mode on the host (docs/BACKENDS.md, "Third-party
+    /// clients and RemoteApp"): the windows in it and how third-party
+    /// clients reach each, a window to put in it, and Moonlight's PIN.
+    fn compatibility_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        host: &Arc<HostRole>,
+        snapshot: &crate::host::HostSnapshot,
+    ) {
+        ui.heading("Compatibility mode");
+        ui.label(RichText::new(COMPATIBILITY_HOST).weak());
+        for (window, title, endpoints, by_host) in &snapshot.compatibility {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(clip(title, 60)).strong());
+                if *by_host && ui.button("Take out").clicked() {
+                    if let Err(e) = host.set_compatibility(*window, title, false) {
+                        self.error = Some(e);
+                    }
+                }
+                if !by_host {
+                    ui.label(RichText::new("(while its client streams it)").weak());
+                }
+            });
+            for endpoint in endpoints {
+                ui.label(RichText::new(endpoint).monospace());
+            }
+        }
+        ui.horizontal(|ui| {
+            let chosen = snapshot
+                .windows
+                .iter()
+                .find(|w| w.info.id.0 == self.compat_window)
+                .map_or("a window", |w| w.info.title.as_str());
+            egui::ComboBox::from_id_salt("compat-window")
+                .selected_text(clip(chosen, 50))
+                .show_ui(ui, |ui| {
+                    for window in &snapshot.windows {
+                        ui.selectable_value(
+                            &mut self.compat_window,
+                            window.info.id.0,
+                            clip(&window.info.title, 60),
+                        );
+                    }
+                });
+            let window = snapshot
+                .windows
+                .iter()
+                .find(|w| w.info.id.0 == self.compat_window);
+            if ui
+                .add_enabled(
+                    window.is_some(),
+                    egui::Button::new("Put in compatibility mode"),
+                )
+                .clicked()
+            {
+                if let Some(window) = window {
+                    if let Err(e) = host.set_compatibility(window.info.id, &window.info.title, true)
+                    {
+                        self.error = Some(e);
+                    }
+                }
+            }
+        });
+        for waiting in &snapshot.gamestream_pairing {
+            ui.horizontal(|ui| {
+                ui.label(format!("Moonlight on {waiting} asks to pair: its PIN"));
+                ui.text_edit_singleline(&mut self.moonlight_pin);
+                if ui.button("Pair").clicked() {
+                    let pin = std::mem::take(&mut self.moonlight_pin);
+                    if !host.enter_gamestream_pin(pin.trim()) {
+                        self.error = Some("no Moonlight is waiting to pair".into());
+                    }
+                }
+            });
+        }
+    }
+
     /// The host's private session (docs/BACKENDS.md, "A private
     /// session"), when the host offers one: what it does, a button to start
     /// or end it, and the Windows password when the host asks for it.
@@ -437,6 +519,9 @@ impl App {
                     .weak(),
                 );
             }
+            ui.separator();
+
+            self.compatibility_ui(ui, &host, &snapshot);
             ui.separator();
 
             ui.heading("Live streams");
@@ -927,6 +1012,29 @@ impl App {
                         }
                     });
                     ui.horizontal(|ui| {
+                        let mut on = stream
+                            .compatibility
+                            .as_ref()
+                            .is_some_and(|(endpoints, _)| !endpoints.is_empty());
+                        if ui
+                            .checkbox(&mut on, "Compatibility mode")
+                            .on_hover_text(COMPATIBILITY)
+                            .changed()
+                        {
+                            if let Err(e) = client.set_compatibility(stream.window, on) {
+                                client.log(format!("compatibility mode: {e}"));
+                            }
+                        }
+                    });
+                    if let Some((endpoints, refused)) = &stream.compatibility {
+                        for endpoint in endpoints {
+                            ui.label(RichText::new(endpoint).monospace());
+                        }
+                        if let Some(reason) = refused {
+                            ui.colored_label(ui.visuals().warn_fg_color, reason);
+                        }
+                    }
+                    ui.horizontal(|ui| {
                         let mut limits = stream.limits;
                         let mut changed = false;
                         ui.label("Limits (0: none):");
@@ -1185,6 +1293,15 @@ fn private_session_ui(ui: &mut egui::Ui, snapshot: &crate::host::HostSnapshot, o
         P::Off | P::Available => {}
     }
 }
+
+const COMPATIBILITY_HOST: &str = "A window in compatibility mode can also be shown by other \
+     programs: Remote Desktop Connection or FreeRDP, Moonlight, and VNC viewers, each with a login \
+     made for that window (Moonlight pairs by the PIN it shows, typed here). Their input follows \
+     the setting above that lets clients drive windows.";
+
+const COMPATIBILITY: &str = "Other programs may show this window too, while it streams here: \
+     Remote Desktop Connection or FreeRDP, Moonlight, and VNC viewers, each with a login made for \
+     it. They can drive the window if the host lets clients drive windows.";
 
 const PRIVATE_SESSION_CLIENT: &str = "Your programs on the host run where nobody at it sees      them, unlocked, until you end it; someone signing in at the host takes them back.";
 
