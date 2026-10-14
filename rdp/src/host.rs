@@ -284,6 +284,13 @@ impl WindowSource for WithRdp {
     fn host_state(&self) -> windowcast_protocol::HostState {
         self.inner.host_state()
     }
+    fn set_private_session(
+        &self,
+        start: bool,
+        password: Option<&str>,
+    ) -> Result<(), windowcast_host::PrivateRefusal> {
+        self.inner.set_private_session(start, password)
+    }
     fn handoff(&self, kind: BackendKind, window: WindowId) -> Option<Result<Handoff, String>> {
         if kind == BackendKind::Rdp {
             if !self.enabled.load(Ordering::SeqCst) {

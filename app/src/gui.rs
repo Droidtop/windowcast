@@ -197,6 +197,62 @@ impl App {
 
     /// Shells and application launches: on the connected host, and on any
     /// SSH server.
+    /// The host's private session (docs/BACKENDS.md, "A private
+    /// session"), when the host offers one: what it does, a button to start
+    /// or end it, and the Windows password when the host asks for it.
+    fn private_session_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        client: &Arc<ClientRole>,
+        snapshot: &crate::client::ClientSnapshot,
+    ) {
+        let (state, reason) = &snapshot.private_session;
+        match state.as_str() {
+            "available" => {
+                ui.horizontal(|ui| {
+                    if ui.button("Use a private session").clicked() {
+                        let password = (!self.windows_password.is_empty())
+                            .then(|| std::mem::take(&mut self.windows_password));
+                        if let Err(e) = client.private_session(true, password.as_deref()) {
+                            self.error = Some(e);
+                        }
+                    }
+                    ui.label(RichText::new(PRIVATE_SESSION_CLIENT).weak());
+                });
+                if let Some((reason, password_needed)) = &snapshot.private_refused {
+                    ui.colored_label(ui.visuals().warn_fg_color, reason);
+                    if *password_needed {
+                        ui.horizontal(|ui| {
+                            ui.label("The host's Windows password");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.windows_password)
+                                    .password(true),
+                            );
+                        });
+                    }
+                }
+            }
+            "active" => {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        "Private session: the host's programs run out of sight of its screen.",
+                    );
+                    if ui.button("End the private session").clicked() {
+                        if let Err(e) = client.private_session(false, None) {
+                            self.error = Some(e);
+                        }
+                    }
+                });
+            }
+            "unavailable" => {
+                if let Some(reason) = reason {
+                    ui.label(RichText::new(format!("No private session here: {reason}")).weak());
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn terminals_ui(&mut self, ui: &mut egui::Ui, client: &Arc<ClientRole>, connected: bool) {
         ui.heading("Terminals and applications");
         ui.horizontal(|ui| {
@@ -359,6 +415,7 @@ impl App {
                 ui.checkbox(&mut settings.rdp, "Offer windows over RDP");
             });
             remote_apps_ui(ui, &snapshot, &mut settings.remote_apps);
+            private_session_ui(ui, &snapshot, &mut settings.private_session);
             ui.horizontal(|ui| {
                 ui.checkbox(
                     &mut settings.away,
@@ -720,6 +777,7 @@ impl App {
                 if snapshot.host_locked {
                     ui.colored_label(ui.visuals().warn_fg_color, LOCKED_HOST);
                 }
+                self.private_session_ui(ui, &client, &snapshot);
                 ui.separator();
 
                 ui.heading("Stream windows");
@@ -1107,6 +1165,34 @@ fn limit(ui: &mut egui::Ui, value: &mut Option<u32>, unit: &str, max: u32) -> bo
 /// The RemoteApp setting (docs/BACKENDS.md, "RemoteApp"): launches the
 /// client's rules give RDP run as RemoteApps of this computer's Remote
 /// Desktop, with the warning Windows 10 and 11 need.
+/// The private session setting (docs/BACKENDS.md, "A private session"),
+/// with what it does in plain words and why this computer cannot have one.
+fn private_session_ui(ui: &mut egui::Ui, snapshot: &crate::host::HostSnapshot, on: &mut bool) {
+    use windowcast_protocol::PrivateSession as P;
+    if !cfg!(any(windows, target_os = "linux")) {
+        // This platform's agent has none to offer.
+        return;
+    }
+    ui.checkbox(on, "Offer clients a private session");
+    ui.label(RichText::new(PRIVATE_SESSION).weak());
+    match &snapshot.private_session {
+        P::Unavailable(reason) => {
+            ui.colored_label(ui.visuals().warn_fg_color, reason);
+        }
+        P::Active => {
+            ui.label("A client is using a private session now.");
+        }
+        P::Off | P::Available => {}
+    }
+}
+
+const PRIVATE_SESSION_CLIENT: &str = "Your programs on the host run where nobody at it sees      them, unlocked, until you end it; someone signing in at the host takes them back.";
+
+const PRIVATE_SESSION: &str = "A client may then move your programs where nobody at this computer \
+     sees them: on Windows this computer's own screen shows the sign-in screen while your programs \
+     keep running and streaming, unlocked; sign in here as usual to get them back. On Linux they run \
+     in a sway of their own with no screen.";
+
 fn remote_apps_ui(
     ui: &mut egui::Ui,
     snapshot: &crate::host::HostSnapshot,

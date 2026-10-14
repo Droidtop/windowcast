@@ -1,6 +1,8 @@
 //! A locked host (docs/BACKENDS.md, "A locked host"): the host tells its
 //! clients when it is locked or unlocked, says nothing while it is
-//! unlocked, and keeps streaming its windows while it is locked.
+//! unlocked, and keeps streaming its windows while it is locked; and a
+//! private session ("A private session") starts when a client asks with
+//! the password the host needs, and ends with that client.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,13 +11,17 @@ use std::time::{Duration, Instant};
 
 use windowcast_cli_tools::testpattern::{TestPatternSource, WINDOW};
 use windowcast_client::{Client, ClientSession, Event, FramePoll};
+use windowcast_host::PrivateRefusal;
 use windowcast_host::{FrameSource, HostConfig, HostControl, WindowSource};
 use windowcast_identity::{Identity, TrustStore};
-use windowcast_protocol::{HostState, VideoCodec, WindowId, WindowInfo};
+use windowcast_protocol::{HostState, PrivateSession, VideoCodec, WindowId, WindowInfo};
 
-/// The test pattern on a host that is locked while `locked` is set.
+/// The test pattern on a host that is locked while `locked` is set, and
+/// that offers a private session when `private` is there (on while set),
+/// started with the password "pw".
 struct Lockable {
     locked: Arc<AtomicBool>,
+    private: Option<Arc<AtomicBool>>,
 }
 
 impl WindowSource for Lockable {
@@ -31,7 +37,30 @@ impl WindowSource for Lockable {
     fn host_state(&self) -> HostState {
         HostState {
             locked: self.locked.load(Ordering::SeqCst),
+            private_session: match &self.private {
+                None => PrivateSession::Off,
+                Some(on) if on.load(Ordering::SeqCst) => PrivateSession::Active,
+                Some(_) => PrivateSession::Available,
+            },
         }
+    }
+    fn set_private_session(
+        &self,
+        start: bool,
+        password: Option<&str>,
+    ) -> Result<(), PrivateRefusal> {
+        let on = self
+            .private
+            .as_ref()
+            .ok_or(PrivateRefusal::new("none here"))?;
+        if start && password != Some("pw") {
+            return Err(PrivateRefusal {
+                reason: "the Windows password, please".into(),
+                password_needed: true,
+            });
+        }
+        on.store(start, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -47,10 +76,11 @@ fn temp_dir(name: &str) -> PathBuf {
 struct Rig {
     _runtime: tokio::runtime::Runtime,
     locked: Arc<AtomicBool>,
+    private: Option<Arc<AtomicBool>>,
     session: ClientSession,
 }
 
-fn rig(name: &str, locked: bool) -> Rig {
+fn rig(name: &str, locked: bool, private: bool) -> Rig {
     let host_dir = temp_dir(&format!("{name}-host"));
     let client_dir = temp_dir(&format!("{name}-client"));
     let host_id = Identity::load_or_generate(&host_dir.join("agent-identity.key"))
@@ -79,11 +109,13 @@ fn rig(name: &str, locked: bool) -> Rig {
     })
     .unwrap();
     let locked = Arc::new(AtomicBool::new(locked));
+    let private = private.then(|| Arc::new(AtomicBool::new(false)));
     runtime.spawn(windowcast_host::serve_with(
         listener,
         control,
         Arc::new(Lockable {
             locked: Arc::clone(&locked),
+            private: private.clone(),
         }),
     ));
     let client = Client::new(&client_dir).unwrap();
@@ -91,6 +123,7 @@ fn rig(name: &str, locked: bool) -> Rig {
     Rig {
         _runtime: runtime,
         locked,
+        private,
         session,
     }
 }
@@ -132,7 +165,7 @@ fn is_host_state(event: &Event) -> bool {
 
 #[test]
 fn the_client_hears_when_the_host_locks_and_its_windows_keep_streaming() {
-    let rig = rig("change", false);
+    let rig = rig("change", false, false);
     let session = &rig.session;
     session.request_windows().unwrap();
     wait_for(session, "the window list", |e| {
@@ -147,7 +180,7 @@ fn the_client_hears_when_the_host_locks_and_its_windows_keep_streaming() {
 
     rig.locked.store(true, Ordering::SeqCst);
     wait_for(session, "the host locking", |e| {
-        matches!(e, Event::HostState { locked: true })
+        matches!(e, Event::HostState { locked: true, .. })
     });
     // Locked, a window still streams.
     session.start_window(WINDOW, &[VideoCodec::H264]).unwrap();
@@ -172,14 +205,54 @@ fn the_client_hears_when_the_host_locks_and_its_windows_keep_streaming() {
 
     rig.locked.store(false, Ordering::SeqCst);
     wait_for(session, "the host unlocking", |e| {
-        matches!(e, Event::HostState { locked: false })
+        matches!(e, Event::HostState { locked: false, .. })
     });
 }
 
 #[test]
 fn a_host_locked_when_the_session_starts_says_so_at_once() {
-    let rig = rig("start", true);
+    let rig = rig("start", true, false);
     wait_for(&rig.session, "the host's state", |e| {
-        matches!(e, Event::HostState { locked: true })
+        matches!(e, Event::HostState { locked: true, .. })
     });
+}
+
+fn private_is(state: &'static str) -> impl FnMut(&Event) -> bool {
+    move |e| matches!(e, Event::HostState { private_session, .. } if private_session == state)
+}
+
+#[test]
+fn a_private_session_starts_with_the_password_and_ends_with_its_client() {
+    let rig = rig("private", false, true);
+    let on = Arc::clone(rig.private.as_ref().expect("offered"));
+    let session = rig.session;
+    wait_for(&session, "the offer", private_is("available"));
+
+    // Without the password the host needs: refused, asking for it.
+    session.private_session(true, None).unwrap();
+    wait_for(&session, "the refusal", |e| {
+        matches!(
+            e,
+            Event::PrivateSessionRefused {
+                password_needed: true,
+                ..
+            }
+        )
+    });
+    assert!(!on.load(Ordering::SeqCst));
+
+    session.private_session(true, Some("pw")).unwrap();
+    wait_for(&session, "the private session", private_is("active"));
+    assert!(on.load(Ordering::SeqCst));
+
+    // It ends when its client goes.
+    drop(session);
+    let until = Instant::now() + Duration::from_secs(10);
+    while on.load(Ordering::SeqCst) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !on.load(Ordering::SeqCst),
+        "the private session outlived its client"
+    );
 }

@@ -100,6 +100,10 @@ struct State {
     error: Option<String>,
     /// The host said it is locked (its windows keep streaming).
     host_locked: bool,
+    /// The host's private session ("off", "unavailable", "available",
+    /// "active") and why it is unavailable; and why one did not start.
+    private_session: (String, Option<String>),
+    private_refused: Option<(String, bool)>,
     windows: Vec<WindowInfo>,
     streams: HashMap<u64, Stream>,
     log: VecDeque<String>,
@@ -159,6 +163,12 @@ pub struct ClientSnapshot {
     /// The host is locked: its windows keep streaming, and input reaches
     /// them as window messages.
     pub host_locked: bool,
+    /// The host's private session: "off" (not offered), "unavailable"
+    /// (with why), "available" or "active".
+    pub private_session: (String, Option<String>),
+    /// Why a private session did not start, and whether the Windows
+    /// password may help.
+    pub private_refused: Option<(String, bool)>,
     pub windows: Vec<ClientWindow>,
     pub streams: Vec<ClientStream>,
     pub log: Vec<String>,
@@ -451,6 +461,8 @@ impl ClientRole {
         state.address = Some(address.to_owned());
         state.error = None;
         state.host_locked = false;
+        state.private_session = Default::default();
+        state.private_refused = None;
         state.windows.clear();
         let generation = state.generation;
         drop(state);
@@ -631,17 +643,40 @@ impl ClientRole {
                 Event::WindowResized { .. }
                 | Event::WindowFocused { .. }
                 | Event::Cursor { .. } => {}
-                Event::HostState { locked } => {
+                Event::HostState {
+                    locked,
+                    private_session,
+                    private_session_reason,
+                } => {
+                    let lock_changed = state.host_locked != locked;
                     state.host_locked = locked;
+                    if private_session == "active" {
+                        state.private_refused = None;
+                    }
+                    let private_changed = state.private_session.0 != private_session;
+                    state.private_session = (private_session.clone(), private_session_reason);
                     drop(state);
-                    self.log(
-                        if locked {
-                            "the host is locked; its windows keep streaming"
-                        } else {
-                            "the host is unlocked"
-                        }
-                        .into(),
-                    );
+                    if lock_changed {
+                        self.log(
+                            if locked {
+                                "the host is locked; its windows keep streaming"
+                            } else {
+                                "the host is unlocked"
+                            }
+                            .into(),
+                        );
+                    }
+                    if private_changed {
+                        self.log(format!("the host's private session: {private_session}"));
+                    }
+                }
+                Event::PrivateSessionRefused {
+                    reason,
+                    password_needed,
+                } => {
+                    state.private_refused = Some((reason.clone(), password_needed));
+                    drop(state);
+                    self.log(format!("no private session: {reason}"));
                 }
                 Event::Clipboard { text } => state.clipboard = Some(text),
                 // This app asks for no SSH certificates.
@@ -978,6 +1013,15 @@ impl ClientRole {
         }
     }
 
+    /// Starts or ends a private session on the host, with the host user's
+    /// Windows password when the host asked for it.
+    pub fn private_session(&self, start: bool, password: Option<&str>) -> Result<(), String> {
+        self.state.lock().expect("state").private_refused = None;
+        self.session()?
+            .private_session(start, password)
+            .map_err(|e| e.to_string())
+    }
+
     pub fn set_clipboard(&self, text: &str) -> Result<(), String> {
         self.session()?
             .set_clipboard(text)
@@ -1041,6 +1085,8 @@ impl ClientRole {
             connecting: state.connecting,
             error: state.error.clone(),
             host_locked: state.host_locked,
+            private_session: state.private_session.clone(),
+            private_refused: state.private_refused.clone(),
             windows,
             streams,
             log: state.log.iter().cloned().collect(),

@@ -236,3 +236,5 @@ jobs:
             cargo test -p windowcast-rdp --test freerdp -- --nocapture
           # Last: swaylock leaves the session locked.
           WINDOWCAST_TEST_SWAYLOCK=1 cargo test -p windowcast-agent-linux --test lock -- --nocapture
+          # A private session's headless sway, out of the lock screen's reach.
+          WINDOWCAST_TEST_PRIVATE=1 WINDOWCAST_SWAY=/tmp/sway WLR_RENDERER=pixman             cargo test -p windowcast-agent-linux --test private -- --nocapture

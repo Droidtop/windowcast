@@ -103,7 +103,7 @@ unsafe impl Send for Injector {}
 impl Injector {
     pub fn new() -> Result<Self, String> {
         let sway = Sway::connect().ok_or("input needs sway (no $SWAYSOCK)")?;
-        let conn = Connection::connect_to_env().map_err(|e| format!("wayland: {e}"))?;
+        let conn = crate::display::connect().map_err(|e| format!("wayland: {e}"))?;
         let (globals, mut queue) =
             registry_queue_init::<State>(&conn).map_err(|e| format!("wayland: {e}"))?;
         let qh = queue.handle();

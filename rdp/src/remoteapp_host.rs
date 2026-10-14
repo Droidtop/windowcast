@@ -55,6 +55,8 @@ pub struct Setting {
 pub struct Status {
     /// Windows Server rather than Windows 10 or 11.
     pub server: bool,
+    /// A Home edition, which has no Remote Desktop server.
+    pub home: bool,
     /// Remote Desktop's port, `None` while Remote Desktop is off.
     pub port: Option<u16>,
     /// Another Remote Desktop session can start without ending one.
@@ -110,7 +112,14 @@ impl WindowsRemoteApps {
     pub fn status() -> Result<Status, String> {
         system::status()
     }
+}
 
+/// The Windows user the host runs as.
+pub fn current_user() -> Result<String, String> {
+    system::current_user()
+}
+
+impl WindowsRemoteApps {
     fn login(
         &self,
         who: &Principal,
@@ -371,6 +380,9 @@ mod system {
             "InstallationType",
         )
         .is_some_and(|kind| kind.eq_ignore_ascii_case("Server"));
+        // Home editions are "Core", "CoreN", "CoreSingleLanguage", ...
+        let home = string(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "EditionID")
+            .is_some_and(|edition| edition.starts_with("Core"));
         let on = dword(TERMINAL_SERVER, "fDenyTSConnections") == Some(0);
         let port = on.then(|| {
             dword(
@@ -389,6 +401,7 @@ mod system {
         ) == Some(1);
         Ok(Status {
             server,
+            home,
             port,
             session_free,
             any_program,
@@ -595,6 +608,7 @@ mod tests {
     fn status(server: bool, port: Option<u16>, session_free: bool) -> Status {
         Status {
             server,
+            home: false,
             port,
             session_free,
             any_program: true,

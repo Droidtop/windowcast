@@ -90,6 +90,7 @@ impl TestServer {
                 },
                 term,
                 program: Some(program),
+                env: Vec::new(),
             })
             .unwrap(),
         );

@@ -50,8 +50,15 @@ sealed interface Event {
     data class CarrierRefused(val window: Long, val generation: Int, val reason: String) : Event
     data class WindowResized(val window: Long, val width: Int, val height: Int) : Event
     data class WindowFocused(val window: Long) : Event
-    /** The host computer was locked or unlocked; its windows keep streaming while it is locked. */
-    data class HostState(val locked: Boolean) : Event
+    /**
+     * The host computer was locked or unlocked (its windows keep streaming while it is locked), or
+     * its private session changed: [privateSession] is "off" (not offered), "unavailable" (why in
+     * [privateSessionReason]), "available" ([WindowcastSession.privateSession] starts one) or
+     * "active".
+     */
+    data class HostState(val locked: Boolean, val privateSession: String, val privateSessionReason: String?) : Event
+    /** A private session did not start: why, and whether asking with the Windows password may work. */
+    data class PrivateSessionRefused(val reason: String, val passwordNeeded: Boolean) : Event
     /**
      * The host's pointer over a streamed window: [x] and [y] are fractions of its picture, and
      * [shape] names an image [WindowcastSession.cursorImage] gives. The host leaves the pointer out
@@ -99,7 +106,12 @@ sealed interface Event {
                 "carrier_refused" -> CarrierRefused(o.getLong("window"), o.getInt("generation"), o.getString("reason"))
                 "window_resized" -> WindowResized(o.getLong("window"), o.getInt("width"), o.getInt("height"))
                 "window_focused" -> WindowFocused(o.getLong("window"))
-                "host_state" -> HostState(o.getBoolean("locked"))
+                "host_state" -> HostState(
+                    o.getBoolean("locked"),
+                    o.optString("private_session", "off"),
+                    if (o.isNull("private_session_reason")) null else o.optString("private_session_reason"),
+                )
+                "private_session_refused" -> PrivateSessionRefused(o.getString("reason"), o.getBoolean("password_needed"))
                 "cursor" -> Cursor(
                     o.getLong("window"),
                     o.getDouble("x").toFloat(),
@@ -324,6 +336,15 @@ class WindowcastSession internal constructor(handle: Long) : Closeable {
         if (pid == Native.PASSWORD_NEEDED) throw PasswordNeededException(Native.lastError())
         if (pid < 0) throw IOException(if (isOpen) Native.lastError() else "the session is closed")
         return pid
+    }
+
+    /**
+     * Starts or ends a private session on the host: its programs run where nobody at the computer
+     * sees them. [password] is the Windows password of the user the host runs as, for a host that
+     * asks for it ([Event.PrivateSessionRefused.passwordNeeded]).
+     */
+    fun privateSession(start: Boolean, password: String? = null) {
+        withHandle(Unit) { Native.privateSession(it, start, password) }
     }
 
     /** The pointer shape [shape] names ([Event.Cursor]), or null for one the host has not sent. */

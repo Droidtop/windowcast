@@ -227,6 +227,33 @@ pub unsafe extern "C" fn windowcast_session_request_windows(session: *const Clie
     }
 }
 
+/// Starts (`start` non-zero) or ends a private session on the host.
+/// `password` (or NULL) is the Windows password of the user the host runs
+/// as, for a host that asks for it. The answer arrives as a `host_state`
+/// or a `private_session_refused` event. Returns 0 or WINDOWCAST_ERROR.
+///
+/// # Safety
+/// `session` must be valid; `password` NULL or a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_private_session(
+    session: *const ClientSession,
+    start: u32,
+    password: *const c_char,
+) -> i64 {
+    let Some(session) = session.as_ref() else {
+        return WINDOWCAST_ERROR;
+    };
+    let password = if password.is_null() {
+        None
+    } else {
+        match CStr::from_ptr(password).to_str() {
+            Ok(text) => Some(text),
+            Err(_) => return WINDOWCAST_ERROR,
+        }
+    };
+    status(session.private_session(start != 0, password))
+}
+
 /// Asks to stream `window`, decodable in the `count` codecs at `codecs`
 /// (`WINDOWCAST_CODEC_*`, most preferred first). The answer arrives as a
 /// `stream_started` or `stream_refused` event.

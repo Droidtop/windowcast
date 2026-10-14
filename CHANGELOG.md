@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- A private session (docs/BACKENDS.md, "A private session"; Droidtop/tracker#467, protocol 14): a host option, off by default, under which a client may move the host's programs out of sight of its screen. Windows Pro and up: the host logs in to its own Remote Desktop as its user, which takes the session off the screen (shown the sign-in screen) and keeps it running unlocked; Windows Home is detected and told it has no Remote Desktop. Linux: a headless sway of the agent's own, whose windows the agent serves while the session is on; programs, shells and commands clients start go there. `HostState::private_session`, `PrivateSessionRequest` and `PrivateSessionRefused`; `WindowSource::set_private_session`; client-core `ClientSession::private_session`, `Event::HostState`'s `private_session`, `Event::PrivateSessionRefused`, `windowcast_session_private_session`; the app's host setting and client button, the viewer's menu and password prompt.
+
 ## [0.32.0] - 2026-10-14
 
 ### Added

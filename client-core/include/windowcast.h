@@ -105,8 +105,11 @@ int64_t windowcast_session_set_clipboard(const WindowcastSession *session, const
 
 /* Next session event as JSON, tagged by "type": windows, stream_started,
  * stream_refused, stream_stopped, carrier_started, carrier_refused,
- * window_resized, window_focused, host_state ({"locked": bool}: the host
- * computer was locked or unlocked; its windows keep streaming), cursor
+ * window_resized, window_focused, host_state ({"locked": bool,
+ * "private_session": "off", "unavailable", "available" or "active",
+ * "private_session_reason": why it is unavailable}: the host computer was
+ * locked or unlocked, its windows keep streaming; or its private session
+ * changed), private_session_refused ({"reason", "password_needed"}), cursor
  * ({"window", "x", "y", "visible", "shape"}: the host's pointer over a
  * streamed window, in fractions of its picture; draw it there with
  * windowcast_session_cursor_image's shape), clipboard, ssh_certificate,
@@ -146,6 +149,14 @@ int64_t windowcast_session_follow_popups(const WindowcastSession *session, uint3
 int64_t windowcast_session_next_picture(const WindowcastSession *session, uint64_t window,
                                         uint32_t timeout_ms, uint8_t *out, size_t cap,
                                         uint32_t *width, uint32_t *height);
+
+/* Starts (start non-zero) or ends a private session on the host: its
+ * programs run where nobody at the computer sees them. password (or NULL)
+ * is the Windows password of the user the host runs as, for a host that
+ * asks for it ("password_needed"). Answered by a host_state or a
+ * private_session_refused event. Returns 0 or WINDOWCAST_ERROR. */
+int64_t windowcast_session_private_session(const WindowcastSession *session, uint32_t start,
+                                           const char *password);
 
 /* The pointer shape a "cursor" event's "shape" names: RGBA, rows from the
  * top, width * 4 bytes each. hotspot[0] and hotspot[1] get the point in it

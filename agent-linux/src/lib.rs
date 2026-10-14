@@ -11,9 +11,11 @@
 
 pub mod audio;
 pub mod capture;
+pub mod display;
 pub mod gamepad;
 pub mod input;
 pub mod microphone;
+pub mod private;
 mod source;
 pub mod sway;
 pub mod toplevels;

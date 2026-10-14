@@ -253,6 +253,15 @@ Java_dev_windowcast_Native_nextPicture(JNIEnv *env, jclass cls, jlong session, j
     return len;
 }
 
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_privateSession(JNIEnv *env, jclass cls, jlong session, jboolean start,
+                                          jstring password) {
+    const char *password_c = password ? (*env)->GetStringUTFChars(env, password, NULL) : NULL;
+    int64_t result = windowcast_session_private_session(SESSION(session), start ? 1 : 0, password_c);
+    if (password_c) (*env)->ReleaseStringUTFChars(env, password, password_c);
+    return result;
+}
+
 /* The pointer shape `shape` names, RGBA into the direct buffer; info[0..3]
  * get its width, height and hotspot. Returns the length or a WINDOWCAST_*
  * status. */

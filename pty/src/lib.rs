@@ -35,6 +35,8 @@ pub struct Spawn {
     pub term: String,
     /// A program and its arguments instead of the user's shell.
     pub program: Option<Vec<String>>,
+    /// Variables set on top of the host's environment.
+    pub env: Vec<(String, String)>,
 }
 
 /// The shell a host runs for a terminal when it is not told otherwise:
@@ -70,6 +72,9 @@ impl Pty {
         command.args(&argv[1..]);
         if !spawn.term.is_empty() {
             command.env("TERM", &spawn.term);
+        }
+        for (name, value) in &spawn.env {
+            command.env(name, value);
         }
         if let Some(home) = dirs_home() {
             command.cwd(home);
@@ -179,6 +184,7 @@ mod tests {
             },
             term: "xterm-256color".into(),
             program: Some(vec!["/bin/sh".into()]),
+            env: Vec::new(),
         }
     }
 

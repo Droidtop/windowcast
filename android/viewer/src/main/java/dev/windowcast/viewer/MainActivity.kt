@@ -100,6 +100,10 @@ class MainActivity : Activity() {
     private val pointerShapes = mutableMapOf<Long, Pair<Bitmap, Pair<Int, Int>>>()
     private var lastCursor: Event.Cursor? = null
 
+    /** The host's private session as it last said: "off", "unavailable", "available" or "active". */
+    private var hostPrivate = "off"
+    private var hostLocked = false
+
     /**
      * The renderer drawing on each surface: stopped when that surface is destroyed, before the
      * callback returns, so no decoder writes to a surface that is gone (#463).
@@ -636,14 +640,30 @@ class MainActivity : Activity() {
                     }
                     is Event.Cursor -> main.post { if (event.window == watching?.id) showPointer(event) }
                     is Event.HostState -> main.post {
-                        tell(
-                            if (event.locked) {
-                                "This PC is locked; its windows keep streaming. Input reaches them as window " +
-                                    "messages, which some programs, most games among them, ignore."
-                            } else {
-                                "This PC is unlocked."
-                            },
-                        )
+                        val wasLocked = hostLocked
+                        hostLocked = event.locked
+                        if (wasLocked != event.locked) {
+                            tell(
+                                if (event.locked) {
+                                    "This PC is locked; its windows keep streaming. Input reaches them as window " +
+                                        "messages, which some programs, most games among them, ignore."
+                                } else {
+                                    "This PC is unlocked."
+                                },
+                            )
+                        }
+                        if (hostPrivate != event.privateSession) {
+                            hostPrivate = event.privateSession
+                            invalidateOptionsMenu()
+                            when (event.privateSession) {
+                                "active" -> tell("Private session: the PC's programs run out of sight of its screen.")
+                                "available" -> android.util.Log.i(TAG, "the host offers a private session")
+                                "unavailable" -> android.util.Log.i(TAG, "no private session: ${event.privateSessionReason}")
+                            }
+                        }
+                    }
+                    is Event.PrivateSessionRefused -> main.post {
+                        if (event.passwordNeeded) askPrivatePassword(event.reason) else tell("No private session: ${event.reason}")
                     }
                     is Event.Clipboard -> main.post {
                         fromHost = event.text
@@ -702,6 +722,8 @@ class MainActivity : Activity() {
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menu.add(Menu.NONE, MENU_VIDEO, Menu.NONE, "Show as video")
         menu.add(Menu.NONE, MENU_PICTURES, Menu.NONE, "Show as RDP pictures")
+        menu.add(Menu.NONE, MENU_PRIVATE_START, Menu.NONE, "Use a private session")
+        menu.add(Menu.NONE, MENU_PRIVATE_END, Menu.NONE, "End the private session")
         return true
     }
 
@@ -709,11 +731,32 @@ class MainActivity : Activity() {
         val on = streaming() && switching == null
         menu.findItem(MENU_VIDEO)?.isVisible = on && carrier != "Native"
         menu.findItem(MENU_PICTURES)?.isVisible = on && carrier != "Rdp"
+        val connected = session?.isOpen == true
+        menu.findItem(MENU_PRIVATE_START)?.isVisible = connected && hostPrivate == "available"
+        menu.findItem(MENU_PRIVATE_END)?.isVisible = connected && hostPrivate == "active"
         return true
     }
 
     /** Switches the watched window's carrier, keeping it on screen until the new one shows. */
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        when (item.itemId) {
+            MENU_PRIVATE_START -> {
+                AlertDialog.Builder(this)
+                    .setTitle("Use a private session?")
+                    .setMessage(
+                        "Your programs on the PC keep running where nobody at it sees them, unlocked, " +
+                            "until you end it. Someone signing in at the PC takes them back.",
+                    )
+                    .setPositiveButton("Start") { _, _ -> privateSession(true, null) }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+                return true
+            }
+            MENU_PRIVATE_END -> {
+                privateSession(false, null)
+                return true
+            }
+        }
         val backend = when (item.itemId) {
             MENU_VIDEO -> "Native"
             MENU_PICTURES -> "Rdp"
@@ -834,6 +877,27 @@ class MainActivity : Activity() {
                 main.post { status.text = "Could not start it: ${e.message}" }
             }
         }
+    }
+
+    /** Starts or ends the host's private session, off the main thread. */
+    private fun privateSession(start: Boolean, password: String?) {
+        val s = session ?: return
+        worker.execute { s.privateSession(start, password) }
+    }
+
+    /** The host needs its user's Windows password to start a private session. */
+    private fun askPrivatePassword(reason: String) {
+        val field = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            hint = "Windows password"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Windows password")
+            .setMessage(reason)
+            .setView(field)
+            .setPositiveButton("Start") { _, _ -> privateSession(true, field.text.toString()) }
+            .setNegativeButton("Cancel") { _, _ -> status.text = "No private session" }
+            .show()
     }
 
     /** Asks for [user]'s Windows password for a RemoteApp launch of [line]. */
@@ -1255,6 +1319,8 @@ class MainActivity : Activity() {
         private const val RECORD_REQUEST = 1
         private const val MENU_VIDEO = 1
         private const val MENU_PICTURES = 2
+        private const val MENU_PRIVATE_START = 3
+        private const val MENU_PRIVATE_END = 4
         /** The activity's label in the manifest: the title when no stream is showing. */
         private const val APP_TITLE = "windowcast viewer"
         /** How long a browser sign-in may take before it is given up. */

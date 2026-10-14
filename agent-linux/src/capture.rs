@@ -226,7 +226,7 @@ impl Capture {
     }
 
     fn open(window: WindowId, desktop: bool) -> Result<Self> {
-        let conn = Connection::connect_to_env().map_err(wayland)?;
+        let conn = crate::display::connect().map_err(wayland)?;
         let (globals, mut queue) = registry_queue_init::<State>(&conn).map_err(wayland)?;
         let qh = queue.handle();
         let _list: ExtForeignToplevelListV1 = globals

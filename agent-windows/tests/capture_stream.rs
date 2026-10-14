@@ -180,7 +180,9 @@ fn stream_with(
     loop {
         match session.next_event(WAIT) {
             Some(Event::StreamStarted { .. }) => break,
-            Some(Event::WindowResized { .. } | Event::StreamQuality { .. }) => {}
+            Some(
+                Event::WindowResized { .. } | Event::StreamQuality { .. } | Event::HostState { .. },
+            ) => {}
             other => panic!("{choice:?}: expected the stream to start, got {other:?}"),
         }
     }

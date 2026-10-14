@@ -224,11 +224,11 @@ pub fn read(
     Ok((state.toplevels, ext.is_some()))
 }
 
-/// Connects to the compositor named by `WAYLAND_DISPLAY`, lists its
-/// windows, and disconnects. With sway, each window's size is filled in
-/// from sway's IPC.
+/// Connects to the compositor the agent serves (`WAYLAND_DISPLAY`, or a
+/// private session's), lists its windows, and disconnects. With sway, each
+/// window's size is filled in from sway's IPC.
 pub fn list_windows() -> Result<Vec<WindowInfo>, ToplevelError> {
-    let conn = Connection::connect_to_env()?;
+    let conn = crate::display::connect()?;
     let (globals, mut queue) = registry_queue_init::<ListState>(&conn)?;
     let (toplevels, ext) = read(&conn, &globals, &mut queue)?;
     let sizes: HashMap<String, (u32, u32)> = crate::sway::Sway::connect()

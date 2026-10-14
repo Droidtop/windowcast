@@ -8,10 +8,14 @@ use std::time::{Duration, Instant};
 use windowcast_host::quality::Quality;
 use windowcast_host::video::{self, OpenH264};
 use windowcast_host::{EncodedFrame, FrameSource, WindowSource};
-use windowcast_protocol::{BackendKind, InputEvent, VideoCodec, WindowId, WindowInfo};
+use windowcast_protocol::{
+    BackendKind, HostState, InputEvent, PrivateSession, VideoCodec, WindowId, WindowInfo,
+};
 
 use crate::capture::Capture;
+use crate::display;
 use crate::input::Injector;
+use crate::private::{self, Headless};
 use crate::toplevels;
 
 /// Agent options, from the command line.
@@ -20,6 +24,9 @@ pub struct Options {
     pub fps: u32,
     /// Bits per second at 1920x1080; scaled by area for other sizes.
     pub bitrate_1080p: u32,
+    /// Offer clients a private session (docs/BACKENDS.md, "A private
+    /// session"); off unless the host's owner turns it on.
+    pub private_session: bool,
 }
 
 impl Default for Options {
@@ -27,6 +34,7 @@ impl Default for Options {
         Options {
             fps: 30,
             bitrate_1080p: 8_000_000,
+            private_session: false,
         }
     }
 }
@@ -34,8 +42,12 @@ impl Default for Options {
 pub struct LinuxSource {
     /// Taken by each stream when it starts.
     options: RwLock<Options>,
-    /// Made on first use, on the session's input thread.
-    injector: Mutex<Option<Result<Injector, String>>>,
+    /// Made on first use, on the session's input thread, for the
+    /// compositor of that display generation.
+    injector: Mutex<Option<(u64, Result<Injector, String>)>>,
+    /// The private session's headless sway, once started, and whether the
+    /// agent serves it now.
+    private: Mutex<(Option<Headless>, bool)>,
 }
 
 impl LinuxSource {
@@ -43,6 +55,7 @@ impl LinuxSource {
         LinuxSource {
             options: RwLock::new(options),
             injector: Mutex::new(None),
+            private: Mutex::new((None, false)),
         }
     }
 
@@ -120,12 +133,74 @@ impl WindowSource for LinuxSource {
 
     fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
         let mut injector = self.injector.lock().expect("injector");
-        let injector = injector.get_or_insert_with(|| {
-            Injector::new().inspect_err(|e| eprintln!("no input on this host: {e}"))
+        // Made again, here on the input thread, after the compositor served
+        // changed (a private session started or ended).
+        let generation = display::generation();
+        if injector
+            .as_ref()
+            .is_some_and(|(made, _)| *made != generation)
+        {
+            *injector = None;
+        }
+        let (_, injector) = injector.get_or_insert_with(|| {
+            (
+                generation,
+                Injector::new().inspect_err(|e| eprintln!("no input on this host: {e}")),
+            )
         });
         if let Ok(injector) = injector {
             injector.inject(event, focus);
         }
+    }
+
+    fn host_state(&self) -> HostState {
+        let mut private = self.private.lock().expect("private session");
+        let (headless, on) = &mut *private;
+        if *on && !headless.as_mut().is_some_and(Headless::running) {
+            // Its sway stopped: back to the seat's windows.
+            *on = false;
+            *headless = None;
+            serve(None);
+        }
+        HostState {
+            // The seat's lock screen cannot be asked about.
+            locked: false,
+            private_session: if *on {
+                PrivateSession::Active
+            } else if !self.options().private_session {
+                PrivateSession::Off
+            } else {
+                match private::available() {
+                    Ok(()) => PrivateSession::Available,
+                    Err(reason) => PrivateSession::Unavailable(reason),
+                }
+            },
+        }
+    }
+
+    fn set_private_session(
+        &self,
+        start: bool,
+        _password: Option<&str>,
+    ) -> Result<(), windowcast_host::PrivateRefusal> {
+        let mut private = self.private.lock().expect("private session");
+        let (headless, on) = &mut *private;
+        if !start {
+            *on = false;
+            serve(None);
+            return Ok(());
+        }
+        if !self.options().private_session {
+            return Err(windowcast_host::PrivateRefusal::new(
+                "This host does not offer a private session.",
+            ));
+        }
+        if !headless.as_mut().is_some_and(Headless::running) {
+            *headless = Some(Headless::start().map_err(windowcast_host::PrivateRefusal::new)?);
+        }
+        *on = true;
+        serve(headless.as_ref().map(Headless::display));
+        Ok(())
     }
 }
 
@@ -318,4 +393,18 @@ impl FrameSource for WindowStream {
             }
         }
     }
+}
+
+/// Serves `display` (a private session's; `None` for the seat's), and
+/// starts the programs, shells and commands clients start there too.
+fn serve(served: Option<display::Display>) {
+    let env = match &served {
+        Some(d) => vec![
+            ("WAYLAND_DISPLAY".to_owned(), d.name.clone()),
+            ("SWAYSOCK".to_owned(), d.sway.to_string_lossy().into_owned()),
+        ],
+        None => Vec::new(),
+    };
+    windowcast_host::command::set_launch_env(env);
+    display::set(served);
 }

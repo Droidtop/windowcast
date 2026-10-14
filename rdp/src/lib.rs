@@ -9,11 +9,15 @@
 //!   any other), its picture as RGBA and its input from windowcast's.
 //! - [`remoteapp`]: RemoteApp on the client, one program's window
 //!   instead of the desktop.
+//! - [`private_session`]: a Windows host's session moved to a Remote
+//!   Desktop connection of its own, out of sight of its screen.
 //! - [`tls`]: the host's TLS identity, pinned by fingerprint.
 
 pub mod client;
 #[cfg(feature = "host")]
 pub mod host;
+#[cfg(feature = "host")]
+pub mod private_session;
 pub mod remoteapp;
 #[cfg(feature = "host")]
 pub mod remoteapp_host;

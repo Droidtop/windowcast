@@ -371,9 +371,9 @@ streaming. Otherwise, it's useless for remote access", and "Windowcast
 doesn't have to follow a screen. We stream windows themselves". A host
 never refuses a stream because it is locked (0.30.0 did; that is gone).
 The work comes in pieces: windows keep streaming while locked (below,
-built); unlocking through the secure screen; a private session (a
-session of its own on Windows Pro and up, a headless sway session on
-Linux), offered only where it exists ("We can detect windows pro, and
+built); a private session (a session of its own on Windows Pro and up,
+a headless sway session on Linux; below, built), offered only where it
+exists; unlocking through the secure screen ("We can detect windows pro, and
 offer to use a separate session if it exists").
 
 ### What capture and input do while locked
@@ -428,6 +428,76 @@ which now assert it):
   no way to ask), so it sends no `HostState`, a desktop cut shows the
   lock screen, and input goes to the lock screen. The full answer there
   is the headless session.
+
+### A private session
+
+The owner, 2026-10-10: "We can detect windows pro, and offer to use a
+separate session if it exists." A private session keeps a remote user's
+work off the host's own screen and out of the reach of the lock screen:
+the programs run where nobody at the PC sees them, input reaches them in
+full (SendInput on Windows, the compositor's own input on Linux), and
+locking or unlocking the PC does not touch them. It is a host option,
+off by default ("Offer clients a private session", with what it does in
+plain words); where the host can offer it and its owner turned it on, a
+client is offered it and starts and ends it (the app's "Use a private
+session", the viewer's menu). Built: protocol 14, host-core, both agents,
+client-core (`ClientSession::private_session`, C
+`windowcast_session_private_session`), the app and the viewer.
+
+**Windows: the session moves to a Remote Desktop connection of the
+host's own.** Windows 10 and 11 run one interactive session: a Remote
+Desktop login of the signed-in user takes that session over, and the
+PC's screen goes to the sign-in screen while the session goes on, now
+drawn for the connection instead of the screen. That is the private
+session. The host logs in to its own Remote Desktop (loopback, TLS and
+NLA, the same RDP client as RemoteApp launches) as the user it runs as,
+and keeps the connection open, discarding its pictures, at the size of
+the client's screen. The host and its windows stay where they are, in the
+same session, which is no longer the console: it is unlocked, so capture
+and SendInput work as on an unlocked PC, and nobody at the PC sees it.
+
+- **Offered only where it exists.** The host reads the edition
+  (GetProductInfo): Home editions have no Remote Desktop server, so it is
+  not offered there ("This PC runs Windows Home, which has no Remote
+  Desktop to move the session to"). On Pro, Enterprise, Education, Pro for
+  Workstations and Server it is offered when Remote Desktop is on; when it
+  is off the host's setting says so and how to turn it on.
+- **Logging in** follows RemoteApp's rule ("Logging in: one host
+  setting" above): a client signed in with the host's Windows account
+  hands the host that password for this one login, held in memory only;
+  any other client is asked for the Windows password when it starts the
+  private session. The login is the user the host runs as, never another
+  account: a second user would sign this one out on a client edition.
+- **Ending it.** The client ends it, or it ends when the client's last
+  session closes. The host closes its connection; the session is then
+  disconnected and stays locked until someone signs in at the PC, which
+  brings it back to the screen as it was. The host never unlocks the PC's
+  own screen.
+- **Plain warning** in the host's setting: "While a client uses a private
+  session, this PC's own screen shows the sign-in screen and your programs
+  keep running out of sight. To use the PC here again, sign in as usual."
+- **Limits to check on hardware**: a session drawn for Remote Desktop
+  uses the Remote Desktop display driver, so a capture or encoder made
+  on the GPU before the move may have to be made again (the stream
+  restarts its capture when it fails); games that need the GPU may not
+  run as they did. Gamepads are ViGEmBus devices and keep working.
+
+**Linux: a headless sway of the user's own.** The host starts a second
+sway with no screen (`WLR_BACKENDS=headless`, as CI runs it) for the
+user, with its own Wayland and sway sockets, and the agent serves that
+compositor's windows instead of the seat's for the clients of the
+private session; programs a client launches start there. Nothing shows
+on the PC's screen, and the seat's lock screen does not reach it. Offered
+when sway is installed; the headless sway stays up while the host runs,
+so ending the private session (the agent goes back to the seat's
+windows) leaves its programs running for the next one. Programs started
+there get its `WAYLAND_DISPLAY` and `SWAYSOCK`; an X11-only program still
+finds the seat's `DISPLAY` and shows on the seat's screen.
+
+**Protocol.** `HostState` gains `private_session`: unavailable (with
+the plain reason), available, or active. A client asks with
+`PrivateSessionRequest { start, password }` and is answered with the new
+`HostState` or a `PrivateSessionRefused { reason, password_needed }`.
 
 ## Choosing a backend
 

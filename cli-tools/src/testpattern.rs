@@ -286,6 +286,14 @@ impl WindowSource for WithContent {
         self.inner.host_state()
     }
 
+    fn set_private_session(
+        &self,
+        start: bool,
+        password: Option<&str>,
+    ) -> Result<(), windowcast_host::PrivateRefusal> {
+        self.inner.set_private_session(start, password)
+    }
+
     fn open_audio(
         &self,
         window: WindowId,
@@ -528,6 +536,14 @@ impl WindowSource for WithPointer {
 
     fn host_state(&self) -> HostState {
         self.inner.host_state()
+    }
+
+    fn set_private_session(
+        &self,
+        start: bool,
+        password: Option<&str>,
+    ) -> Result<(), windowcast_host::PrivateRefusal> {
+        self.inner.set_private_session(start, password)
     }
 
     fn open_audio(

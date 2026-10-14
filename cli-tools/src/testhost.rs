@@ -54,6 +54,13 @@ impl WindowSource for MeasuringMicrophone {
     fn host_state(&self) -> HostState {
         self.0.host_state()
     }
+    fn set_private_session(
+        &self,
+        start: bool,
+        password: Option<&str>,
+    ) -> Result<(), windowcast_host::PrivateRefusal> {
+        self.0.set_private_session(start, password)
+    }
     fn cursor(&self) -> Option<windowcast_host::CursorState> {
         self.0.cursor()
     }
@@ -105,7 +112,17 @@ impl WindowSource for LockedHalfTheTime {
     }
     fn host_state(&self) -> HostState {
         let locked = self.1.elapsed().as_secs() % 60 < 30;
-        HostState { locked }
+        HostState {
+            locked,
+            ..self.0.host_state()
+        }
+    }
+    fn set_private_session(
+        &self,
+        start: bool,
+        password: Option<&str>,
+    ) -> Result<(), windowcast_host::PrivateRefusal> {
+        self.0.set_private_session(start, password)
     }
     fn cursor(&self) -> Option<windowcast_host::CursorState> {
         self.0.cursor()

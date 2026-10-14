@@ -31,6 +31,9 @@ pub struct Options {
     /// The output device a client's microphone plays into (part of its
     /// name); `None` picks a known virtual audio cable.
     pub microphone: Option<String>,
+    /// Offer clients a private session (docs/BACKENDS.md, "A private
+    /// session"); off unless the host's owner turns it on.
+    pub private_session: bool,
 }
 
 impl Default for Options {
@@ -41,6 +44,7 @@ impl Default for Options {
             fps: 30,
             bitrate_1080p: 8_000_000,
             microphone: None,
+            private_session: false,
         }
     }
 }
@@ -55,6 +59,7 @@ struct Current {
 pub struct WindowsSource {
     current: Arc<RwLock<Current>>,
     injector: Injector,
+    private: crate::private::Private,
 }
 
 impl WindowsSource {
@@ -72,6 +77,7 @@ impl WindowsSource {
                 generation: 0,
             })),
             injector: Injector::default(),
+            private: Default::default(),
         })
     }
 
@@ -165,7 +171,27 @@ impl WindowSource for WindowsSource {
     fn host_state(&self) -> HostState {
         HostState {
             locked: lock::session_locked(),
+            private_session: self.private.state(
+                self.current
+                    .read()
+                    .expect("options")
+                    .options
+                    .private_session,
+            ),
         }
+    }
+
+    fn set_private_session(
+        &self,
+        start: bool,
+        password: Option<&str>,
+    ) -> Result<(), windowcast_host::PrivateRefusal> {
+        if start && !self.options().private_session {
+            return Err(windowcast_host::PrivateRefusal::new(
+                "This host does not offer a private session.",
+            ));
+        }
+        self.private.set(start, password)
     }
 
     fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {

@@ -29,6 +29,8 @@ pub mod microphone;
 #[cfg(windows)]
 mod posted;
 #[cfg(windows)]
+mod private;
+#[cfg(windows)]
 mod source;
 #[cfg(windows)]
 pub mod windows_list;

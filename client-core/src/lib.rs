@@ -599,12 +599,24 @@ pub enum Event {
     WindowFocused {
         window: u64,
     },
-    /// The host computer was locked or unlocked. Its windows keep
-    /// streaming while it is locked; input reaches them as window
-    /// messages, which some programs (most games) ignore. Not sent for a
-    /// host that is unlocked when the session starts.
+    /// The host computer's state changed: locked or unlocked (its windows
+    /// keep streaming while it is locked; input reaches them as window
+    /// messages, which some programs, most games, ignore), and its private
+    /// session (docs/BACKENDS.md, "A private session"): "off" (not
+    /// offered), "unavailable" (with `private_session_reason`), "available"
+    /// ([`ClientSession::private_session`] starts one) or "active". Not
+    /// sent for an unlocked host that offers no private session when the
+    /// session starts.
     HostState {
         locked: bool,
+        private_session: String,
+        private_session_reason: Option<String>,
+    },
+    /// A private session did not start (or end): why, and whether asking
+    /// again with the host user's Windows password may work.
+    PrivateSessionRefused {
+        reason: String,
+        password_needed: bool,
     },
     /// The host's pointer over a streamed window moved, changed shape, or
     /// showed or hid (docs/BACKENDS.md, "The session owns the window"):
@@ -1031,6 +1043,26 @@ impl ClientSession {
     /// Asks for the window list; it arrives as [`Event::Windows`].
     pub fn request_windows(&self) -> Result<(), ClientError> {
         self.send(ControlMessage::ListWindowsRequest)
+    }
+
+    /// Starts (`start`) or ends a private session on the host
+    /// (docs/BACKENDS.md, "A private session"). `password` is the Windows
+    /// password of the user the host runs as, for a host that needs it;
+    /// without one, the password this client signed in with goes, if it
+    /// signed in with one (held in memory only). The answer is an
+    /// [`Event::HostState`] or an [`Event::PrivateSessionRefused`].
+    pub fn private_session(&self, start: bool, password: Option<&str>) -> Result<(), ClientError> {
+        let password = match password {
+            Some(password) => Some(password.to_owned()),
+            None if start => self
+                .shared
+                .sign_in_password
+                .lock()
+                .expect("password")
+                .clone(),
+            None => None,
+        };
+        self.send(ControlMessage::PrivateSessionRequest { start, password })
     }
 
     /// Asks to stream `window`, decodable in `codecs` (most preferred
@@ -1924,8 +1956,27 @@ async fn pump_events(
                 height,
             },
             ControlMessage::WindowFocused(window) => Event::WindowFocused { window: window.0 },
-            ControlMessage::HostState(state) => Event::HostState {
-                locked: state.locked,
+            ControlMessage::HostState(state) => {
+                let (private_session, private_session_reason) = match state.private_session {
+                    windowcast_protocol::PrivateSession::Off => ("off", None),
+                    windowcast_protocol::PrivateSession::Unavailable(reason) => {
+                        ("unavailable", Some(reason))
+                    }
+                    windowcast_protocol::PrivateSession::Available => ("available", None),
+                    windowcast_protocol::PrivateSession::Active => ("active", None),
+                };
+                Event::HostState {
+                    locked: state.locked,
+                    private_session: private_session.into(),
+                    private_session_reason,
+                }
+            }
+            ControlMessage::PrivateSessionRefused {
+                reason,
+                password_needed,
+            } => Event::PrivateSessionRefused {
+                reason,
+                password_needed,
             },
             ControlMessage::CursorShape(image) => {
                 shared

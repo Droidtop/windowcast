@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped on any incompatible change to the message shapes below. A peer
 /// that receives a mismatched version should refuse the session rather
 /// than guess at how to interpret an unknown wire format.
-pub const PROTOCOL_VERSION: u16 = 13;
+pub const PROTOCOL_VERSION: u16 = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
@@ -462,6 +462,19 @@ pub enum ControlMessage {
     /// The state of the host computer, sent when it changes (and when a
     /// session starts, if it is not the default).
     HostState(HostState),
+    /// Starts (`start`) or ends a private session. `password` is the
+    /// Windows password of the user the host runs as, where the host needs
+    /// it to move the session (held in memory for that one login only).
+    /// The host answers with a `HostState`, or `PrivateSessionRefused`.
+    PrivateSessionRequest {
+        start: bool,
+        password: Option<String>,
+    },
+    PrivateSessionRefused {
+        reason: String,
+        /// Asking again with the user's Windows password may work.
+        password_needed: bool,
+    },
 
     /// The host's pointer over a streamed window (docs/BACKENDS.md, "The
     /// session owns the window"): where it is in the window (fractions of
@@ -506,12 +519,31 @@ pub enum ControlMessage {
 }
 
 /// The state of the host computer as a whole, beside its windows.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostState {
     /// The host is locked (its lock screen is up). Its windows keep
     /// streaming; input reaches them as window messages, which some
     /// programs ignore (docs/BACKENDS.md, "A locked host").
     pub locked: bool,
+    /// Whether this host offers a private session, and whether one is on.
+    pub private_session: PrivateSession,
+}
+
+/// A private session (docs/BACKENDS.md, "A private session"): the host's
+/// programs run where nobody at the computer sees them and its lock
+/// screen does not reach them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrivateSession {
+    /// Not offered: the host's owner has not turned it on.
+    #[default]
+    Off,
+    /// Turned on, but this computer cannot have one, and why, in words a
+    /// user understands.
+    Unavailable(String),
+    /// A client may start one.
+    Available,
+    /// One is on.
+    Active,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -886,7 +918,14 @@ mod tests {
                 },
             }),
             ControlMessage::Clipboard("copied".into()),
-            ControlMessage::HostState(HostState { locked: true }),
+            ControlMessage::HostState(HostState {
+                locked: true,
+                private_session: PrivateSession::Unavailable("Windows Home".into()),
+            }),
+            ControlMessage::PrivateSessionRequest {
+                start: true,
+                password: Some("secret".into()),
+            },
         ];
         for message in messages {
             assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);

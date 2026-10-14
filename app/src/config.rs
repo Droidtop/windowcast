@@ -84,6 +84,10 @@ pub struct HostSettings {
     pub away_port: u16,
     /// Hand a window to RDP when a client asks for it (sharp text).
     pub rdp: bool,
+    /// Offer clients a private session (docs/BACKENDS.md, "A private
+    /// session"): programs keep running out of sight of this computer's
+    /// screen. Off unless the owner turns it on.
+    pub private_session: bool,
     /// Launches the client's rules give RDP, as RemoteApps of this
     /// computer's Remote Desktop (docs/BACKENDS.md, "RemoteApp"). Saved
     /// under a name of its own since 0.24.1: 0.24.0 wrote its default
@@ -113,6 +117,7 @@ impl Default for HostSettings {
             away: false,
             away_port: windowcast_transport::remote::DEFAULT_PORT,
             rdp: true,
+            private_session: false,
             remote_apps: RemoteAppSettings::default(),
             accounts: None,
         }

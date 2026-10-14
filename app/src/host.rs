@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use windowcast_host::{FrameSource, HostConfig, HostControl, WindowSource};
 use windowcast_protocol::selection;
-use windowcast_protocol::{BackendKind, InputEvent, VideoCodec, WindowId, WindowInfo};
+use windowcast_protocol::{
+    BackendKind, HostState, InputEvent, PrivateSession, VideoCodec, WindowId, WindowInfo,
+};
 
 use crate::config::{HostSettings, Store};
 use crate::platform::{self, Agent};
@@ -130,8 +132,16 @@ impl WindowSource for Gated {
         }
     }
 
-    fn host_state(&self) -> windowcast_protocol::HostState {
+    fn host_state(&self) -> HostState {
         self.agent.host_state()
+    }
+
+    fn set_private_session(
+        &self,
+        start: bool,
+        password: Option<&str>,
+    ) -> Result<(), windowcast_host::PrivateRefusal> {
+        self.agent.set_private_session(start, password)
     }
 
     fn open_audio(
@@ -229,6 +239,9 @@ pub struct HostSnapshot {
     /// RemoteApp launches here: what Remote Desktop allows, or why that
     /// could not be read (not Windows).
     pub remote_apps: Option<Result<windowcast_rdp::remoteapp_host::Status, String>>,
+    /// The private session as the agent says it: off (not offered), why
+    /// this computer cannot have one, offered, or on.
+    pub private_session: PrivateSession,
 }
 
 /// Counters at the last rate sample of one stream.
@@ -413,7 +426,9 @@ impl HostRole {
         let (pin, trusted) = self
             .runtime
             .block_on(async { (self.control.pin().await, self.control.trusted().await) });
+        let private_session = self.source.agent.host_state().private_session;
         HostSnapshot {
+            private_session,
             pin,
             identity: self.control.peer_id().to_hex(),
             offered: self.source.encoders(),

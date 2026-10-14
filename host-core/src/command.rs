@@ -438,6 +438,20 @@ impl Drop for Channels {
 
 type Spawned = (Arc<dyn Process>, Vec<Box<dyn Read + Send>>, Option<u32>);
 
+/// Variables every shell, command and program a client starts gets on top
+/// of the host's environment: where a private session's programs go
+/// (docs/BACKENDS.md, "A private session").
+static LAUNCH_ENV: std::sync::RwLock<Vec<(String, String)>> = std::sync::RwLock::new(Vec::new());
+
+/// Sets [`LAUNCH_ENV`] (empty: the host's environment as it is).
+pub fn set_launch_env(vars: Vec<(String, String)>) {
+    *LAUNCH_ENV.write().expect("launch environment") = vars;
+}
+
+fn launch_env() -> Vec<(String, String)> {
+    LAUNCH_ENV.read().expect("launch environment").clone()
+}
+
 fn spawn(kind: &ChannelKind) -> Result<Spawned, String> {
     match kind {
         ChannelKind::Shell(pty) => spawn_pty(None, pty),
@@ -454,6 +468,7 @@ fn spawn(kind: &ChannelKind) -> Result<Spawned, String> {
             let (program, args) = argv.split_first().ok_or("no command")?;
             let mut child = Command::new(program)
                 .args(args)
+                .envs(launch_env())
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -483,6 +498,7 @@ fn spawn_pty(
         size: pty_size(pty.size),
         term: pty.term.clone(),
         program,
+        env: launch_env(),
     })
     .map_err(|e| format!("could not start the shell: {e}"))?;
     let reader = spawned.take_reader().ok_or("no terminal output")?;
@@ -495,6 +511,7 @@ fn launch(argv: &[String]) -> Result<Option<u32>, String> {
     let (program, args) = argv.split_first().ok_or("no application")?;
     let mut child = Command::new(program)
         .args(args)
+        .envs(launch_env())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

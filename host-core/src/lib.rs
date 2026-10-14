@@ -55,6 +55,42 @@ const PAIRING_LOCKOUT: Duration = Duration::from_secs(60);
 const MAX_SIGN_IN_FAILURES: u32 = 5;
 const SIGN_IN_LOCKOUT: Duration = Duration::from_secs(60);
 
+/// Why a private session did not start or end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivateRefusal {
+    pub reason: String,
+    /// Asking again with the user's Windows password may work.
+    pub password_needed: bool,
+}
+
+impl PrivateRefusal {
+    pub fn new(reason: impl Into<String>) -> Self {
+        PrivateRefusal {
+            reason: reason.into(),
+            password_needed: false,
+        }
+    }
+}
+
+/// Ends the private session a client started when its session ends.
+struct EndPrivate {
+    source: Arc<dyn WindowSource>,
+    started: Arc<AtomicBool>,
+}
+
+impl Drop for EndPrivate {
+    fn drop(&mut self) {
+        if self.started.swap(false, Ordering::SeqCst) {
+            let source = Arc::clone(&self.source);
+            std::thread::spawn(move || {
+                if let Err(e) = source.set_private_session(false, None) {
+                    eprintln!("could not end the private session: {}", e.reason);
+                }
+            });
+        }
+    }
+}
+
 /// The host's pointer at one moment ([`WindowSource::cursor`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CursorState {
@@ -165,10 +201,23 @@ pub trait WindowSource: Send + Sync + 'static {
     /// Replaces the clipboard's text with the client's.
     fn set_clipboard(&self, _text: &str) {}
 
-    /// The host computer's state (locked or not), sent to clients when it
-    /// changes. Asked every [`WINDOWS_POLL`] on a blocking thread.
+    /// The host computer's state (locked or not, its private session),
+    /// sent to clients when it changes. Asked every [`WINDOWS_POLL`] on a
+    /// blocking thread.
     fn host_state(&self) -> HostState {
         HostState::default()
+    }
+
+    /// Starts or ends a private session (docs/BACKENDS.md, "A private
+    /// session"), on a blocking thread. `password` is the Windows password
+    /// of the user the host runs as, when the client gave one. The new
+    /// state reaches clients through [`Self::host_state`].
+    fn set_private_session(
+        &self,
+        _start: bool,
+        _password: Option<&str>,
+    ) -> Result<(), PrivateRefusal> {
+        Err(PrivateRefusal::new("this host has no private session"))
     }
 }
 
@@ -1013,6 +1062,11 @@ impl Host {
             Arc::clone(&self.source),
             Arc::clone(&session),
         )));
+        // A private session this client started ends with its session.
+        let private = EndPrivate {
+            source: Arc::clone(&self.source),
+            started: Arc::new(AtomicBool::new(false)),
+        };
         // The windows this session streams, for following the pointer.
         let streamed = Arc::new(std::sync::Mutex::new(Vec::<WindowId>::new()));
         let _cursor = follow_cursor(
@@ -1147,6 +1201,31 @@ impl Host {
                     session
                         .send_control(&ControlMessage::SshCertificateResponse(issued))
                         .await?;
+                }
+                ControlMessage::PrivateSessionRequest { start, password } => {
+                    let source = Arc::clone(&self.source);
+                    let done = tokio::task::spawn_blocking(move || {
+                        source.set_private_session(start, password.as_deref())
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(PrivateRefusal::new(e.to_string())));
+                    match done {
+                        Ok(()) => {
+                            private.started.store(start, Ordering::SeqCst);
+                            println!(
+                                "{peer} {} a private session",
+                                if start { "started" } else { "ended" }
+                            );
+                        }
+                        Err(refusal) => {
+                            session
+                                .send_control(&ControlMessage::PrivateSessionRefused {
+                                    reason: refusal.reason,
+                                    password_needed: refusal.password_needed,
+                                })
+                                .await?
+                        }
+                    }
                 }
                 ControlMessage::Command(message) => channels.handle(message).await?,
                 ControlMessage::Ping => session.send_control(&ControlMessage::Pong).await?,
@@ -1605,7 +1684,7 @@ async fn push_host_state(source: Arc<dyn WindowSource>, session: Arc<Session>) {
         };
         if state != last {
             if session
-                .send_control(&ControlMessage::HostState(state))
+                .send_control(&ControlMessage::HostState(state.clone()))
                 .await
                 .is_err()
             {

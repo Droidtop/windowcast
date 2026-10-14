@@ -31,6 +31,7 @@ mod imp {
             bitrate_1080p: (settings.bitrate_mbps * 1_000_000.0) as u32,
             microphone: (!settings.microphone_device.is_empty())
                 .then(|| settings.microphone_device.clone()),
+            private_session: settings.private_session,
         })
     }
 
@@ -84,6 +85,7 @@ mod imp {
         Options {
             fps: settings.fps.max(1),
             bitrate_1080p: (settings.bitrate_mbps * 1_000_000.0) as u32,
+            private_session: settings.private_session,
         }
     }
 

@@ -53,10 +53,10 @@ pub struct Sway {
 }
 
 impl Sway {
-    /// Connects to the sway named by `$SWAYSOCK`; `None` under any other
-    /// compositor.
+    /// Connects to the sway the agent serves (`$SWAYSOCK`, or a private
+    /// session's); `None` under any other compositor.
     pub fn connect() -> Option<Self> {
-        let path = std::env::var_os("SWAYSOCK")?;
+        let path = crate::display::sway_socket()?;
         UnixStream::connect(path).ok().map(|socket| Sway { socket })
     }
 
