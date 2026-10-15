@@ -536,6 +536,47 @@ the plain reason), available, or active. A client asks with
 `PrivateSessionRequest { start, password }` and is answered with the new
 `HostState` or a `PrivateSessionRefused { reason, password_needed }`.
 
+### The secure screen (design from Sunshine; not built)
+
+Owner, 2026-10-14: "Just pull in how sunshine does it, including how they
+refer to it". Read in LizardByte/Sunshine `src/platform/windows/misc.cpp`
+and `display_base.cpp`. Sunshine has no name for the lock screen or UAC's
+secure desktop: it calls the thing that makes them reachable "Sunshine
+running as a service" (its docs: "Sunshine runs as a service on Windows"
+with the SYSTEM account's access), and its code only speaks of the input
+desktop. So windowcast says "runs as a service" in the host's setting, and
+"the secure screen" only in plain explanations for people.
+
+How Sunshine does it, and what windowcast takes:
+
+- **A SYSTEM process in the user's session.** `is_running_as_system()`
+  (CreateWellKnownSid(WinLocalSystemSid) and CheckTokenMembership); the
+  user's programs are launched with `retrieve_users_token()`
+  (WTSGetActiveConsoleSessionId, WTSQueryUserToken, TokenLinkedToken when
+  elevated), `CreateEnvironmentBlock`, `ImpersonateLoggedOnUser` and
+  `CreateProcessAsUserW`. Only SYSTEM can open the Winlogon desktop that
+  shows the lock screen and UAC prompts.
+- **Follow the input desktop.** `syncThreadDesktop()` is
+  OpenInputDesktop(DF_ALLOWOTHERACCOUNTHOOK) then SetThreadDesktop, run on
+  a thread before it duplicates the output or sends input. Capture
+  treats DXGI_ERROR_ACCESS_LOST and ACCESS_DENIED as "reinit" and starts
+  again after syncing.
+- windowcast: a host service (agent-windows, installed with the host,
+  off by default, asked for with the administrator's consent) starts the
+  agent as SYSTEM in the console session; the agent's capture and input
+  threads call the same sync before every (re)start of a Desktop Duplication
+  capture of the screen and before SendInput, and a failed capture on
+  access lost starts again. `lock::input_desktop_reachable` (today's test)
+  then reports true as a service, so the posted-message fallback is used
+  only without the service. Windows Graphics Capture stays the capture for
+  windows, as Sunshine's does not use it for the secure desktop either.
+
+Not built, and why: it cannot be checked in CI as it is (the runner is not
+a SYSTEM service in an interactive session with a lock screen) and needs
+the owner's PC; the pieces above are the plan so that the rig check has
+exact things to look for. Until then a locked PC keeps the window capture
+and posted input (above), and the private session.
+
 ## Choosing a backend
 
 `windowcast_protocol::selection` holds the rules, so both ends agree:
