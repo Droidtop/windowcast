@@ -58,4 +58,5 @@ dependencies {
     implementation(project(":windowcast"))
     // Custom Tabs, for signing in with an identity provider's page.
     implementation("androidx.browser:browser:1.8.0")
+    testImplementation("junit:junit:4.13.2")
 }

@@ -160,6 +160,13 @@ class MainActivity : Activity() {
     @Volatile private var soundPackets = 0L
     private var windows: List<WindowInfo> = emptyList()
     private var watching: WindowInfo? = null
+
+    /**
+     * The window another app asked for ([ConnectRequest.window], part of its title), watched as
+     * soon as the host lists it; asked again every [WANTED_REFRESH_MS] until [WANTED_WITHIN_MS].
+     */
+    private var wanted: String? = null
+    private var wantedSince = 0L
     /** The thread reading the current session's events; replacing or clearing it stops the old one. */
     @Volatile private var listener: Thread? = null
 
@@ -318,6 +325,57 @@ class MainActivity : Activity() {
         } else {
             client = WindowcastClient(File(filesDir, "windowcast"))
             status.text = "This device: ${client?.peerId?.take(16)}…"
+            // Not again after the system recreated the activity from saved state.
+            if (savedInstanceState == null) open(intent)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        open(intent)
+    }
+
+    /**
+     * Another app's request to open a host's stream ([ConnectRequest], docs/ANDROID-VIEWER.md):
+     * resume with that host at that address, then watch the window it names. It never pairs:
+     * connecting without a PIN resumes only with a host in this viewer's trust store, and the
+     * host that answers must be the one the request names. Anything but a request is ignored.
+     */
+    private fun open(intent: Intent?) {
+        val request = when (intent?.action) {
+            ConnectRequest.ACTION -> ConnectRequest.of(
+                intent.getStringExtra(ConnectRequest.EXTRA_HOST_ID),
+                intent.getStringExtra(ConnectRequest.EXTRA_ADDRESS),
+                intent.getStringExtra(ConnectRequest.EXTRA_WINDOW),
+            )
+            Intent.ACTION_VIEW -> intent.dataString?.let { ConnectRequest.fromLink(it) }
+            else -> return
+        }
+        if (request == null) {
+            status.text = "Another app asked to open a host, but did not give its device id and address (HOST:PORT)."
+            return
+        }
+        address.setText(request.address)
+        wanted = request.window
+        wantedSince = System.currentTimeMillis()
+        val current = session
+        if (current != null && current.isOpen && current.hostId == request.hostId) {
+            worker.execute { current.requestWindows() }
+            return
+        }
+        startSession(
+            "Opening ${request.address}…",
+            "Could not open ${request.address} (only a host this viewer has paired with opens this way)",
+        ) { c ->
+            val s = c.connect(request.address, null)
+            if (s.hostId != request.hostId) {
+                s.close()
+                throw IllegalStateException(
+                    "it answered as another computer (${s.hostId.take(16)}…), not the one asked for",
+                )
+            }
+            s to { opened -> "Connected to " + opened.hostId.take(16) + "…" }
         }
     }
 
@@ -715,6 +773,30 @@ class MainActivity : Activity() {
             }, MATCH_PARENT, WRAP_CONTENT)
         }
         status.text = "${list.size} windows. Tap one to watch it."
+        watchWanted(list)
+    }
+
+    /** Watches the window another app asked for once it is listed; asks again while it is not. */
+    private fun watchWanted(list: List<WindowInfo>) {
+        val title = wanted ?: return
+        val found = list.firstOrNull {
+            it.width > 0 && it.height > 0 && it.title.contains(title, ignoreCase = true)
+        }
+        if (found != null) {
+            wanted = null
+            watch(found)
+            return
+        }
+        if (System.currentTimeMillis() - wantedSince > WANTED_WITHIN_MS) {
+            wanted = null
+            status.text = "No window titled \u201c$title\u201d appeared. Tap one to watch it."
+            return
+        }
+        status.text = "Waiting for a window titled \u201c$title\u201d…"
+        main.postDelayed({
+            val s = session
+            if (wanted == title && s != null && s.isOpen) worker.execute { s.requestWindows() }
+        }, WANTED_REFRESH_MS)
     }
 
     private fun watch(window: WindowInfo) {
@@ -1358,6 +1440,9 @@ class MainActivity : Activity() {
 
     companion object {
         private const val TAG = "windowcast"
+        private const val WANTED_REFRESH_MS = 2_000L
+        /** A game asked to start just now may take a while to open its window. */
+        private const val WANTED_WITHIN_MS = 90_000L
         private const val RECORD_REQUEST = 1
         private const val MENU_VIDEO = 1
         private const val MENU_PICTURES = 2
