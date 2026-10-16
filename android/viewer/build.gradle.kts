@@ -32,6 +32,11 @@ android {
 
     // Debug builds share one key when android/viewer/debug.keystore exists (the Android
     // debug alias and passwords), so a new debug APK installs over an older one.
+    // Release builds are signed with the key the release workflow decodes from its secrets
+    // (the names droidtop's releases use: SIGNING_KEYSTORE_PATH, SIGNING_STORE_PASSWORD,
+    // SIGNING_KEY_ALIAS, SIGNING_KEY_PASSWORD), so every release installs over the last;
+    // without them a release build stays unsigned, and viewer-release.yml refuses to publish it.
+    val releaseKeystore: String? = System.getenv("SIGNING_KEYSTORE_PATH")
     signingConfigs {
         getByName("debug") {
             val shared = file("debug.keystore")
@@ -41,6 +46,20 @@ android {
                 keyAlias = "androiddebugkey"
                 keyPassword = "android"
             }
+        }
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = System.getenv("SIGNING_STORE_PASSWORD")
+                keyAlias = System.getenv("SIGNING_KEY_ALIAS")
+                keyPassword = System.getenv("SIGNING_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            if (releaseKeystore != null) signingConfig = signingConfigs.getByName("release")
         }
     }
 

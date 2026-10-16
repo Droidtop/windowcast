@@ -70,7 +70,7 @@ Other forms, with the same programs: `windowcast-linux-<arch>.tar.zst`, a single
 
 **Windows (x86_64):** download `windowcast-app-<version>-windows-x86_64.exe` for the reference app, or `windowcast-agent-windows-<version>-x86_64.exe` for the host agent alone. For gamepads on the host, install the ViGEmBus driver.
 
-**Android:** `windowcast-viewer-<version>-debug.apk` is a test viewer, and `windowcast-android-<version>.aar` is the library for embedding.
+**Android:** `windowcast-viewer-<version>.apk` is the viewer, signed with the release key (another app, such as droidtop, can open a paired host in it: [docs/ANDROID-VIEWER.md](docs/ANDROID-VIEWER.md)); `windowcast-viewer-<version>-debug.apk` is a test build, and `windowcast-android-<version>.aar` is the library for embedding.
 
 To try it, run `windowcast-app --role host` on one machine and `windowcast-app --role client` on another, then enter the host's PIN in the client and pick a window.
 

@@ -190,7 +190,8 @@ Debug builds of the viewer are signed with `android/viewer/debug.keystore`,
 committed on purpose: it only identifies debug builds, so each new debug
 APK installs over the last one (its passwords are Android's usual
 `android`, alias `androiddebugkey`). It is not a release key and grants
-nothing; release builds keep their own signing. Debug installs from 0.23.0
+nothing; release builds are signed by `.github/workflows/viewer-release.yml`
+with the key in the repository's secrets (docs/ANDROID-VIEWER.md). Debug installs from 0.23.0
 or earlier were signed with each build machine's own key and need one
 uninstall first.
 
