@@ -632,6 +632,16 @@ request falls back to `Native` and nothing breaks while the others arrive.
 Clients expose the user rules as options with these defaults; droidtop's
 Desktop mode is one such client.
 
+## Secure screen
+
+The `windowcast-secure-helper` crate provides a Windows-only binary (`windowcast-secure-helper.exe`) plus a `client` module that applications link. It is registered as a scheduled task that runs as SYSTEM, at startup and on session change. It is NOT a long-lived service the host can drive freely.
+
+The permission gate (`HKLM\SOFTWARE\windowcast\SecureScreen`, value `Enabled` plus the SID of the granting user) is written only by the elevated `enable` command and read before every operation. The named pipe (`\\.\pipe\windowcast-secure`) has an explicit DACL: SYSTEM plus the interactive user whose SID matches the recorded grant. Each client's token SID and image path are checked: it must be the installed `windowcast-agent-windows.exe` or `windowcast-app.exe` under the admin-only install folder.
+
+Operations are a closed set: `capture_frame` (DXGI desktop duplication of the input desktop), `send_input` (SendInput through the current input desktop), and `secure_desktop_state` (whether the Winlogon desktop is active). The helper follows the input desktop with `OpenInputDesktop` and `SetThreadDesktop`, running in the active console session.
+
+Install, enable, disable and uninstall are exposed through the client API and as `windowcast` subcommands (`secure-screen install`, `enable`, `disable`, `uninstall`). When the helper is absent, the host says so plainly.
+
 ## Commands and terminals
 
 A shell, an application launch and other remote commands are not a

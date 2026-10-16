@@ -177,6 +177,20 @@ windows, can turn it on; the host's owner can turn it on from the host.
 Each endpoint drives only its one window, under the host's input
 setting.
 
+## Secure screen threat model
+
+The design (owner, 2026-10-16, verbatim): "to resolve the potential security risk, we're going to build a second helper. It runs as a task under system, and will be controlled by the previously requested toggle. This means that instead of autonomously injecting input ..., we're asking the system if the user has provided permission, and using that permission if they did."
+
+And: "We won't just run code as SYSTEM without user approval, we'll ask, and let them enable/disable in settings at their own leisure."
+
+And: "It's not a new repo. It's part of the windowcast library, and applications can use it with it. Once we implement that helper code in windowcast, we can use the service in other applications, but THEY have to request and install the binary. This also massively cuts down on the amount of code with system permission, since the helper should broker connections, and perform two tasks: display the current secure screen, and input the text or mouseclicks provided. No risk of other application code running as system causing issues."
+
+- The helper binary (`windowcast-secure-helper`) runs only as a scheduled task under SYSTEM; it is not a long-lived service the host drives freely.
+- Each application (windowcast's own host, and later Pythia and droidtop-agent) requests and installs the binary through the client API; the binary itself performs no arbitrary command execution.
+- The permission gate (`HKLM\SOFTWARE\windowcast\SecureScreen`) requires administrator elevation to write. The helper re-reads it before every operation; if absent or 0, it refuses, logs the refusal, and exits.
+- The named pipe (`\\.\pipe\windowcast-secure`) uses an explicit DACL (SYSTEM + interactive user whose SID matches the grant) and verifies each client's token SID and image path.
+- Operations are a closed set: `capture_frame`, `send_input`, and `secure_desktop_state`. No other commands, file access, or code loading is permitted.
+
 ## Authorization is separate from authentication
 
 A pinned identity proves *who* is connecting, not *what* they're allowed to
