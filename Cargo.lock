@@ -7354,7 +7354,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windowcast-accounts"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "argon2 0.5.3",
  "base64 0.22.1",
@@ -7379,7 +7379,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-agent-linux"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "evdev",
  "libpulse-binding",
@@ -7403,7 +7403,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-agent-windows"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "opus",
  "tokio",
@@ -7422,7 +7422,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-app"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "eframe",
  "serde",
@@ -7446,7 +7446,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-cli-tools"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "libc",
  "openh264",
@@ -7469,7 +7469,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-client-core"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "bytes",
  "opus",
@@ -7487,7 +7487,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-client-windows"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "audiopus_sys",
  "opus",
@@ -7498,7 +7498,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-gamestream"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
@@ -7523,7 +7523,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-host"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "async-trait",
  "audiopus_sys",
@@ -7544,7 +7544,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-identity"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "rand_core 0.6.4",
@@ -7553,7 +7553,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-pairing"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "hkdf 0.12.4",
  "hmac 0.12.1",
@@ -7567,7 +7567,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-protocol"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "bincode",
  "serde",
@@ -7576,14 +7576,14 @@ dependencies = [
 
 [[package]]
 name = "windowcast-pty"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "portable-pty",
 ]
 
 [[package]]
 name = "windowcast-rdp"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7616,7 +7616,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-rendezvous"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "rand_core 0.6.4",
@@ -7631,7 +7631,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-terminal"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "base64 0.22.1",
  "rand 0.10.2",
@@ -7649,7 +7649,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-transport"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7670,7 +7670,7 @@ dependencies = [
 
 [[package]]
 name = "windowcast-vnc"
-version = "0.34.1"
+version = "0.35.0"
 dependencies = [
  "des",
  "rand_core 0.6.4",

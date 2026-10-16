@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.35.0] - 2026-10-16
 
 ### Added
 - The Android viewer opens a paired host from another app (docs/ANDROID-VIEWER.md; Droidtop/tracker#552): `windowcast://connect?host=<device id>&address=<HOST:PORT>[&window=<title>]`, or the action `dev.windowcast.viewer.action.CONNECT` with the same values as extras. It never pairs: it resumes only with a host in its trust store, and only with the host the device id names; it then watches the first window whose title contains `window`, waiting up to 90 s for it to open.
