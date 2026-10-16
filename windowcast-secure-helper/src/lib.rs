@@ -3,6 +3,10 @@
 //! "A locked host" section.
 
 pub mod client;
+pub mod desktop;
+pub mod operations;
+pub mod permission;
+pub mod pipe;
 
 pub use client::{Client, SecureScreenError, SecureScreenStatus};
 

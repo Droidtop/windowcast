@@ -21,6 +21,7 @@ fn main() {
 
 /// A minimal server loop: accepts pipe connections, verifies clients,
 /// reads operations, performs them, and logs results.
+#[allow(dead_code)]
 fn run_server() -> io::Result<()> {
     // Stub: real implementation creates the named pipe with DACL and loops.
     loop {

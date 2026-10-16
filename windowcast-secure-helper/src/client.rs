@@ -66,8 +66,7 @@ impl Client {
     /// responsibility), then this API records it.
     pub fn install_binary(&self, source: PathBuf) -> Result<(), SecureScreenError> {
         if !self.install_dir.exists() {
-            std::fs::create_dir_all(&self.install_dir)
-                .map_err(SecureScreenError::Io)?;
+            std::fs::create_dir_all(&self.install_dir).map_err(SecureScreenError::Io)?;
         }
         let dest = self.install_dir.join("windowcast-secure-helper.exe");
         std::fs::copy(&source, &dest).map_err(SecureScreenError::Io)?;
@@ -91,7 +90,9 @@ impl Client {
 
     /// Whether the helper binary exists in the install directory.
     pub fn helper_binary_exists(&self) -> bool {
-        self.install_dir.join("windowcast-secure-helper.exe").exists()
+        self.install_dir
+            .join("windowcast-secure-helper.exe")
+            .exists()
     }
 
     /// Enable the secure screen: writes the permission and registers the

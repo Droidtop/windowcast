@@ -24,12 +24,8 @@ impl Permission {
         // On Linux / non-Windows this is a stub that always denies.
         #[cfg(windows)]
         {
-            use windows::Win32::System::Registry::{
-                RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, KEY_READ,
-            };
-            use windows::core::PCWSTR;
-            // ... (stub for cross-check)
-            let _ = HKEY_LOCAL_MACHINE;
+            // Registry APIs available through the `windows` crate when
+            // `Win32_System_Registry` feature is enabled (see docs/SECURITY.md).
         }
         // Cross-check stub: deny.
         None
@@ -41,7 +37,10 @@ impl Permission {
         // Stub for cross-check.
         let _ = enabled;
         let _ = sid;
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, "elevated write only"))
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "elevated write only",
+        ))
     }
 }
 

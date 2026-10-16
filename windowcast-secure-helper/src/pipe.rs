@@ -30,11 +30,16 @@ pub fn verify_client(process_id: u32, grant_sid: Option<&str>) -> bool {
 /// On Linux / non-Windows: stub that reports no pipe.
 pub fn create_pipe_server() -> io::Result<()> {
     // Stub for cross-check.
-    Err(io::Error::new(io::ErrorKind::NotConnected, "pipe server requires Windows"))
+    Err(io::Error::new(
+        io::ErrorKind::NotConnected,
+        "pipe server requires Windows",
+    ))
 }
 
 /// Read an operation from the pipe.
-pub fn read_operation(pipe_handle: &std::os::windows::io::RawHandle) -> io::Result<Option<super::operations::Operation>> {
+pub fn read_operation(
+    pipe_handle: &std::os::windows::io::RawHandle,
+) -> io::Result<Option<super::operations::Operation>> {
     let _ = pipe_handle;
     Ok(None)
 }

@@ -5,13 +5,14 @@
 //! - `send_input`: enter given text or mouse clicks.
 //! - `secure_desktop_state`: whether Winlogon desktop is active.
 
-use std::io;
-
 /// A single operation command from the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
     CaptureFrame,
-    SendInput { text: Option<String>, mouse: Option<(i32, i32)> },
+    SendInput {
+        text: Option<String>,
+        mouse: Option<(i32, i32)>,
+    },
     SecureDesktopState,
 }
 
@@ -20,15 +21,30 @@ impl Operation {
     pub fn encode(&self) -> Vec<u8> {
         match self {
             Operation::CaptureFrame => b"CAPTURE_FRAME".to_vec(),
-            Operation::SendInput { text: None, mouse: None } => b"SEND_INPUT".to_vec(),
-            Operation::SendInput { text: Some(t), mouse: None } => {
+            Operation::SendInput {
+                text: None,
+                mouse: None,
+            } => b"SEND_INPUT".to_vec(),
+            Operation::SendInput {
+                text: Some(t),
+                mouse: Some((x, y)),
+            } => {
+                // Both set: encode text with mouse appended; not a standard combo,
+                // but handled to keep match exhaustive.
+                format!("SEND_INPUT {} MOUSE {} {}", t, x, y).into_bytes()
+            }
+            Operation::SendInput {
+                text: Some(t),
+                mouse: None,
+            } => {
                 let mut out = b"SEND_INPUT ".to_vec();
                 out.extend(t.bytes());
                 out
             }
-            Operation::SendInput { text: None, mouse: Some((x, y)) } => {
-                format!("SEND_INPUT MOUSE {} {}", x, y).into_bytes()
-            }
+            Operation::SendInput {
+                text: None,
+                mouse: Some((x, y)),
+            } => format!("SEND_INPUT MOUSE {} {}", x, y).into_bytes(),
             Operation::SecureDesktopState => b"SECURE_DESKTOP_STATE".to_vec(),
         }
     }
@@ -44,14 +60,16 @@ impl Operation {
             Some(Operation::CaptureFrame)
         } else if s == "SECURE_DESKTOP_STATE" {
             Some(Operation::SecureDesktopState)
-        } else if s.starts_with("SEND_INPUT ") {
-            let rest = &s["SEND_INPUT ".len()..];
+        } else if let Some(rest) = s.strip_prefix("SEND_INPUT ") {
             if rest.starts_with("MOUSE ") {
                 let parts: Vec<&str> = rest.split_whitespace().collect();
                 if parts.len() == 3 {
                     let x = parts[1].parse().ok()?;
                     let y = parts[2].parse().ok()?;
-                    Some(Operation::SendInput { text: None, mouse: Some((x, y)) })
+                    Some(Operation::SendInput {
+                        text: None,
+                        mouse: Some((x, y)),
+                    })
                 } else {
                     None
                 }
@@ -62,7 +80,10 @@ impl Operation {
                 })
             }
         } else if s == "SEND_INPUT" {
-            Some(Operation::SendInput { text: None, mouse: None })
+            Some(Operation::SendInput {
+                text: None,
+                mouse: None,
+            })
         } else {
             None
         }
@@ -84,7 +105,10 @@ mod tests {
 
     #[test]
     fn encode_decode_capture() {
-        assert_eq!(Operation::decode(&Operation::CaptureFrame.encode()), Some(Operation::CaptureFrame));
+        assert_eq!(
+            Operation::decode(&Operation::CaptureFrame.encode()),
+            Some(Operation::CaptureFrame)
+        );
     }
 
     #[test]
@@ -97,13 +121,19 @@ mod tests {
 
     #[test]
     fn encode_decode_input_text() {
-        let op = Operation::SendInput { text: Some("hello".into()), mouse: None };
+        let op = Operation::SendInput {
+            text: Some("hello".into()),
+            mouse: None,
+        };
         assert_eq!(Operation::decode(&op.encode()), Some(op));
     }
 
     #[test]
     fn encode_decode_input_mouse() {
-        let op = Operation::SendInput { text: None, mouse: Some((10, 20)) };
+        let op = Operation::SendInput {
+            text: None,
+            mouse: Some((10, 20)),
+        };
         assert_eq!(Operation::decode(&op.encode()), Some(op));
     }
 
@@ -116,7 +146,11 @@ mod tests {
     #[test]
     fn allowlist_exact() {
         assert!(Operation::CaptureFrame.is_allowed());
-        assert!(Operation::SendInput { text: None, mouse: None }.is_allowed());
+        assert!(Operation::SendInput {
+            text: None,
+            mouse: None
+        }
+        .is_allowed());
         assert!(Operation::SecureDesktopState.is_allowed());
     }
 }
