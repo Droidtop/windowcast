@@ -22,6 +22,7 @@ members = [
     "cli-tools",
     "client-windows",
     "app",
+    "windowcast-secure-helper",
 ]
 
 [workspace.package]
