@@ -4,7 +4,9 @@
 //! Windows.Graphics.Capture and encodes it (encoder.rs: Media Foundation
 //! hardware or software, or OpenH264).
 
+pub mod cmdline;
 pub mod convert;
+pub mod relay;
 
 #[cfg(windows)]
 pub mod audio;
@@ -32,6 +34,8 @@ mod posted;
 mod private;
 #[cfg(windows)]
 mod source;
+#[cfg(windows)]
+pub mod user_process;
 #[cfg(windows)]
 pub mod windows_list;
 

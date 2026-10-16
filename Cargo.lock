@@ -7414,6 +7414,7 @@ dependencies = [
  "windowcast-host",
  "windowcast-identity",
  "windowcast-protocol",
+ "windowcast-pty",
  "windowcast-rdp",
  "windows 0.62.2",
  "windows-core 0.62.2",

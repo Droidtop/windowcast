@@ -127,7 +127,7 @@ pub struct CommandStatus {
 pub(crate) type StatusMap = Arc<Mutex<HashMap<u64, CommandStatus>>>;
 
 /// What a running command offers its channel.
-trait Process: Send + Sync {
+pub trait RunningProcess: Send + Sync {
     fn write(&self, bytes: &[u8]) -> std::io::Result<()>;
     fn eof(&self);
     fn resize(&self, _size: TerminalSize) {}
@@ -138,7 +138,7 @@ trait Process: Send + Sync {
 
 struct PtyProcess(windowcast_pty::Pty);
 
-impl Process for PtyProcess {
+impl RunningProcess for PtyProcess {
     fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
         self.0.write(bytes)
     }
@@ -170,7 +170,7 @@ struct PipedProcess {
     stdin: Mutex<Option<std::process::ChildStdin>>,
 }
 
-impl Process for PipedProcess {
+impl RunningProcess for PipedProcess {
     fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
         match self.stdin.lock().expect("stdin").as_mut() {
             Some(stdin) => stdin.write_all(bytes).and_then(|()| stdin.flush()),
@@ -195,7 +195,7 @@ impl Process for PipedProcess {
 
 /// One open channel of a session.
 struct Channel {
-    process: Arc<dyn Process>,
+    process: Arc<dyn RunningProcess>,
     /// Input goes in order, off the session's task: a command that does
     /// not read must not hold up the control channel.
     input: std::sync::mpsc::Sender<Option<Vec<u8>>>,
@@ -343,10 +343,15 @@ impl Channels {
                 argv.first().cloned().unwrap_or_default()
             }
         };
+        let starter = process_starter();
         if let ChannelKind::Launch { argv, .. } = &kind {
-            return launch(argv);
+            return starter.detached(argv, &launch_env());
         }
-        let (process, readers, pid) = tokio::task::spawn_blocking(move || spawn(&kind))
+        let Started {
+            process,
+            output: readers,
+            pid,
+        } = tokio::task::spawn_blocking(move || start_channel(&*starter, &kind))
             .await
             .map_err(|e| e.to_string())??;
 
@@ -445,7 +450,45 @@ impl Drop for Channels {
     }
 }
 
-type Spawned = (Arc<dyn Process>, Vec<Box<dyn Read + Send>>, Option<u32>);
+/// A command a channel started: what it offers the channel, its output
+/// (read until each reader ends), and its process id when there is one.
+pub struct Started {
+    pub process: Arc<dyn RunningProcess>,
+    pub output: Vec<Box<dyn Read + Send>>,
+    pub pid: Option<u32>,
+}
+
+/// How the host starts what a client asks for: a terminal, a command with
+/// piped input and output, or an application left to run. The host's own
+/// way ([`HostProcesses`]) starts them as the host's user; a Windows host
+/// running as a service replaces it so that they start as the user signed
+/// in at the PC, never as SYSTEM (docs/BACKENDS.md, "The secure screen").
+pub trait ProcessStarter: Send + Sync + 'static {
+    fn terminal(&self, spawn: &windowcast_pty::Spawn) -> Result<Started, String>;
+    fn piped(&self, argv: &[String], env: &[(String, String)]) -> Result<Started, String>;
+    /// Starts an application with no input or output; its windows are the
+    /// window list's business from then on.
+    fn detached(&self, argv: &[String], env: &[(String, String)]) -> Result<Option<u32>, String>;
+}
+
+/// Starts processes as the host's own user.
+pub struct HostProcesses;
+
+static PROCESS_STARTER: std::sync::RwLock<Option<Arc<dyn ProcessStarter>>> =
+    std::sync::RwLock::new(None);
+
+/// Replaces how every channel from now on starts its process.
+pub fn set_process_starter(starter: Arc<dyn ProcessStarter>) {
+    *PROCESS_STARTER.write().expect("process starter") = Some(starter);
+}
+
+fn process_starter() -> Arc<dyn ProcessStarter> {
+    PROCESS_STARTER
+        .read()
+        .expect("process starter")
+        .clone()
+        .unwrap_or_else(|| Arc::new(HostProcesses))
+}
 
 /// Variables every shell, command and program a client starts gets on top
 /// of the host's environment: where a private session's programs go
@@ -461,9 +504,10 @@ fn launch_env() -> Vec<(String, String)> {
     LAUNCH_ENV.read().expect("launch environment").clone()
 }
 
-fn spawn(kind: &ChannelKind) -> Result<Spawned, String> {
+/// What `kind` (not a launch) starts, through `starter`.
+fn start_channel(starter: &dyn ProcessStarter, kind: &ChannelKind) -> Result<Started, String> {
     match kind {
-        ChannelKind::Shell(pty) => spawn_pty(None, pty),
+        ChannelKind::Shell(pty) => starter.terminal(&terminal(None, pty)),
         ChannelKind::Exec {
             argv,
             pty: Some(pty),
@@ -471,64 +515,166 @@ fn spawn(kind: &ChannelKind) -> Result<Spawned, String> {
             if argv.is_empty() {
                 return Err("no command".into());
             }
-            spawn_pty(Some(argv.clone()), pty)
+            starter.terminal(&terminal(Some(argv.clone()), pty))
         }
         ChannelKind::Exec { argv, pty: None } => {
-            let (program, args) = argv.split_first().ok_or("no command")?;
-            let mut child = Command::new(program)
-                .args(args)
-                .envs(launch_env())
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("could not start {program}: {e}"))?;
-            let pid = child.id();
-            let stdin = child.stdin.take();
-            let readers: Vec<Box<dyn Read + Send>> = vec![
-                Box::new(child.stdout.take().ok_or("no stdout")?),
-                Box::new(child.stderr.take().ok_or("no stderr")?),
-            ];
-            let process = PipedProcess {
-                child: Mutex::new(child),
-                stdin: Mutex::new(stdin),
-            };
-            Ok((Arc::new(process), readers, Some(pid)))
+            if argv.is_empty() {
+                return Err("no command".into());
+            }
+            starter.piped(argv, &launch_env())
         }
         ChannelKind::Launch { .. } => Err("a launch is not a stream".into()),
     }
 }
 
-fn spawn_pty(
+fn terminal(
     program: Option<Vec<String>>,
     pty: &windowcast_protocol::command::Pty,
-) -> Result<Spawned, String> {
-    let spawned = windowcast_pty::Pty::spawn(&windowcast_pty::Spawn {
+) -> windowcast_pty::Spawn {
+    windowcast_pty::Spawn {
         size: pty_size(pty.size),
         term: pty.term.clone(),
         program,
         env: launch_env(),
-    })
-    .map_err(|e| format!("could not start the shell: {e}"))?;
-    let reader = spawned.take_reader().ok_or("no terminal output")?;
-    Ok((Arc::new(PtyProcess(spawned)), vec![Box::new(reader)], None))
+    }
 }
 
-/// Starts an application detached: no input, no output, reaped when it
-/// ends. Its windows are the window list's business from then on.
-fn launch(argv: &[String]) -> Result<Option<u32>, String> {
-    let (program, args) = argv.split_first().ok_or("no application")?;
-    let mut child = Command::new(program)
-        .args(args)
-        .envs(launch_env())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("could not start {program}: {e}"))?;
-    let pid = child.id();
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(Some(pid))
+impl ProcessStarter for HostProcesses {
+    fn terminal(&self, spawn: &windowcast_pty::Spawn) -> Result<Started, String> {
+        let spawned = windowcast_pty::Pty::spawn(spawn)
+            .map_err(|e| format!("could not start the shell: {e}"))?;
+        let reader = spawned.take_reader().ok_or("no terminal output")?;
+        Ok(Started {
+            process: Arc::new(PtyProcess(spawned)),
+            output: vec![Box::new(reader)],
+            pid: None,
+        })
+    }
+
+    fn piped(&self, argv: &[String], env: &[(String, String)]) -> Result<Started, String> {
+        let (program, args) = argv.split_first().ok_or("no command")?;
+        let mut child = Command::new(program)
+            .args(args)
+            .envs(env.iter().cloned())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("could not start {program}: {e}"))?;
+        let pid = child.id();
+        let stdin = child.stdin.take();
+        let output: Vec<Box<dyn Read + Send>> = vec![
+            Box::new(child.stdout.take().ok_or("no stdout")?),
+            Box::new(child.stderr.take().ok_or("no stderr")?),
+        ];
+        let process = PipedProcess {
+            child: Mutex::new(child),
+            stdin: Mutex::new(stdin),
+        };
+        Ok(Started {
+            process: Arc::new(process),
+            output,
+            pid: Some(pid),
+        })
+    }
+
+    fn detached(&self, argv: &[String], env: &[(String, String)]) -> Result<Option<u32>, String> {
+        let (program, args) = argv.split_first().ok_or("no application")?;
+        let mut child = Command::new(program)
+            .args(args)
+            .envs(env.iter().cloned())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("could not start {program}: {e}"))?;
+        let pid = child.id();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(Some(pid))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windowcast_protocol::command::Pty;
+
+    /// Records which way it was asked to start something, and starts
+    /// nothing.
+    #[derive(Default)]
+    struct Recording(Mutex<Vec<String>>);
+
+    impl ProcessStarter for Recording {
+        fn terminal(&self, spawn: &windowcast_pty::Spawn) -> Result<Started, String> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("terminal {:?}", spawn.program));
+            Err("recorded".into())
+        }
+        fn piped(&self, argv: &[String], _env: &[(String, String)]) -> Result<Started, String> {
+            self.0.lock().unwrap().push(format!("piped {argv:?}"));
+            Err("recorded".into())
+        }
+        fn detached(
+            &self,
+            argv: &[String],
+            _env: &[(String, String)],
+        ) -> Result<Option<u32>, String> {
+            self.0.lock().unwrap().push(format!("detached {argv:?}"));
+            Err("recorded".into())
+        }
+    }
+
+    fn pty() -> Pty {
+        Pty {
+            size: TerminalSize { cols: 80, rows: 24 },
+            term: "xterm".into(),
+        }
+    }
+
+    #[test]
+    fn every_channel_starts_through_the_starter() {
+        let starter = Recording::default();
+        let argv = vec!["whoami".to_owned()];
+        for kind in [
+            ChannelKind::Shell(pty()),
+            ChannelKind::Exec {
+                argv: argv.clone(),
+                pty: Some(pty()),
+            },
+            ChannelKind::Exec {
+                argv: argv.clone(),
+                pty: None,
+            },
+        ] {
+            assert_eq!(
+                start_channel(&starter, &kind).err().as_deref(),
+                Some("recorded")
+            );
+        }
+        assert_eq!(
+            *starter.0.lock().unwrap(),
+            [
+                "terminal None",
+                "terminal Some([\"whoami\"])",
+                "piped [\"whoami\"]",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_command_starts_nothing() {
+        let starter = Recording::default();
+        for pty in [Some(pty()), None] {
+            let kind = ChannelKind::Exec { argv: vec![], pty };
+            assert_eq!(
+                start_channel(&starter, &kind).err().as_deref(),
+                Some("no command")
+            );
+        }
+        assert!(starter.0.lock().unwrap().is_empty());
+    }
 }

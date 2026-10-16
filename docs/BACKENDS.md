@@ -536,7 +536,7 @@ the plain reason), available, or active. A client asks with
 `PrivateSessionRequest { start, password }` and is answered with the new
 `HostState` or a `PrivateSessionRefused { reason, password_needed }`.
 
-### The secure screen (design from Sunshine; not built)
+### The secure screen (design from Sunshine; being built)
 
 Owner, 2026-10-14: "Just pull in how sunshine does it, including how they
 refer to it". Read in LizardByte/Sunshine `src/platform/windows/misc.cpp`
@@ -571,8 +571,30 @@ How Sunshine does it, and what windowcast takes:
   only without the service. Windows Graphics Capture stays the capture for
   windows, as Sunshine's does not use it for the secure desktop either.
 
-Not built, and why: it cannot be checked in CI as it is (the runner is not
-a SYSTEM service in an interactive session with a lock screen) and needs
+- **Nothing a client asks for runs as SYSTEM** (decided 2026-10-16, in
+  the coordinator's words for the owner: "Nothing a client asks for ever
+  runs as SYSTEM"). A host running as SYSTEM starts a client's terminals,
+  commands and launched programs as the user signed in at the PC: their
+  token (WTSQueryUserToken on the console session, which only SYSTEM may
+  ask), their environment (CreateEnvironmentBlock, with the host's
+  launch variables on top), their profile folder as the working folder,
+  on `winsta0\default`, through CreateProcessAsUserW
+  (`agent-windows/src/user_process.rs`, installed as the host's
+  `ProcessStarter` when the agent finds itself SYSTEM). A command's
+  pipes are the only handles it inherits. A terminal cannot be opened
+  that way through portable-pty (it starts its program as its caller), so
+  the host starts `windowcast-agent-windows pty-relay` as the user, which
+  opens the pseudo-terminal itself, writes its output, and reads typed
+  text and resizes as frames (`agent-windows/src/relay.rs`). With nobody
+  signed in the host refuses: "Nobody is signed in at this PC, so there
+  is nobody to run this as. Sign in at the PC, then try again." Built and
+  tested on CI with the runner's own token through the same path
+  (`agent-windows/tests/user_process.rs`); the console user's token
+  itself needs the service.
+
+The rest is not built yet: the service, following the input desktop and
+Desktop Duplication cannot be checked in CI as it is (the runner is not
+a SYSTEM service in an interactive session with a lock screen) and need
 the owner's PC; the pieces above are the plan so that the rig check has
 exact things to look for. Until then a locked PC keeps the window capture
 and posted input (above), and the private session.

@@ -6,20 +6,40 @@
 //! (`--microphone-device`: the virtual audio cable a client's microphone
 //! plays into, part of its output's name; a known cable by default)
 //! (`--listen` defaults to 0.0.0.0:47100).
+//!
+//! `windowcast-agent-windows pty-relay ...` is the terminal relay a host
+//! running as SYSTEM starts as the signed-in user (`relay`,
+//! `user_process`), not something to run by hand.
+
+#[cfg(windows)]
+fn main() {
+    use windowcast_agent_windows::relay;
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some(relay::SUBCOMMAND) {
+        let spawn = relay::parse_args(&args[1..]).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(2);
+        });
+        std::process::exit(relay::serve(&spawn, std::io::stdin(), std::io::stdout()));
+    }
+    host(args);
+}
 
 #[cfg(windows)]
 #[tokio::main]
-async fn main() {
+async fn host(args: Vec<String>) {
     use std::sync::Arc;
 
     use windowcast_agent_windows::encoder::{self, EncoderChoice};
+    use windowcast_agent_windows::user_process::{self, UserProcesses};
     use windowcast_agent_windows::{Options, WindowsSource};
     use windowcast_host::{HostConfig, DEFAULT_LISTEN};
 
     let mut listen = DEFAULT_LISTEN.to_owned();
     let mut pairing = true;
     let mut options = Options::default();
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
             args.next()
@@ -46,6 +66,13 @@ async fn main() {
             }
             other => panic!("unknown argument {other}"),
         }
+    }
+
+    // As SYSTEM (a host run by its service), nothing a client asks for
+    // may start as SYSTEM: it starts as the user signed in at the PC.
+    if user_process::running_as_system() {
+        let relay = std::env::current_exe().expect("the agent's own path");
+        windowcast_host::command::set_process_starter(Arc::new(UserProcesses::console_user(relay)));
     }
 
     let source = match WindowsSource::new(options) {
