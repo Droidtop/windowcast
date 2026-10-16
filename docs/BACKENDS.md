@@ -591,6 +591,11 @@ How Sunshine does it, and what windowcast takes:
   tested on CI with the runner's own token through the same path
   (`agent-windows/tests/user_process.rs`); the console user's token
   itself needs the service.
+- **Service mode is a separate SYSTEM host with a named-pipe controller**
+  (decided 2026-10-16, relayed by the coordinator from the owner). The
+  service is its own host process running as SYSTEM, separate from the
+  user's, and it is controlled through a named pipe.
+
 
 The rest is not built yet: the service, following the input desktop and
 Desktop Duplication cannot be checked in CI as it is (the runner is not

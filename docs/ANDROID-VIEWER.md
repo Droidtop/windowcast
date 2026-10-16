@@ -30,6 +30,11 @@ The values:
   watches it; without it, or when none matches in time, the window list is
   shown.
 
+Decided 2026-10-16 (the owner's decision, relayed by the coordinator): the
+viewer's entry point names the host. Both forms above carry the host's device
+id and address, and only a paired host opens (next section); a request never
+means "whichever host is nearby".
+
 ## Only paired hosts
 
 A request never pairs and never asks for a PIN. The viewer connects without
@@ -54,3 +59,11 @@ Each windowcast release from the one carrying this change has
 SHA-256 is in `SHA256SUMS-viewer`). Every release is signed with the same key,
 so each installs over the last; the debug viewer is signed with another key
 and does not.
+
+Decided 2026-10-16 (the owner's decision, relayed by the coordinator): viewer
+APKs are published as signed releases, by `viewer-release.yml`, with the
+release key. The key is derived from Droidtop Core; its certificate's SHA-256
+is `24cfa96c7426467cf1ca4228916acf9cd15c30e87c0eca92e8d1f102d51b3323`, and the
+public certificate is `coordination/signing/windowcast/viewer-apk.pem` in
+Droidtop/tracker. Check an APK against that fingerprint before trusting a
+copy that did not come from a release.
