@@ -5,9 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.35.0] - 2026-10-16
 
 ### Added
+- The secure-screen helper (Droidtop/tracker#467): an optional, separately installed Windows helper that runs as a scheduled SYSTEM task, only after the person approves it, and shows and controls the Winlogon desktop (UAC, lock and sign-in) for windowcast's own host. It does three things only: capture the secure desktop, enter text, mouse and a few keys (Enter, Backspace, Tab, Esc, arrows), and report whether the secure desktop is up. Managed with `windowcast-app secure-screen install|enable|disable|uninstall|status`; see docs/BACKENDS.md "Secure screen" and docs/SECURITY.md.
 - The Android viewer opens a paired host from another app (docs/ANDROID-VIEWER.md; Droidtop/tracker#552): `windowcast://connect?host=<device id>&address=<HOST:PORT>[&window=<title>]`, or the action `dev.windowcast.viewer.action.CONNECT` with the same values as extras. It never pairs: it resumes only with a host in its trust store, and only with the host the device id names; it then watches the first window whose title contains `window`, waiting up to 90 s for it to open.
 - `windowcast-viewer-<version>.apk` on each release, signed with the release key (`.github/workflows/viewer-release.yml`, run when a release is published).
 - Compatibility mode (docs/BACKENDS.md, "Third-party clients and RemoteApp"; Droidtop/tracker#457, protocol 16): a window a client streams, or one the host's owner picks, is also offered to third-party clients: an RDP desktop of the window (mstsc, FreeRDP) with a login made for it, a GameStream app for Moonlight (pairing by the PIN typed on the host), and a VNC server with a password made for it. `windowcast_host::compat` (`Compatibility`, `CompatProvider`), `CompatibilityRequest` and `Compatibility`; client-core `ClientSession::set_compatibility`, `Event::Compatibility`, `windowcast_session_set_compatibility`; the app's per-stream checkbox and host section (with Moonlight's PIN), the viewer's menu item.
@@ -15,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `windowcast_gamestream::compat`: the windows in compatibility mode as Moonlight's apps, the server started on first use.
 - `windowcast_host::command::ProcessStarter` (`set_process_starter`, `Started`, `RunningProcess`; the host's own `HostProcesses` by default): how the host starts a client's terminals, commands and launches, so a Windows host running as SYSTEM starts them as the user signed in at the PC (docs/BACKENDS.md, "The secure screen"; Droidtop/tracker#467).
 - `windowcast_agent_windows::user_process`: `UserProcesses`, which starts them with the console user's token (WTSQueryUserToken), environment block and profile folder through CreateProcessAsUserW, and refuses with a plain message when nobody is signed in; `running_as_system`. The agent installs it when it runs as SYSTEM. Terminals go through `windowcast-agent-windows pty-relay` (`relay`), started as the user, which opens the pseudo-terminal and takes typed text and resizes as frames.
+
+### Fixed
+- The Windows agent is per-monitor DPI-aware, so pointer input lands where it should on scaled displays.
+- A key is posted to the target window when Windows refuses the foreground switch, instead of going to whatever has focus.
+- The viewer keeps one instance: a request from another app reaches the open session instead of starting a second viewer.
+- Held keys, mouse buttons and touch are released when a session ends.
+- A link that would replace an open session to another host asks first.
 
 ## [0.34.1] - 2026-10-14
 
