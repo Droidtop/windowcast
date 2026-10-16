@@ -165,6 +165,7 @@ fn a_terminal_runs_through_the_relay_and_ends_with_its_code() {
         .write(b"echo terminal-%WINDOWCAST_TEST_VAR%\r\n")
         .unwrap();
     let mut seen = String::new();
+    let mut answered = false;
     let since = Instant::now();
     while !seen.contains("terminal-relayed") {
         assert!(
@@ -173,6 +174,12 @@ fn a_terminal_runs_through_the_relay_and_ends_with_its_code() {
         );
         if let Ok(text) = seen_rx.recv_timeout(Duration::from_millis(200)) {
             seen.push_str(&text);
+        }
+        // ConPTY asks where the cursor is before it shows anything and
+        // waits for the answer, which a client's terminal gives.
+        if !answered && seen.contains("\x1b[6n") {
+            process.write(b"\x1b[1;1R").unwrap();
+            answered = true;
         }
     }
     process.resize(windowcast_protocol::command::TerminalSize { cols: 70, rows: 20 });
