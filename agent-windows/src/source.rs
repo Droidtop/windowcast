@@ -160,7 +160,9 @@ fn route_secure_input(
     size: &std::sync::Mutex<(u32, u32)>,
     event: &InputEvent,
 ) {
-    use windowcast_secure_helper::operations::{MouseAction, MouseButton, Operation};
+    use windowcast_secure_helper::operations::{
+        KeyAction, MouseAction, MouseButton, Operation, SecureKey,
+    };
     let operation = match event {
         InputEvent::PointerMove { x, y, .. } => {
             let (width, height) = *size.lock().expect("secure size");
@@ -172,6 +174,7 @@ fn route_secure_input(
             Operation::SendInput {
                 text: None,
                 mouse: Some(MouseAction::Move { x, y }),
+                key: None,
             }
         }
         InputEvent::PointerButton {
@@ -191,13 +194,36 @@ fn route_secure_input(
                     button,
                     pressed: *pressed,
                 }),
+                key: None,
             }
         }
         InputEvent::Text { text } => Operation::SendInput {
             text: Some(text.clone()),
             mouse: None,
+            key: None,
         },
-        // Keys, wheel, touch and gamepads are outside the helper's owner-approved operation set.
+        InputEvent::Key { keycode, pressed } => {
+            let key = match keycode {
+                28 => SecureKey::Enter,
+                14 => SecureKey::Backspace,
+                15 => SecureKey::Tab,
+                1 => SecureKey::Escape,
+                103 => SecureKey::Up,
+                108 => SecureKey::Down,
+                105 => SecureKey::Left,
+                106 => SecureKey::Right,
+                _ => return,
+            };
+            Operation::SendInput {
+                text: None,
+                mouse: None,
+                key: Some(KeyAction {
+                    key,
+                    pressed: *pressed,
+                }),
+            }
+        }
+        // Wheel, touch and gamepads are outside the helper's owner-approved operation set.
         _ => return,
     };
     if let Err(error) = client.request(&operation) {
@@ -233,7 +259,13 @@ impl WindowSource for WindowsSource {
                 SecureScreenStatus::Enabled => {}
             }
         }
-        if status == SecureScreenStatus::Enabled {
+        let secure_desktop_active = status == SecureScreenStatus::Enabled
+            && matches!(
+                self.secure
+                    .request(&windowcast_secure_helper::operations::Operation::SecureDesktopState),
+                Ok(windowcast_secure_helper::operations::Response::SecureDesktopState(true))
+            );
+        if secure_desktop_active {
             let (width, height) = *self.secure_size.lock().expect("secure size");
             windows.push(WindowInfo {
                 id: SECURE_DESKTOP_WINDOW_ID,

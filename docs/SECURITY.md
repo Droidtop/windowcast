@@ -203,8 +203,10 @@ And: "It's not a new repo. It's part of the windowcast library, and applications
 - Requests and replies use a length-prefixed binary codec. A request is at
   most 64 KiB, text at most 16 KiB, and a frame reply at most 128 MiB;
   unknown enum variants, empty input, malformed lengths and trailing
-  payloads are refused before dispatch. `send_input` contains only Unicode
-  text, an absolute pointer move, or a left/right/middle button transition.
+  payloads are refused before dispatch. `send_input` contains exactly one
+  bounded action: Unicode text, an absolute pointer move, a left/right/middle
+  button transition, or an Enter, Backspace, Tab, Escape or arrow-key
+  transition. No modifier or other key can be represented.
 - Task Scheduler starts LocalSystem in Session 0, which cannot see the
   interactive Winlogon desktop. The task therefore duplicates only its own
   token, sets `TokenSessionId` to `WTSGetActiveConsoleSessionId`, and starts
@@ -226,10 +228,12 @@ And: "It's not a new repo. It's part of the windowcast library, and applications
   allow only administrators and SYSTEM to replace binaries, and disable
   clears the grant before attempting task removal.
 - The user's host remains unprivileged. It offers the synthetic
-  `secure-desktop` entry only while the protected grant and installed
-  helper are present, and sends that entry's screen/text/mouse traffic over
-  the authenticated local pipe. Normal windows, commands, terminals,
-  clipboard, audio and gamepads never pass through the SYSTEM broker.
+  `secure-desktop` entry only while Winlogon is the active input desktop,
+  and sends that entry's bounded screen and input traffic over the
+  authenticated local pipe. The helper refuses capture and input on the
+  normal desktop, which remains the ordinary host's responsibility. Normal
+  windows, commands, terminals, clipboard, audio and gamepads never pass
+  through the SYSTEM broker.
 
 ## Authorization is separate from authentication
 

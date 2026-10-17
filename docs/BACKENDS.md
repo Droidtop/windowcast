@@ -581,12 +581,15 @@ user's process.
   coordinates through the captured output's desktop rectangle. Persistent
   client connections serialize concurrent requests and idle clients time
   out. The desktop name from `GetUserObjectInformation(UOI_NAME)`
-  distinguishes Winlogon from Default.
-- When enabled, the Windows host lists one reserved synthetic window:
+  distinguishes Winlogon from Default. Capture and input are refused on
+  every desktop except Winlogon.
+- When enabled and Winlogon is the active input desktop, the Windows host
+  lists one reserved synthetic window:
   `secure-desktop` (`WindowId(u64::MAX)` on the numeric wire). It encodes
   helper frames through the existing encoder path and routes that entry's
-  text and mouse input to the helper. When absent or disabled, the host
-  logs a plain explanation instead of offering the entry.
+  text, mouse input, and Enter, Backspace, Tab, Escape and arrow keys to
+  the helper. Other keys and all modifiers are dropped. The normal desktop
+  remains available only through the ordinary host capture path.
 
 Unit tests cover fail-closed grant parsing, framed-message limits and the
 operation allowlist, and client/server SID, session and image verification

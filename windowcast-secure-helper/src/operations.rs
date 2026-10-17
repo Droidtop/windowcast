@@ -26,6 +26,24 @@ pub enum MouseButton {
     Middle,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SecureKey {
+    Enter,
+    Backspace,
+    Tab,
+    Escape,
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyAction {
+    pub key: SecureKey,
+    pub pressed: bool,
+}
+
 /// A request. There is intentionally no generic command or path-bearing form.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Operation {
@@ -33,6 +51,7 @@ pub enum Operation {
     SendInput {
         text: Option<String>,
         mouse: Option<MouseAction>,
+        key: Option<KeyAction>,
     },
     SecureDesktopState,
 }
@@ -53,7 +72,7 @@ pub enum Response {
 impl Operation {
     pub fn validate(&self) -> io::Result<()> {
         match self {
-            Self::SendInput { text, mouse } => {
+            Self::SendInput { text, mouse, key } => {
                 if text
                     .as_ref()
                     .is_some_and(|value| value.len() > MAX_TEXT_BYTES)
@@ -63,10 +82,14 @@ impl Operation {
                         "input text is too long",
                     ));
                 }
-                if text.is_none() && mouse.is_none() {
+                if usize::from(text.is_some())
+                    + usize::from(mouse.is_some())
+                    + usize::from(key.is_some())
+                    != 1
+                {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        "empty input request",
+                        "input request must contain exactly one action",
                     ));
                 }
             }
@@ -179,10 +202,20 @@ mod tests {
             Operation::SendInput {
                 text: Some("hello".into()),
                 mouse: None,
+                key: None,
             },
             Operation::SendInput {
                 text: None,
                 mouse: Some(MouseAction::Move { x: 10, y: 20 }),
+                key: None,
+            },
+            Operation::SendInput {
+                text: None,
+                mouse: None,
+                key: Some(KeyAction {
+                    key: SecureKey::Enter,
+                    pressed: true,
+                }),
             },
             Operation::SecureDesktopState,
         ];
@@ -198,13 +231,15 @@ mod tests {
         assert!(Operation::decode(&vec![0; MAX_REQUEST_BYTES + 1]).is_err());
         assert!(!Operation::SendInput {
             text: None,
-            mouse: None
+            mouse: None,
+            key: None,
         }
         .is_allowed());
         let long = "x".repeat(MAX_TEXT_BYTES + 1);
         assert!(!Operation::SendInput {
             text: Some(long),
-            mouse: None
+            mouse: None,
+            key: None,
         }
         .is_allowed());
     }

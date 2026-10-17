@@ -45,10 +45,11 @@ mod windows_impl {
         DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
-        KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-        MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
-        MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+        KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
+        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
+        MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+        VIRTUAL_KEY, VK_BACK, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
@@ -69,16 +70,25 @@ mod windows_impl {
     }
 
     pub(super) fn execute(operation: &Operation) -> io::Result<Response> {
+        let secure_desktop = crate::desktop::input_desktop_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("winlogon"));
+        if matches!(
+            operation,
+            Operation::CaptureFrame | Operation::SendInput { .. }
+        ) && !secure_desktop
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "capture and input are restricted to the Winlogon desktop",
+            ));
+        }
         match operation {
             Operation::CaptureFrame => capture(),
-            Operation::SendInput { text, mouse } => {
-                send_input(text.as_deref(), mouse.as_ref())?;
+            Operation::SendInput { text, mouse, key } => {
+                send_input(text.as_deref(), mouse.as_ref(), key.as_ref())?;
                 Ok(Response::InputAccepted)
             }
-            Operation::SecureDesktopState => Ok(Response::SecureDesktopState(
-                crate::desktop::input_desktop_name()
-                    .is_some_and(|name| name.eq_ignore_ascii_case("winlogon")),
-            )),
+            Operation::SecureDesktopState => Ok(Response::SecureDesktopState(secure_desktop)),
         }
     }
 
@@ -251,7 +261,11 @@ mod windows_impl {
         })
     }
 
-    fn send_input(text: Option<&str>, mouse: Option<&MouseAction>) -> io::Result<()> {
+    fn send_input(
+        text: Option<&str>,
+        mouse: Option<&MouseAction>,
+        key: Option<&crate::operations::KeyAction>,
+    ) -> io::Result<()> {
         let mut inputs = Vec::new();
         if let Some(text) = text {
             for unit in text.encode_utf16() {
@@ -276,6 +290,28 @@ mod windows_impl {
                 }
             }
         }
+        if let Some(action) = key {
+            use crate::operations::SecureKey::*;
+            let (virtual_key, extended) = match action.key {
+                Enter => (VK_RETURN, false),
+                Backspace => (VK_BACK, false),
+                Tab => (VK_TAB, false),
+                Escape => (VK_ESCAPE, false),
+                Up => (VK_UP, true),
+                Down => (VK_DOWN, true),
+                Left => (VK_LEFT, true),
+                Right => (VK_RIGHT, true),
+            };
+            let mut flags = if extended {
+                KEYEVENTF_EXTENDEDKEY
+            } else {
+                Default::default()
+            };
+            if !action.pressed {
+                flags |= KEYEVENTF_KEYUP;
+            }
+            inputs.push(virtual_keyboard(virtual_key, flags));
+        }
         // Microsoft: SendInput serially inserts only the bounded keyboard/mouse INPUT records above.
         let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
         if sent as usize == inputs.len() {
@@ -295,6 +331,24 @@ mod windows_impl {
                 ki: KEYBDINPUT {
                     wVk: Default::default(),
                     wScan: scan,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    fn virtual_keyboard(
+        key: VIRTUAL_KEY,
+        flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
+    ) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: key,
+                    wScan: 0,
                     dwFlags: flags,
                     time: 0,
                     dwExtraInfo: 0,

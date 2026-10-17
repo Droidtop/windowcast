@@ -28,8 +28,9 @@ Built:
   and empty input are refused. Tests cover the codec and allowlist.
 - `capture_frame` uses DXGI Desktop Duplication and a CPU-readable D3D11
   staging texture. `send_input` accepts bounded Unicode text, absolute
-  moves and left/right/middle button transitions and calls `SendInput`.
-  `secure_desktop_state` reports whether Winlogon is the input desktop.
+  moves, left/right/middle button transitions, and Enter, Backspace, Tab,
+  Escape and arrow-key transitions. Capture and input refuse unless
+  Winlogon is the input desktop; `secure_desktop_state` reports that state.
 - The library client API exposes install, enable, disable, uninstall,
   status and request/response operations. The existing reference app wires
   these as `windowcast-app secure-screen
