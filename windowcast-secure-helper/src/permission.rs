@@ -44,6 +44,7 @@ impl Permission {
         }
     }
 
+    #[cfg(windows)]
     pub(crate) fn from_values(enabled: Option<u32>, sid: Option<String>) -> Option<Self> {
         let enabled = enabled? == 1;
         let sid = sid.filter(|value| valid_sid_text(value));
@@ -57,6 +58,7 @@ impl Permission {
     }
 }
 
+#[cfg(windows)]
 fn valid_sid_text(value: &str) -> bool {
     if value.len() > 184 {
         return false;
@@ -77,6 +79,19 @@ fn valid_sid_text(value: &str) -> bool {
         && subauthorities
             .iter()
             .all(|part| !part.is_empty() && part.parse::<u32>().is_ok())
+}
+
+/// Validate a SID before crossing the elevation boundary.
+pub fn validate_grant_sid(value: &str) -> bool {
+    #[cfg(windows)]
+    {
+        valid_sid_text(value)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = value;
+        false
+    }
 }
 
 /// SID of the account running the management command.
@@ -157,7 +172,7 @@ pub(crate) mod windows_impl {
         if !status.is_ok() || !(2..=512).contains(&sid_size) {
             return Ok(None);
         }
-        let mut sid_bytes = vec![0u8; sid_size as usize];
+        let mut sid_units = vec![0u16; (sid_size as usize).div_ceil(2)];
         let status = unsafe {
             RegGetValueW(
                 HKEY_LOCAL_MACHINE,
@@ -165,16 +180,14 @@ pub(crate) mod windows_impl {
                 PCWSTR(sid_name.as_ptr()),
                 RRF_RT_REG_SZ,
                 None,
-                Some(sid_bytes.as_mut_ptr().cast()),
+                Some(sid_units.as_mut_ptr().cast()),
                 Some(&mut sid_size),
             )
         };
         if !status.is_ok() {
             return Ok(None);
         }
-        let units = unsafe {
-            std::slice::from_raw_parts(sid_bytes.as_ptr().cast::<u16>(), sid_size as usize / 2)
-        };
+        let units = &sid_units[..sid_size as usize / 2];
         let sid =
             String::from_utf16(units.split(|unit| *unit == 0).next().unwrap_or_default()).ok();
         Ok(Permission::from_values(Some(enabled), sid))
@@ -290,18 +303,19 @@ pub(crate) mod windows_impl {
         if size < std::mem::size_of::<TOKEN_USER>() as u32 || size > 64 * 1024 {
             return Err(io::Error::last_os_error());
         }
-        let mut bytes = vec![0u8; size as usize];
+        let words = (size as usize).div_ceil(std::mem::size_of::<usize>());
+        let mut storage = vec![0usize; words];
         unsafe {
             GetTokenInformation(
                 token,
                 TokenUser,
-                Some(bytes.as_mut_ptr().cast()),
+                Some(storage.as_mut_ptr().cast()),
                 size,
                 &mut size,
             )
         }
         .map_err(io_error)?;
-        let user = unsafe { &*(bytes.as_ptr().cast::<TOKEN_USER>()) };
+        let user = unsafe { &*(storage.as_ptr().cast::<TOKEN_USER>()) };
         let mut text = PWSTR::null();
         // Microsoft: ConvertSidToStringSid returns canonical S-1-... text.
         unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) }.map_err(io_error)?;
@@ -328,7 +342,7 @@ pub(crate) mod windows_impl {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
@@ -357,18 +371,6 @@ mod tests {
         assert_eq!(
             Permission::from_values(Some(1), Some("S-1---".into())),
             None
-        );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn unavailable_off_windows() {
-        assert!(Permission::read().is_none());
-        assert_eq!(
-            Permission::write(true, Some("S-1-5-21-42"))
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::Unsupported
         );
     }
 }

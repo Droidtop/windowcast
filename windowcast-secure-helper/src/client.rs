@@ -2,10 +2,14 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::operations::{self, Operation, Response};
 
-const TASK_NAME: &str = r"\windowcast\Secure screen helper";
+#[cfg(windows)]
+const TASK_FOLDER: &str = r"\windowcast";
+#[cfg(windows)]
+const TASK_NAME: &str = "Secure screen helper";
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecureScreenError {
@@ -32,6 +36,7 @@ pub enum SecureScreenStatus {
 #[derive(Debug, Clone)]
 pub struct Client {
     pub install_dir: PathBuf,
+    pipe: Arc<Mutex<Option<std::fs::File>>>,
 }
 
 impl Default for Client {
@@ -62,6 +67,7 @@ impl Client {
     pub fn new<P: Into<PathBuf>>(install_dir: P) -> Self {
         Self {
             install_dir: install_dir.into(),
+            pipe: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -72,6 +78,7 @@ impl Client {
     pub fn install_binary(&self, source: impl AsRef<Path>) -> Result<(), SecureScreenError> {
         self.require_windows_install_dir()?;
         std::fs::create_dir_all(&self.install_dir)?;
+        secure_install_directories(&self.install_dir)?;
         std::fs::copy(source, self.helper_path())?;
         Ok(())
     }
@@ -95,16 +102,17 @@ impl Client {
     }
 
     /// Enable after the caller has shown the consent text. Must run elevated.
-    pub fn enable(&self, user_sid: Option<&str>) -> Result<(), SecureScreenError> {
+    pub fn enable(&self, user_sid: &str) -> Result<(), SecureScreenError> {
         self.require_windows_install_dir()?;
         if !self.helper_binary_exists() {
             return Err(SecureScreenError::NotInstalled(self.helper_path()));
         }
-        let sid = match user_sid {
-            Some(sid) => sid.to_owned(),
-            None => crate::permission::current_user_sid()?,
-        };
-        crate::permission::Permission::write(true, Some(&sid))?;
+        if !crate::permission::validate_grant_sid(user_sid) {
+            return Err(SecureScreenError::OperationRefused(
+                "the unelevated granting SID is invalid".into(),
+            ));
+        }
+        crate::permission::Permission::write(true, Some(user_sid))?;
         if let Err(error) = register_task(&self.helper_path()) {
             let _ = crate::permission::Permission::write(false, None);
             return Err(error.into());
@@ -114,8 +122,11 @@ impl Client {
 
     pub fn disable(&self) -> Result<(), SecureScreenError> {
         self.require_windows_install_dir()?;
-        unregister_task()?;
         crate::permission::Permission::write(false, None)?;
+        if let Ok(mut pipe) = self.pipe.lock() {
+            *pipe = None;
+        }
+        unregister_task()?;
         // The broker polls the protected grant while idle and exits promptly.
         std::thread::sleep(std::time::Duration::from_millis(200));
         Ok(())
@@ -142,15 +153,41 @@ impl Client {
         if crate::permission::Permission::read().is_none() {
             return Err(SecureScreenError::PermissionDenied);
         }
-        let mut pipe = crate::pipe::connect()?;
-        operations::write_request(&mut pipe, operation)?;
-        match operations::read_response(&mut pipe)? {
-            Some(Response::Refused(reason)) => Err(SecureScreenError::OperationRefused(reason)),
-            Some(response) => Ok(response),
-            None => {
-                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "helper closed the pipe").into())
+        let mut slot = self
+            .pipe
+            .lock()
+            .map_err(|_| io::Error::other("secure-screen pipe lock was poisoned"))?;
+        for attempt in 0..2 {
+            if slot.is_none() {
+                *slot = Some(crate::pipe::connect(&self.helper_path())?);
+            }
+            let pipe = slot.as_mut().expect("pipe was connected");
+            let exchanged = operations::write_request(pipe, operation)
+                .and_then(|()| operations::read_response(pipe));
+            match exchanged {
+                Ok(Some(Response::Refused(reason))) => {
+                    return Err(SecureScreenError::OperationRefused(reason));
+                }
+                Ok(Some(response)) => return Ok(response),
+                Ok(None) => {
+                    *slot = None;
+                    if attempt == 1 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "helper closed the pipe",
+                        )
+                        .into());
+                    }
+                }
+                Err(error) => {
+                    *slot = None;
+                    if attempt == 1 {
+                        return Err(error.into());
+                    }
+                }
             }
         }
+        unreachable!()
     }
 
     fn require_windows_install_dir(&self) -> Result<(), SecureScreenError> {
@@ -164,6 +201,69 @@ impl Client {
         }
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn secure_install_directories(helper_dir: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows::Win32::Security::{
+        SetFileSecurityW, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR,
+    };
+
+    fn apply(path: &Path, sddl: &str) -> io::Result<()> {
+        let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(sddl.as_ptr()),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                None,
+            )
+        }
+        .map_err(|error| io::Error::other(error.to_string()))?;
+        // Microsoft: SetFileSecurity applies the protected DACL to the install directory.
+        let applied = unsafe {
+            SetFileSecurityW(
+                PCWSTR(path.as_ptr()),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                descriptor,
+            )
+        };
+        unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+        applied
+            .ok()
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    let root = helper_dir
+        .parent()
+        .ok_or_else(|| io::Error::other("install directory has no parent"))?;
+    // Users may execute installed clients, but only administrators and SYSTEM may modify them.
+    apply(
+        root,
+        "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)",
+    )?;
+    // Users can inspect and execute the helper, but only administrators and SYSTEM can replace it.
+    apply(
+        helper_dir,
+        "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)",
+    )
+}
+
+#[cfg(not(windows))]
+fn secure_install_directories(_helper_dir: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "secure screen is not available on this platform",
+    ))
 }
 
 #[cfg(windows)]
@@ -192,8 +292,15 @@ fn same_path(left: &Path, right: &Path) -> bool {
 
 #[cfg(windows)]
 fn register_task(helper: &Path) -> io::Result<()> {
-    use std::io::Write;
-    use std::process::Command;
+    use windows::core::BSTR;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::System::TaskScheduler::{
+        ITaskService, TaskScheduler, TASK_CREATE_OR_UPDATE, TASK_LOGON_SERVICE_ACCOUNT,
+    };
+    use windows::Win32::System::Variant::VARIANT;
 
     let command = xml_escape(&helper.to_string_lossy());
     let xml = format!(
@@ -206,30 +313,36 @@ fn register_task(helper: &Path) -> io::Result<()> {
   <Actions Context="System"><Exec><Command>{command}</Command></Exec></Actions>
 </Task>"#
     );
-    let path =
-        std::env::temp_dir().join(format!("windowcast-secure-task-{}.xml", std::process::id()));
-    let mut file = std::fs::File::create(&path)?;
-    // The declaration says UTF-16; the BOM lets Task Scheduler identify UTF-16LE reliably.
-    file.write_all(&[0xff, 0xfe])?;
-    for unit in xml.encode_utf16() {
-        file.write_all(&unit.to_le_bytes())?;
-    }
-    drop(file);
-    // Microsoft: schtasks /Create /XML registers this fixed SYSTEM task definition.
-    let status = Command::new("schtasks.exe")
-        .args(["/Create", "/TN", TASK_NAME, "/XML"])
-        .arg(&path)
-        .arg("/F")
-        .status();
-    let _ = std::fs::remove_file(path);
-    let status = status?;
-    if status.success() {
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    let result = (|| -> windows::core::Result<()> {
+        // Microsoft: CoCreateInstance opens the Task Scheduler 2.0 service in-process.
+        let service: ITaskService =
+            unsafe { CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER) }?;
+        let empty = VARIANT::default();
+        unsafe { service.Connect(&empty, &empty, &empty, &empty) }?;
+        let root = unsafe { service.GetFolder(&BSTR::from("\\")) }?;
+        let folder = unsafe { service.GetFolder(&BSTR::from(TASK_FOLDER)) }
+            .or_else(|_| unsafe { root.CreateFolder(&BSTR::from("windowcast"), &empty) })?;
+        let system = VARIANT::from("SYSTEM");
+        // Microsoft: ITaskFolder::RegisterTask accepts the fixed XML directly; no temporary
+        // file or command interpreter participates in registration.
+        unsafe {
+            folder.RegisterTask(
+                &BSTR::from(TASK_NAME),
+                &BSTR::from(xml),
+                TASK_CREATE_OR_UPDATE.0,
+                &system,
+                &empty,
+                TASK_LOGON_SERVICE_ACCOUNT,
+                &empty,
+            )
+        }?;
         Ok(())
-    } else {
-        Err(io::Error::other(
-            "Task Scheduler refused the secure-screen task",
-        ))
+    })();
+    if initialized {
+        unsafe { CoUninitialize() };
     }
+    result.map_err(|error| io::Error::other(error.to_string()))
 }
 
 #[cfg(not(windows))]
@@ -242,22 +355,35 @@ fn register_task(_helper: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn unregister_task() -> io::Result<()> {
-    let query = std::process::Command::new("schtasks.exe")
-        .args(["/Query", "/TN", TASK_NAME])
-        .output()?;
-    if !query.status.success() {
-        return Ok(());
+    use windows::core::BSTR;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::System::TaskScheduler::{ITaskService, TaskScheduler};
+    use windows::Win32::System::Variant::VARIANT;
+
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    let result = (|| -> windows::core::Result<()> {
+        let service: ITaskService =
+            unsafe { CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER) }?;
+        let empty = VARIANT::default();
+        unsafe { service.Connect(&empty, &empty, &empty, &empty) }?;
+        let folder = match unsafe { service.GetFolder(&BSTR::from(TASK_FOLDER)) } {
+            Ok(folder) => folder,
+            Err(error) if error.code().0 as u32 == 0x8007_0002 => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        match unsafe { folder.DeleteTask(&BSTR::from(TASK_NAME), 0) } {
+            Ok(()) => Ok(()),
+            Err(error) if error.code().0 as u32 == 0x8007_0002 => Ok(()),
+            Err(error) => Err(error),
+        }
+    })();
+    if initialized {
+        unsafe { CoUninitialize() };
     }
-    let output = std::process::Command::new("schtasks.exe")
-        .args(["/Delete", "/TN", TASK_NAME, "/F"])
-        .output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(
-            "Task Scheduler refused to remove the secure-screen task",
-        ))
-    }
+    result.map_err(|error| io::Error::other(error.to_string()))
 }
 
 #[cfg(not(windows))]
@@ -268,6 +394,7 @@ fn unregister_task() -> io::Result<()> {
     ))
 }
 
+#[cfg(windows)]
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -281,6 +408,7 @@ fn xml_escape(value: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn task_command_is_xml_escaped() {
         assert_eq!(xml_escape("a&<b>\"'"), "a&amp;&lt;b&gt;&quot;&apos;");

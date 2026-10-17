@@ -2,7 +2,9 @@
 
 use std::io;
 
-use crate::operations::{MouseAction, Operation, Response};
+#[cfg(windows)]
+use crate::operations::MouseAction;
+use crate::operations::{Operation, Response};
 
 pub fn execute(operation: &Operation) -> io::Result<Response> {
     operation.validate()?;
@@ -37,8 +39,10 @@ mod windows_impl {
         D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
         D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
     };
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, DXGI_OUTDUPL_FRAME_INFO,
+        CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication,
+        DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
@@ -50,6 +54,19 @@ mod windows_impl {
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
         SM_YVIRTUALSCREEN,
     };
+
+    thread_local! {
+        static CAPTURER: std::cell::RefCell<Option<Capturer>> = const { std::cell::RefCell::new(None) };
+    }
+
+    struct Capturer {
+        device: ID3D11Device,
+        context: ID3D11DeviceContext,
+        duplication: IDXGIOutputDuplication,
+        rect: (i32, i32, i32, i32),
+        desktop: String,
+        last: Option<Response>,
+    }
 
     pub(super) fn execute(operation: &Operation) -> io::Result<Response> {
         match operation {
@@ -65,106 +82,173 @@ mod windows_impl {
         }
     }
 
-    fn capture() -> io::Result<Response> {
-        // Microsoft: CreateDXGIFactory1 begins output enumeration for Desktop Duplication.
-        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(io_error)?;
-        let adapter: IDXGIAdapter1 = unsafe { factory.EnumAdapters1(0) }.map_err(io_error)?;
-        let output: IDXGIOutput1 = unsafe { adapter.EnumOutputs(0) }
-            .and_then(|output| output.cast())
-            .map_err(io_error)?;
+    impl Capturer {
+        fn new(desktop: String) -> io::Result<Self> {
+            // Microsoft: CreateDXGIFactory1 begins output enumeration for Desktop Duplication.
+            let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(io_error)?;
+            let adapter: IDXGIAdapter1 = unsafe { factory.EnumAdapters1(0) }.map_err(io_error)?;
+            let output = unsafe { adapter.EnumOutputs(0) }.map_err(io_error)?;
+            let output_desc = unsafe { output.GetDesc() }.map_err(io_error)?;
+            let output: IDXGIOutput1 = output.cast().map_err(io_error)?;
 
-        let mut device: Option<ID3D11Device> = None;
-        let mut context: Option<ID3D11DeviceContext> = None;
-        // Microsoft: D3D11CreateDevice creates the device used by DuplicateOutput.
-        unsafe {
-            D3D11CreateDevice(
-                &adapter,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_FLAG(0),
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        }
-        .map_err(io_error)?;
-        let device = device.ok_or_else(|| io::Error::other("D3D11 returned no device"))?;
-        let context = context.ok_or_else(|| io::Error::other("D3D11 returned no context"))?;
-        // Microsoft: IDXGIOutput1::DuplicateOutput exposes the current desktop image.
-        let duplication = unsafe { output.DuplicateOutput(&device) }.map_err(io_error)?;
-        let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
-        let mut resource = None;
-        // Microsoft: AcquireNextFrame waits briefly for a complete desktop frame.
-        unsafe { duplication.AcquireNextFrame(1_000, &mut info, &mut resource) }
+            let mut device: Option<ID3D11Device> = None;
+            let mut context: Option<ID3D11DeviceContext> = None;
+            // Microsoft: D3D11CreateDevice creates the device used by DuplicateOutput.
+            unsafe {
+                D3D11CreateDevice(
+                    &adapter,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    HMODULE::default(),
+                    D3D11_CREATE_DEVICE_FLAG(0),
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut context),
+                )
+            }
             .map_err(io_error)?;
-        let result = (|| {
-            let texture: ID3D11Texture2D = resource
-                .ok_or_else(|| io::Error::other("Desktop Duplication returned no texture"))?
-                .cast()
-                .map_err(io_error)?;
-            let mut desc = D3D11_TEXTURE2D_DESC::default();
-            unsafe { texture.GetDesc(&mut desc) };
-            if desc.Width == 0 || desc.Height == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "empty desktop frame",
-                ));
-            }
-            let mut staging_desc = desc;
-            staging_desc.Usage = D3D11_USAGE_STAGING;
-            staging_desc.BindFlags = 0;
-            staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
-            staging_desc.MiscFlags = 0;
-            let mut staging = None;
-            // Microsoft: CreateTexture2D creates a CPU-readable staging texture.
-            unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) }
-                .map_err(io_error)?;
-            let staging =
-                staging.ok_or_else(|| io::Error::other("D3D11 returned no staging texture"))?;
-            // Microsoft: CopyResource copies the GPU desktop texture to staging memory.
-            unsafe { context.CopyResource(&staging, &texture) };
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            // Microsoft: Map(D3D11_MAP_READ) exposes staging rows to the CPU.
-            unsafe { context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
-                .map_err(io_error)?;
-            let stride = desc
-                .Width
-                .checked_mul(4)
-                .ok_or_else(|| io::Error::other("frame too large"))?;
-            let length = (stride as usize)
-                .checked_mul(desc.Height as usize)
-                .ok_or_else(|| io::Error::other("frame too large"))?;
-            if length > crate::operations::MAX_RESPONSE_BYTES - 1024 {
-                unsafe { context.Unmap(&staging, 0) };
-                return Err(io::Error::other("desktop frame exceeds protocol limit"));
-            }
-            let mut bgra = vec![0u8; length];
-            for row in 0..desc.Height as usize {
-                let source = unsafe {
-                    std::slice::from_raw_parts(
-                        mapped
-                            .pData
-                            .cast::<u8>()
-                            .add(row * mapped.RowPitch as usize),
-                        stride as usize,
-                    )
-                };
-                bgra[row * stride as usize..(row + 1) * stride as usize].copy_from_slice(source);
-            }
-            // Microsoft: Unmap ends CPU access to the staging texture.
-            unsafe { context.Unmap(&staging, 0) };
-            Ok(Response::Frame {
-                width: desc.Width,
-                height: desc.Height,
-                stride,
-                bgra,
+            let device = device.ok_or_else(|| io::Error::other("D3D11 returned no device"))?;
+            let context = context.ok_or_else(|| io::Error::other("D3D11 returned no context"))?;
+            // Microsoft: IDXGIOutput1::DuplicateOutput exposes the current desktop image.
+            let duplication = unsafe { output.DuplicateOutput(&device) }.map_err(io_error)?;
+            let rect = output_desc.DesktopCoordinates;
+            Ok(Self {
+                device,
+                context,
+                duplication,
+                rect: (rect.left, rect.top, rect.right, rect.bottom),
+                desktop,
+                last: None,
             })
-        })();
-        // Microsoft: every successful AcquireNextFrame is paired with ReleaseFrame.
-        unsafe { duplication.ReleaseFrame() }.map_err(io_error)?;
-        result
+        }
+
+        fn frame(&mut self) -> io::Result<Response> {
+            let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut resource = None;
+            // Microsoft: AcquireNextFrame waits briefly for a complete desktop frame.
+            match unsafe {
+                self.duplication
+                    .AcquireNextFrame(1_000, &mut info, &mut resource)
+            } {
+                Ok(()) => {}
+                Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                    return self.last.clone().ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::TimedOut, "no desktop frame")
+                    });
+                }
+                Err(error) => return Err(io_error(error)),
+            }
+            let result = (|| {
+                let texture: ID3D11Texture2D = resource
+                    .ok_or_else(|| io::Error::other("Desktop Duplication returned no texture"))?
+                    .cast()
+                    .map_err(io_error)?;
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                unsafe { texture.GetDesc(&mut desc) };
+                if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Desktop Duplication frame is not B8G8R8A8_UNORM",
+                    ));
+                }
+                if desc.Width == 0 || desc.Height == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "empty desktop frame",
+                    ));
+                }
+                let mut staging_desc = desc;
+                staging_desc.Usage = D3D11_USAGE_STAGING;
+                staging_desc.BindFlags = 0;
+                staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+                staging_desc.MiscFlags = 0;
+                let mut staging = None;
+                // Microsoft: CreateTexture2D creates a CPU-readable staging texture.
+                unsafe {
+                    self.device
+                        .CreateTexture2D(&staging_desc, None, Some(&mut staging))
+                }
+                .map_err(io_error)?;
+                let staging =
+                    staging.ok_or_else(|| io::Error::other("D3D11 returned no staging texture"))?;
+                // Microsoft: CopyResource copies the GPU desktop texture to staging memory.
+                unsafe { self.context.CopyResource(&staging, &texture) };
+                let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                // Microsoft: Map(D3D11_MAP_READ) exposes staging rows to the CPU.
+                unsafe {
+                    self.context
+                        .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                }
+                .map_err(io_error)?;
+                let stride = desc
+                    .Width
+                    .checked_mul(4)
+                    .ok_or_else(|| io::Error::other("frame too large"))?;
+                if mapped.pData.is_null() || mapped.RowPitch < stride {
+                    unsafe { self.context.Unmap(&staging, 0) };
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Desktop Duplication returned an invalid mapped row",
+                    ));
+                }
+                let length = (stride as usize)
+                    .checked_mul(desc.Height as usize)
+                    .ok_or_else(|| io::Error::other("frame too large"))?;
+                if length > crate::operations::MAX_RESPONSE_BYTES - 1024 {
+                    unsafe { self.context.Unmap(&staging, 0) };
+                    return Err(io::Error::other("desktop frame exceeds protocol limit"));
+                }
+                let mut bgra = vec![0u8; length];
+                for row in 0..desc.Height as usize {
+                    let source = unsafe {
+                        std::slice::from_raw_parts(
+                            mapped
+                                .pData
+                                .cast::<u8>()
+                                .add(row * mapped.RowPitch as usize),
+                            stride as usize,
+                        )
+                    };
+                    bgra[row * stride as usize..(row + 1) * stride as usize]
+                        .copy_from_slice(source);
+                }
+                // Microsoft: Unmap ends CPU access to the staging texture.
+                unsafe { self.context.Unmap(&staging, 0) };
+                Ok(Response::Frame {
+                    width: desc.Width,
+                    height: desc.Height,
+                    stride,
+                    bgra,
+                })
+            })();
+            // Microsoft: every successful AcquireNextFrame is paired with ReleaseFrame.
+            unsafe { self.duplication.ReleaseFrame() }.map_err(io_error)?;
+            if let Ok(frame) = &result {
+                self.last = Some(frame.clone());
+            }
+            result
+        }
+    }
+
+    fn capture() -> io::Result<Response> {
+        let desktop = crate::desktop::input_desktop_name()
+            .ok_or_else(|| io::Error::other("input desktop name is unavailable"))?;
+        CAPTURER.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot
+                .as_ref()
+                .is_none_or(|capture| capture.desktop != desktop)
+            {
+                *slot = Some(Capturer::new(desktop.clone())?);
+            }
+            let result = slot.as_mut().expect("capturer was created").frame();
+            if result.is_err() {
+                *slot = Some(Capturer::new(desktop)?);
+                return slot.as_mut().expect("capturer was recreated").frame();
+            }
+            result
+        })
     }
 
     fn send_input(text: Option<&str>, mouse: Option<&MouseAction>) -> io::Result<()> {
@@ -177,7 +261,7 @@ mod windows_impl {
         }
         if let Some(action) = mouse {
             match action {
-                MouseAction::Move { x, y } => inputs.push(absolute_mouse(*x, *y)),
+                MouseAction::Move { x, y } => inputs.push(absolute_mouse(*x, *y)?),
                 MouseAction::Button { button, pressed } => {
                     use crate::operations::MouseButton::*;
                     let flags = match (button, pressed) {
@@ -219,7 +303,18 @@ mod windows_impl {
         }
     }
 
-    fn absolute_mouse(x: i32, y: i32) -> INPUT {
+    fn absolute_mouse(x: i32, y: i32) -> io::Result<INPUT> {
+        let output = CAPTURER.with(|slot| slot.borrow().as_ref().map(|capture| capture.rect));
+        let (output_left, output_top, output_right, output_bottom) = output.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                "capture an output before sending pointer coordinates",
+            )
+        })?;
+        let output_width = (output_right - output_left).max(1);
+        let output_height = (output_bottom - output_top).max(1);
+        let x = output_left + x.clamp(0, output_width - 1);
+        let y = output_top + y.clamp(0, output_height - 1);
         let (left, top, width, height) = unsafe {
             (
                 GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -232,11 +327,11 @@ mod windows_impl {
             ((x.clamp(left, left + width - 1) - left) as i64 * 65_535 / (width - 1) as i64) as i32;
         let dy =
             ((y.clamp(top, top + height - 1) - top) as i64 * 65_535 / (height - 1) as i64) as i32;
-        mouse_input(
+        Ok(mouse_input(
             dx,
             dy,
             MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-        )
+        ))
     }
 
     fn mouse_input(

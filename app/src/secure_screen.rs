@@ -25,7 +25,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
         ),
         "install" => {
-            if elevate_if_needed("install")? {
+            if elevate_if_needed("install", None)? {
                 return Ok(());
             }
             let source = std::env::current_exe()?.with_file_name("windowcast-secure-helper.exe");
@@ -36,25 +36,41 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         "enable" => {
             let confirmed = args.iter().any(|arg| arg == "--confirmed");
-            if !confirmed && !confirm_enable()? {
-                println!("Secure screen was not enabled.");
-                return Ok(());
-            }
-            if elevate_if_needed("enable")? {
-                return Ok(());
-            }
-            client.enable(None)?;
+            let supplied_sid = args
+                .windows(2)
+                .find(|pair| pair[0] == "--grant-sid")
+                .map(|pair| pair[1].as_str());
+            let sid = if confirmed {
+                supplied_sid.ok_or("the elevated enable command is missing its granting SID")?
+            } else {
+                if windowcast_secure_helper::permission::is_elevated()? {
+                    return Err("start enable without elevation so windowcast can bind consent to your account SID".into());
+                }
+                let sid = windowcast_secure_helper::permission::current_user_sid()?;
+                if !windowcast_secure_helper::permission::validate_grant_sid(&sid) {
+                    return Err("Windows returned an invalid account SID".into());
+                }
+                if !confirm_enable(&sid)? {
+                    println!("Secure screen was not enabled.");
+                    return Ok(());
+                }
+                if elevate_if_needed("enable", Some(&sid))? {
+                    return Ok(());
+                }
+                unreachable!("enable from an unelevated process must relaunch")
+            };
+            client.enable(sid)?;
             println!("Secure screen is enabled. Disable it at any time in the app or with `windowcast-app secure-screen disable`.");
         }
         "disable" => {
-            if elevate_if_needed("disable")? {
+            if elevate_if_needed("disable", None)? {
                 return Ok(());
             }
             client.disable()?;
             println!("Secure screen is disabled and its SYSTEM task and permission were removed.");
         }
         "uninstall" => {
-            if elevate_if_needed("uninstall")? {
+            if elevate_if_needed("uninstall", None)? {
                 return Ok(());
             }
             client.uninstall()?;
@@ -70,9 +86,10 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn confirm_enable() -> io::Result<bool> {
+fn confirm_enable(grant_sid: &str) -> io::Result<bool> {
     println!("Service mode lets windowcast show and control Windows security screens, including UAC prompts and the lock/sign-in screen.");
     println!("A small fixed-purpose helper will run as SYSTEM. It accepts only screen capture, text/mouse input, and a secure-desktop state query from installed windowcast programs owned by your account.");
+    println!("This permission will be bound to Windows account SID: {grant_sid}");
     print!("Enable service mode? [y/N] ");
     io::stdout().flush()?;
     let mut answer = String::new();
@@ -85,7 +102,7 @@ fn confirm_enable() -> io::Result<bool> {
 
 /// `true` means the elevated copy was launched and this copy is done.
 #[cfg(windows)]
-fn elevate_if_needed(action: &str) -> io::Result<bool> {
+fn elevate_if_needed(action: &str, grant_sid: Option<&str>) -> io::Result<bool> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::ShellExecuteW;
@@ -102,7 +119,16 @@ fn elevate_if_needed(action: &str) -> io::Result<bool> {
         .collect();
     let verb: Vec<u16> = "runas".encode_utf16().chain(std::iter::once(0)).collect();
     let parameters = if action == "enable" {
-        "secure-screen enable --confirmed".to_owned()
+        let sid = grant_sid.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "granting SID is missing")
+        })?;
+        if !windowcast_secure_helper::permission::validate_grant_sid(sid) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "granting SID is invalid",
+            ));
+        }
+        format!("secure-screen enable --confirmed --grant-sid {sid}")
     } else {
         format!("secure-screen {action}")
     };
@@ -131,7 +157,7 @@ fn elevate_if_needed(action: &str) -> io::Result<bool> {
 }
 
 #[cfg(not(windows))]
-fn elevate_if_needed(_action: &str) -> io::Result<bool> {
+fn elevate_if_needed(_action: &str, _grant_sid: Option<&str>) -> io::Result<bool> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "secure screen is not available on this platform",

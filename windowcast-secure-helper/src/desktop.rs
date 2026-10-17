@@ -29,6 +29,35 @@ pub fn running_in_active_console_session() -> bool {
     }
 }
 
+/// SID logged into the physical console, or `None` when the console has no user token.
+pub fn active_console_user_sid() -> std::io::Result<Option<String>> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{CloseHandle, ERROR_NO_TOKEN, HANDLE};
+        use windows::Win32::System::RemoteDesktop::WTSQueryUserToken;
+
+        let session = active_console_session();
+        if session == u32::MAX {
+            return Ok(None);
+        }
+        let mut token = HANDLE::default();
+        // Microsoft: WTSQueryUserToken returns the primary token for the active console user.
+        match unsafe { WTSQueryUserToken(session, &mut token) } {
+            Ok(()) => {
+                let sid = crate::permission::windows_impl::token_sid(token);
+                unsafe { CloseHandle(token) }.ok();
+                sid.map(Some)
+            }
+            Err(error) if error.code().0 as u32 == ERROR_NO_TOKEN.0 => Ok(None),
+            Err(error) => Err(io_error(error)),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(None)
+    }
+}
+
 /// Move the fixed helper executable, with the same SYSTEM token, from Task
 /// Scheduler's Session 0 into the physical console session.
 pub fn launch_in_active_console_session() -> std::io::Result<()> {
@@ -43,8 +72,8 @@ pub fn launch_in_active_console_session() -> std::io::Result<()> {
             TokenSessionId, TOKEN_ALL_ACCESS, TOKEN_QUERY,
         };
         use windows::Win32::System::Threading::{
-            CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, PROCESS_INFORMATION,
-            STARTUPINFOW,
+            CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, CREATE_NO_WINDOW,
+            PROCESS_INFORMATION, STARTUPINFOW,
         };
 
         let session = active_console_session();
@@ -121,7 +150,7 @@ pub fn launch_in_active_console_session() -> std::io::Result<()> {
                 None,
                 None,
                 false,
-                Default::default(),
+                CREATE_NO_WINDOW,
                 None,
                 None,
                 &startup,
@@ -161,18 +190,15 @@ pub fn sync_to_input_desktop() -> bool {
     {
         use windows::Win32::System::StationsAndDesktops::{
             CloseDesktop, OpenInputDesktop, SetThreadDesktop, DESKTOP_ACCESS_FLAGS,
-            DESKTOP_READOBJECTS, DESKTOP_SWITCHDESKTOP, DESKTOP_WRITEOBJECTS,
-            DF_ALLOWOTHERACCOUNTHOOK,
+            DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, DESKTOP_WRITEOBJECTS,
         };
-        // Microsoft: OpenInputDesktop opens the desktop receiving user input. The flag permits
-        // hooks owned by accounts other than the SYSTEM helper.
+        // Microsoft: OpenInputDesktop opens the desktop receiving user input without allowing
+        // cross-account hooks or requesting desktop-switch permission.
         let desktop = unsafe {
             OpenInputDesktop(
-                DF_ALLOWOTHERACCOUNTHOOK,
+                DESKTOP_CONTROL_FLAGS(0),
                 false,
-                DESKTOP_ACCESS_FLAGS(
-                    DESKTOP_READOBJECTS.0 | DESKTOP_WRITEOBJECTS.0 | DESKTOP_SWITCHDESKTOP.0,
-                ),
+                DESKTOP_ACCESS_FLAGS(DESKTOP_READOBJECTS.0 | DESKTOP_WRITEOBJECTS.0),
             )
         };
         let Ok(desktop) = desktop else { return false };
@@ -211,20 +237,18 @@ pub fn input_desktop_name() -> Option<String> {
             if !(2..=1024).contains(&needed) {
                 return None;
             }
-            let mut bytes = vec![0u8; needed as usize];
+            let mut units = vec![0u16; (needed as usize).div_ceil(2)];
             unsafe {
                 GetUserObjectInformationW(
                     HANDLE(desktop.0),
                     UOI_NAME,
-                    Some(bytes.as_mut_ptr().cast()),
+                    Some(units.as_mut_ptr().cast()),
                     needed,
                     Some(&mut needed),
                 )
             }
             .ok()?;
-            let units = unsafe {
-                std::slice::from_raw_parts(bytes.as_ptr().cast::<u16>(), needed as usize / 2)
-            };
+            units.truncate(needed as usize / 2);
             String::from_utf16(units.split(|unit| *unit == 0).next().unwrap_or_default()).ok()
         })
     }

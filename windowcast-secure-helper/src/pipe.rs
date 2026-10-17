@@ -9,6 +9,7 @@ pub const PIPE_NAME: &str = r"\\.\pipe\windowcast-secure";
 pub struct ClientIdentity {
     pub sid: String,
     pub image: PathBuf,
+    pub session_id: u32,
 }
 
 pub trait ClientInspector {
@@ -20,35 +21,47 @@ pub fn verify_client_with(
     process_id: u32,
     grant_sid: &str,
     install_root: &Path,
+    session_id: u32,
 ) -> bool {
     inspector.inspect(process_id).is_ok_and(|identity| {
-        identity.sid.eq_ignore_ascii_case(grant_sid) && allowed_image(&identity.image, install_root)
+        identity.sid.eq_ignore_ascii_case(grant_sid)
+            && identity.session_id == session_id
+            && allowed_client_image(&identity.image, install_root)
     })
 }
 
-fn allowed_image(image: &Path, install_root: &Path) -> bool {
-    let Some(name) = image.file_name().and_then(|name| name.to_str()) else {
+pub fn verify_server_with(
+    inspector: &impl ClientInspector,
+    process_id: u32,
+    helper_path: &Path,
+) -> bool {
+    inspector.inspect(process_id).is_ok_and(|identity| {
+        identity.sid.eq_ignore_ascii_case("S-1-5-18") && same_path(&identity.image, helper_path)
+    })
+}
+
+fn allowed_client_image(image: &Path, install_root: &Path) -> bool {
+    let normalized = image.to_string_lossy().replace('/', "\\");
+    let Some((parent, name)) = normalized.rsplit_once('\\') else {
         return false;
     };
     let allowed_name = name.eq_ignore_ascii_case("windowcast-agent-windows.exe")
         || name.eq_ignore_ascii_case("windowcast-app.exe");
-    allowed_name
-        && image
-            .parent()
-            .is_some_and(|parent| same_path(parent, install_root))
+    allowed_name && same_path(Path::new(parent), install_root)
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
-    left.to_string_lossy()
-        .trim_end_matches(['\\', '/'])
-        .eq_ignore_ascii_case(right.to_string_lossy().trim_end_matches(['\\', '/']))
+    let left = left.to_string_lossy().replace('/', "\\");
+    let right = right.to_string_lossy().replace('/', "\\");
+    left.trim_end_matches('\\')
+        .eq_ignore_ascii_case(right.trim_end_matches('\\'))
 }
 
 #[cfg(windows)]
-pub use windows_impl::{connect, PipeServer, WindowsClientInspector};
+pub use windows_impl::{connect, request_ready, PipeServer, WindowsClientInspector};
 
 #[cfg(not(windows))]
-pub fn connect() -> io::Result<std::fs::File> {
+pub fn connect(_helper_path: &Path) -> io::Result<std::fs::File> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "secure screen is not available on this platform",
@@ -59,6 +72,7 @@ pub fn connect() -> io::Result<std::fs::File> {
 mod windows_impl {
     use super::*;
     use std::fs::{File, OpenOptions};
+    use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::{FromRawHandle, RawHandle};
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::{
@@ -68,12 +82,16 @@ mod windows_impl {
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     };
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY};
-    use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION,
+        SECURITY_SQOS_PRESENT,
+    };
     use windows::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-        SetNamedPipeHandleState, PIPE_NOWAIT, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-        PIPE_TYPE_BYTE, PIPE_WAIT,
+        GetNamedPipeServerProcessId, PeekNamedPipe, SetNamedPipeHandleState, PIPE_NOWAIT,
+        PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
     };
+    use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
     use windows::Win32::System::Threading::{
         OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
         PROCESS_QUERY_LIMITED_INFORMATION,
@@ -85,8 +103,9 @@ mod windows_impl {
 
     impl PipeServer {
         pub fn create(grant_sid: &str) -> io::Result<Self> {
-            // Protected DACL: full access for SYSTEM; read/write for exactly the grant SID.
-            let sddl = format!("D:P(A;;GA;;;SY)(A;;GRGW;;;{grant_sid})");
+            // Protected DACL: SYSTEM full access; the grant SID gets generic read plus only
+            // FILE_WRITE_DATA (0x2), rather than generic write.
+            let sddl = format!("D:P(A;;GA;;;SY)(A;;0x80000002;;;{grant_sid})");
             let sddl = wide(&sddl);
             let mut descriptor = PSECURITY_DESCRIPTOR::default();
             // Microsoft: ConvertStringSecurityDescriptor... builds a self-relative descriptor from SDDL.
@@ -165,8 +184,50 @@ mod windows_impl {
 
     use std::os::windows::io::AsRawHandle;
 
-    pub fn connect() -> io::Result<File> {
-        OpenOptions::new().read(true).write(true).open(PIPE_NAME)
+    pub fn connect(helper_path: &Path) -> io::Result<File> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags((SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION).0)
+            .open(PIPE_NAME)?;
+        let mut process_id = 0;
+        // Microsoft: GetNamedPipeServerProcessId identifies the broker behind this handle.
+        unsafe { GetNamedPipeServerProcessId(HANDLE(file.as_raw_handle()), &mut process_id) }
+            .map_err(io_error)?;
+        if !verify_server_with(&WindowsClientInspector, process_id, helper_path) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "named-pipe server is not the installed LocalSystem helper",
+            ));
+        }
+        Ok(file)
+    }
+
+    pub fn request_ready(file: &File) -> io::Result<bool> {
+        let mut prefix = [0u8; 4];
+        let mut prefix_read = 0;
+        let mut available = 0;
+        // Microsoft: PeekNamedPipe checks for an entire framed request without consuming it or
+        // allowing a client with a partial payload to block the broker forever.
+        unsafe {
+            PeekNamedPipe(
+                HANDLE(file.as_raw_handle()),
+                Some(prefix.as_mut_ptr().cast()),
+                prefix.len() as u32,
+                Some(&mut prefix_read),
+                Some(&mut available),
+                None,
+            )
+        }
+        .map_err(io_error)?;
+        if prefix_read < 4 {
+            return Ok(false);
+        }
+        let payload = u32::from_le_bytes(prefix) as usize;
+        if payload == 0 || payload > crate::operations::MAX_REQUEST_BYTES {
+            return Ok(true);
+        }
+        Ok(available as usize >= 4 + payload)
     }
 
     pub struct WindowsClientInspector;
@@ -177,13 +238,13 @@ mod windows_impl {
             let process =
                 unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }
                     .map_err(io_error)?;
-            let result = inspect_process(process);
+            let result = inspect_process(process, process_id);
             unsafe { CloseHandle(process) }.ok();
             result
         }
     }
 
-    fn inspect_process(process: HANDLE) -> io::Result<ClientIdentity> {
+    fn inspect_process(process: HANDLE, process_id: u32) -> io::Result<ClientIdentity> {
         let mut token = HANDLE::default();
         // Microsoft: OpenProcessToken opens only enough access to read TokenUser.
         unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.map_err(io_error)?;
@@ -204,9 +265,13 @@ mod windows_impl {
         }
         .map_err(io_error)?;
         path.truncate(length as usize);
+        let mut session_id = u32::MAX;
+        // Microsoft: ProcessIdToSessionId binds the peer to the console session being served.
+        unsafe { ProcessIdToSessionId(process_id, &mut session_id) }.map_err(io_error)?;
         Ok(ClientIdentity {
             sid,
             image: PathBuf::from(String::from_utf16_lossy(&path)),
+            session_id,
         })
     }
 
@@ -241,6 +306,7 @@ mod tests {
             Fake(Ok(ClientIdentity {
                 sid: sid.into(),
                 image: path.into(),
+                session_id: 7,
             }))
         };
         assert!(verify_client_with(
@@ -250,7 +316,8 @@ mod tests {
             ),
             4,
             "S-1-5-21-7",
-            root
+            root,
+            7,
         ));
         assert!(!verify_client_with(
             &identity(
@@ -259,19 +326,32 @@ mod tests {
             ),
             4,
             "S-1-5-21-7",
-            root
+            root,
+            7,
         ));
         assert!(!verify_client_with(
             &identity("S-1-5-21-7", r"C:\Users\me\windowcast-app.exe"),
             4,
             "S-1-5-21-7",
-            root
+            root,
+            7,
         ));
         assert!(!verify_client_with(
             &identity("S-1-5-21-7", r"C:\Program Files\windowcast\other.exe"),
             4,
             "S-1-5-21-7",
-            root
+            root,
+            7,
+        ));
+        assert!(!verify_client_with(
+            &identity(
+                "S-1-5-21-7",
+                r"C:\Program Files\windowcast\windowcast-app.exe"
+            ),
+            4,
+            "S-1-5-21-7",
+            root,
+            8,
         ));
     }
 
@@ -285,7 +365,32 @@ mod tests {
             &fake,
             4,
             "S-1-5-21-7",
-            Path::new(r"C:\Program Files\windowcast")
+            Path::new(r"C:\Program Files\windowcast"),
+            7,
         ));
+    }
+
+    #[test]
+    fn server_needs_system_and_the_exact_helper_path() {
+        let expected =
+            Path::new(r"C:\Program Files\windowcast\secure-helper\windowcast-secure-helper.exe");
+        let good = Fake(Ok(ClientIdentity {
+            sid: "S-1-5-18".into(),
+            image: expected.into(),
+            session_id: 7,
+        }));
+        assert!(verify_server_with(&good, 4, expected));
+        let wrong_user = Fake(Ok(ClientIdentity {
+            sid: "S-1-5-21-7".into(),
+            image: expected.into(),
+            session_id: 7,
+        }));
+        assert!(!verify_server_with(&wrong_user, 4, expected));
+        let wrong_path = Fake(Ok(ClientIdentity {
+            sid: "S-1-5-18".into(),
+            image: r"C:\Users\me\windowcast-secure-helper.exe".into(),
+            session_id: 7,
+        }));
+        assert!(!verify_server_with(&wrong_path, 4, expected));
     }
 }
