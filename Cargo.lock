@@ -7416,6 +7416,7 @@ dependencies = [
  "windowcast-protocol",
  "windowcast-pty",
  "windowcast-rdp",
+ "windowcast-secure-helper",
  "windows 0.62.2",
  "windows-core 0.62.2",
 ]
@@ -7438,6 +7439,7 @@ dependencies = [
  "windowcast-identity",
  "windowcast-protocol",
  "windowcast-rdp",
+ "windowcast-secure-helper",
  "windowcast-terminal",
  "windowcast-transport",
  "windowcast-vnc",

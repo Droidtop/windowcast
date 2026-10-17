@@ -17,6 +17,7 @@
 //! [--listen ADDR:PORT] [--no-window] [--connect ADDR [--pin PIN]
 //! [--stream APP_OR_TITLE] [--fullscreen] [--display N] [--codec h264|h265|av1]]`
 //! or `windowcast-app --open-pairing [--data-dir DIR]`
+//! or `windowcast-app secure-screen install|enable|disable|uninstall|status`
 //!
 //! `--no-window` runs a host without its window (the PIN is printed).
 //! `--open-pairing` asks the host already running on the data directory
@@ -30,6 +31,7 @@ mod config;
 mod gui;
 mod host;
 mod platform;
+mod secure_screen;
 mod terminal;
 
 use std::path::PathBuf;
@@ -96,6 +98,14 @@ fn parse() -> Args {
 }
 
 fn main() {
+    let command: Vec<String> = std::env::args().skip(1).collect();
+    if command.first().map(String::as_str) == Some("secure-screen") {
+        if let Err(error) = secure_screen::run(&command[1..]) {
+            eprintln!("windowcast-app: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     platform::init();
     let args = parse();
     let data_dir = args
