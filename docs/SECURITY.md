@@ -194,7 +194,11 @@ And: "It's not a new repo. It's part of the windowcast library, and applications
   broker or an allowed client; runtime checks do not mistake a signature
   for authorization.
 - The permission gate (`HKLM\SOFTWARE\windowcast\SecureScreen`) requires administrator elevation to write. The helper re-reads it before every operation; if absent or 0, it refuses, logs the refusal, and exits.
-- The named pipe (`\\.\pipe\windowcast-secure`) uses an explicit DACL (SYSTEM + interactive user whose SID matches the grant) and verifies each client's token SID and image path.
+- The named pipe (`\\.\pipe\windowcast-secure`) uses an explicit DACL:
+  SYSTEM plus generic-read/FILE_WRITE_DATA for the granting SID. It checks
+  each client's token SID, active-console session and image path. The
+  client independently verifies the server is LocalSystem and exactly the
+  installed helper before sending a request.
 - Operations are a closed set: `capture_frame`, `send_input`, and `secure_desktop_state`. No other commands, file access, or code loading is permitted.
 - Requests and replies use a length-prefixed binary codec. A request is at
   most 64 KiB, text at most 16 KiB, and a frame reply at most 128 MiB;
@@ -206,13 +210,21 @@ And: "It's not a new repo. It's part of the windowcast library, and applications
   token, sets `TokenSessionId` to `WTSGetActiveConsoleSessionId`, and starts
   only the installed helper in that console session. The broker verifies
   both LocalSystem (`S-1-5-18`) and the active session before opening its
-  pipe and exits if the console session or protected grant changes.
+  pipe. It serves only the console owned by the granting SID (or a console
+  with no signed-in user) and exits if the session or protected grant
+  changes.
 - The pipe DACL is not the sole authorization check. For every connection,
   `GetNamedPipeClientProcessId`, `OpenProcessToken(TokenUser)`, and
-  `QueryFullProcessImageNameW` must identify the granting SID and exactly
+  `QueryFullProcessImageNameW` must identify the granting SID, the active
+  console session, and exactly
   `%ProgramFiles%\windowcast\windowcast-agent-windows.exe` or
   `windowcast-app.exe`. The Program Files parent is administrator-owned;
   a same-named executable elsewhere is refused.
+- Enable captures, validates and displays the account SID before UAC
+  elevation, then passes it to the elevated process. Task registration is
+  direct through COM and creates no user-Temp XML. Install-directory DACLs
+  allow only administrators and SYSTEM to replace binaries, and disable
+  clears the grant before attempting task removal.
 - The user's host remains unprivileged. It offers the synthetic
   `secure-desktop` entry only while the protected grant and installed
   helper are present, and sends that entry's screen/text/mouse traffic over

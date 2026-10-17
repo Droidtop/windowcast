@@ -553,25 +553,35 @@ user's process.
   mode, asks for confirmation, elevates through UAC, records the granting
   account's SID in `HKLM\SOFTWARE\windowcast\SecureScreen`, and registers
   a fixed Task Scheduler definition for SYSTEM at boot, console connect
-  and unlock. `disable` removes the task and grant; `uninstall` also
-  removes the binary. None of these operations is run by a normal host.
+  and unlock through the Task Scheduler COM API, without a temporary XML
+  file. The account SID is captured and displayed before elevation, then
+  passed to the elevated command. `disable` clears the grant before task
+  removal; `uninstall` also removes the binary. None of these operations is
+  run by a normal host. Protected install DACLs let users read and execute
+  clients while only administrators and SYSTEM can replace them.
 - Task Scheduler begins SYSTEM tasks in Session 0. The fixed launcher
   duplicates only its own SYSTEM token, changes that token's session ID to
   `WTSGetActiveConsoleSessionId`, and starts only the installed helper on
   `winsta0\default`. The broker refuses to run as any account but
-  LocalSystem or outside the active console session.
+  LocalSystem or outside the active console session, and serves only when
+  that console belongs to the granting SID or has no signed-in user.
 - Before every operation the broker re-reads the grant. Its named pipe
   `\\.\pipe\windowcast-secure` has a protected DACL for SYSTEM and the
   granting SID. The peer PID comes from `GetNamedPipeClientProcessId`; its
-  primary token SID must match the grant and its image must be exactly an
+  primary token SID and session must match the grant and active console,
+  and its image must be exactly an
   installed `windowcast-agent-windows.exe` or `windowcast-app.exe` in the
-  admin-only `%ProgramFiles%\windowcast` folder.
-- The broker calls `OpenInputDesktop(DF_ALLOWOTHERACCOUNTHOOK)` and
-  `SetThreadDesktop` before each request. Capture uses DXGI Desktop
-  Duplication and returns bounded packed BGRA. Input uses bounded Unicode
-  text, absolute pointer moves, and left/right/middle button changes. The
-  desktop name from `GetUserObjectInformation(UOI_NAME)` distinguishes
-  Winlogon from Default.
+  admin-only `%ProgramFiles%\windowcast` folder. The client independently
+  checks `GetNamedPipeServerProcessId` and accepts only the LocalSystem
+  helper at its exact installed path, using identification-only SQOS.
+- The broker calls `OpenInputDesktop` without cross-account hook or desktop
+  switching rights, then `SetThreadDesktop` before each request. Capture
+  reuses DXGI Desktop Duplication, requires B8G8R8A8, and returns bounded
+  packed BGRA. The helper is per-monitor-v2 DPI aware and maps pointer
+  coordinates through the captured output's desktop rectangle. Persistent
+  client connections serialize concurrent requests and idle clients time
+  out. The desktop name from `GetUserObjectInformation(UOI_NAME)`
+  distinguishes Winlogon from Default.
 - When enabled, the Windows host lists one reserved synthetic window:
   `secure-desktop` (`WindowId(u64::MAX)` on the numeric wire). It encodes
   helper frames through the existing encoder path and routes that entry's
@@ -579,7 +589,8 @@ user's process.
   logs a plain explanation instead of offering the entry.
 
 Unit tests cover fail-closed grant parsing, framed-message limits and the
-operation allowlist, and client SID/image verification with fakes. The
+operation allowlist, and client/server SID, session and image verification
+with fakes. The
 remaining check needs a Windows rig: CI is not a SYSTEM task in an
 interactive session and cannot show Winlogon or a UAC secure desktop.
 

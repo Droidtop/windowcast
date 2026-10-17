@@ -19,6 +19,10 @@ Built:
   token SID, and its full image path. Only `windowcast-agent-windows.exe`
   and `windowcast-app.exe` directly under the administrator-owned
   `%ProgramFiles%\windowcast` directory pass.
+- The client verifies that the pipe server is LocalSystem at the exact
+  installed helper path and opens it with identification-only SQOS. It
+  shares a serialized persistent connection; the broker binds clients to
+  the granting user's active console session and times idle clients out.
 - The length-prefixed protocol has three variants only. Requests, text and
   frame replies have hard size limits; malformed messages, unknown variants
   and empty input are refused. Tests cover the codec and allowlist.
@@ -31,8 +35,13 @@ Built:
   these as `windowcast-app secure-screen
   install|enable|disable|uninstall|status`; downstream applications can
   present the API in their own UI. Management is fixed to `%ProgramFiles%`,
-  UAC elevation uses the `runas` verb, enable shows a plain consent prompt,
-  and the SYSTEM task has boot, console-connect and unlock triggers.
+  UAC elevation uses the `runas` verb, enable shows the unelevated account
+  SID in its consent prompt, and the SYSTEM task has boot, console-connect
+  and unlock triggers. Registration uses Task Scheduler COM without a Temp
+  file, and protected install DACLs prevent ordinary-user replacement.
+- The windowless helper logs to Windows Event Log, is per-monitor-v2 DPI
+  aware, reuses Desktop Duplication, requires B8G8R8A8 capture frames, and
+  maps pointer input through the captured output's desktop rectangle.
 - The Windows host offers `secure-desktop` (numeric wire reservation
   `WindowId(u64::MAX)`) only while installed and enabled, encodes helper
   frames through the existing encoder stack, and routes only that entry's
@@ -40,7 +49,7 @@ Built:
   explanation otherwise.
 - Unit tests cover permission parsing, operation framing and limits,
   allowlist rejection, XML escaping, and client SID/name/folder
-  verification with fakes.
+  verification plus server verification with fakes.
 
 Not run or changed on this development machine:
 
@@ -55,7 +64,7 @@ Not run or changed on this development machine:
 Validation on this checkout:
 
 - `cargo fmt --all -- --check` passes.
-- The secure-helper unit and documentation tests pass (9 unit tests), the
+- The secure-helper unit and documentation tests pass (10 unit tests), the
   protocol tests pass (17 tests), and the Windows agent library tests pass
   (14 tests).
 - The helper, protocol and Windows agent pass focused clippy with warnings
@@ -75,8 +84,9 @@ Known limitations / rig questions:
 - Confirm that the console-session SYSTEM token created with
   `SetTokenInformation(TokenSessionId)` can open both Default and Winlogon
   on supported Windows 10/11 configurations.
-- Confirm Task Scheduler accepts the generated UTF-16 XML on the supported
-  Windows versions and fires the console-connect/unlock triggers after boot.
+- Confirm Task Scheduler accepts the in-memory COM registration on the
+  supported Windows versions and fires the console-connect/unlock triggers
+  after boot.
 - Release packaging must place `windowcast`, helper, agent and app binaries
   in the expected layout. Authenticode is not required: for an unsigned
   install, the administrator approving UAC is the trust decision for the
