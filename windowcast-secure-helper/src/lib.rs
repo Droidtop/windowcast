@@ -4,6 +4,7 @@
 
 pub mod client;
 pub mod desktop;
+pub mod executor;
 pub mod operations;
 pub mod permission;
 pub mod pipe;

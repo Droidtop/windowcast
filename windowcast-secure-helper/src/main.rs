@@ -1,30 +1,125 @@
-//! Secure-screen helper binary: runs as a scheduled task under SYSTEM,
-//! at startup and on session change. It brokers connections, displays
-//! the current secure screen, and enters the given input.
+//! Fixed-purpose SYSTEM broker for the Windows input desktop.
 
-use std::io;
-
+#[cfg(windows)]
 fn main() {
-    // Before any operation, read the permission gate.
-    if windowcast_secure_helper::permission::Permission::read().map(|p| p.enabled) != Some(true) {
-        eprintln!("Secure-screen helper refused: permission absent or disabled.");
+    if let Err(error) = run() {
+        eprintln!("Secure-screen helper stopped: {error}");
         std::process::exit(1);
     }
-
-    // Log that permission is present.
-    eprintln!("Secure-screen helper started with permission granted.");
-
-    // The helper does exactly two jobs plus a state query.
-    // It does not execute arbitrary commands, does not access arbitrary files,
-    // and does not load application code.
 }
 
-/// A minimal server loop: accepts pipe connections, verifies clients,
-/// reads operations, performs them, and logs results.
-#[allow(dead_code)]
-fn run_server() -> io::Result<()> {
-    // Stub: real implementation creates the named pipe with DACL and loops.
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+#[cfg(windows)]
+fn run() -> std::io::Result<()> {
+    use std::time::Duration;
+    use windowcast_secure_helper::client::Client;
+    use windowcast_secure_helper::operations::{read_request, write_response, Response};
+    use windowcast_secure_helper::permission::Permission;
+    use windowcast_secure_helper::pipe::{verify_client_with, PipeServer, WindowsClientInspector};
+
+    if Permission::read().is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "permission is absent or disabled",
+        ));
     }
+    if windowcast_secure_helper::permission::current_user_sid()?.as_str() != "S-1-5-18" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "helper must run as LocalSystem",
+        ));
+    }
+
+    if !windowcast_secure_helper::desktop::running_in_active_console_session() {
+        windowcast_secure_helper::desktop::launch_in_active_console_session()?;
+        return Ok(());
+    }
+
+    let initial = Permission::read().expect("permission was checked");
+    let initial_sid = initial
+        .grant_sid
+        .as_deref()
+        .expect("valid permission has a SID");
+    let mut server = PipeServer::create(initial_sid)?;
+    let inspector = WindowsClientInspector;
+    let install_root = Client::admin_install_root();
+
+    loop {
+        let current_permission = Permission::read();
+        if current_permission
+            .as_ref()
+            .and_then(|value| value.grant_sid.as_deref())
+            != Some(initial_sid)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "permission was removed or changed",
+            ));
+        }
+        if !windowcast_secure_helper::desktop::running_in_active_console_session() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "console session changed",
+            ));
+        }
+        let Some(process_id) = server.accept()? else {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        };
+
+        let permission = Permission::read();
+        let authorized = permission
+            .as_ref()
+            .and_then(|value| value.grant_sid.as_deref())
+            .is_some_and(|sid| verify_client_with(&inspector, process_id, sid, &install_root));
+        if !authorized {
+            eprintln!("Secure-screen helper refused an unauthorized pipe client.");
+            let _ = write_response(
+                server.file_mut(),
+                &Response::Refused("client identity was not authorized".into()),
+            );
+            server.disconnect();
+            continue;
+        }
+
+        loop {
+            let operation = match read_request(server.file_mut()) {
+                Ok(Some(operation)) => operation,
+                Ok(None) => break,
+                Err(error) => {
+                    let _ =
+                        write_response(server.file_mut(), &Response::Refused(error.to_string()));
+                    break;
+                }
+            };
+            // The protected HKLM grant is deliberately re-read before every operation.
+            let operation_permission = Permission::read();
+            if operation_permission
+                .as_ref()
+                .and_then(|value| value.grant_sid.as_deref())
+                != Some(initial_sid)
+            {
+                eprintln!(
+                    "Secure-screen helper refused an operation: permission was removed or changed."
+                );
+                let _ = write_response(
+                    server.file_mut(),
+                    &Response::Refused("secure screen was disabled".into()),
+                );
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "permission was removed or changed",
+                ));
+            }
+            let response = windowcast_secure_helper::executor::execute(&operation)
+                .unwrap_or_else(|error| Response::Refused(error.to_string()));
+            write_response(server.file_mut(), &response)?;
+        }
+        server.disconnect();
+    }
+}
+
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("secure screen is not available on this platform");
+    std::process::exit(1);
 }
