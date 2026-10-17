@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 
 use windowcast_host::quality::Quality;
 use windowcast_host::{EncodedFrame, FrameSource, WindowSource};
-use windowcast_protocol::{BackendKind, HostState, InputEvent, VideoCodec, WindowId, WindowInfo};
+use windowcast_protocol::{
+    BackendKind, ContentHint, HostState, InputEvent, VideoCodec, WindowId, WindowInfo, WindowKind,
+    SECURE_DESKTOP_WINDOW_ID,
+};
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 
 use crate::capture::{self, Capture};
@@ -60,6 +63,9 @@ pub struct WindowsSource {
     current: Arc<RwLock<Current>>,
     injector: Injector,
     private: crate::private::Private,
+    secure: windowcast_secure_helper::Client,
+    secure_size: Arc<std::sync::Mutex<(u32, u32)>>,
+    secure_notice: std::sync::atomic::AtomicU8,
 }
 
 impl WindowsSource {
@@ -78,6 +84,9 @@ impl WindowsSource {
             })),
             injector: Injector::default(),
             private: Default::default(),
+            secure: Default::default(),
+            secure_size: Default::default(),
+            secure_notice: std::sync::atomic::AtomicU8::new(0),
         })
     }
 
@@ -135,9 +144,111 @@ fn codecs_for(options: &Options) -> Result<Vec<VideoCodec>, String> {
     Ok(codecs)
 }
 
+fn input_targets_secure(event: &InputEvent, focus: Option<WindowId>) -> bool {
+    match event {
+        InputEvent::PointerMove { window, .. }
+        | InputEvent::PointerButton { window, .. }
+        | InputEvent::PointerScroll { window, .. }
+        | InputEvent::Touch { window, .. } => *window == SECURE_DESKTOP_WINDOW_ID,
+        InputEvent::Text { .. } | InputEvent::Key { .. } => focus == Some(SECURE_DESKTOP_WINDOW_ID),
+        InputEvent::Gamepad { .. } | InputEvent::GamepadGone { .. } => false,
+    }
+}
+
+fn route_secure_input(
+    client: &windowcast_secure_helper::Client,
+    size: &std::sync::Mutex<(u32, u32)>,
+    event: &InputEvent,
+) {
+    use windowcast_secure_helper::operations::{MouseAction, MouseButton, Operation};
+    let operation = match event {
+        InputEvent::PointerMove { x, y, .. } => {
+            let (width, height) = *size.lock().expect("secure size");
+            if width == 0 || height == 0 {
+                return;
+            }
+            let x = (x.clamp(0.0, 1.0) * (width.saturating_sub(1)) as f32).round() as i32;
+            let y = (y.clamp(0.0, 1.0) * (height.saturating_sub(1)) as f32).round() as i32;
+            Operation::SendInput {
+                text: None,
+                mouse: Some(MouseAction::Move { x, y }),
+            }
+        }
+        InputEvent::PointerButton {
+            button, pressed, ..
+        } => {
+            let button = match button {
+                windowcast_protocol::PointerButton::Left => MouseButton::Left,
+                windowcast_protocol::PointerButton::Right => MouseButton::Right,
+                windowcast_protocol::PointerButton::Middle => MouseButton::Middle,
+                // The privileged allowlist intentionally has no extra mouse buttons.
+                windowcast_protocol::PointerButton::Back
+                | windowcast_protocol::PointerButton::Forward => return,
+            };
+            Operation::SendInput {
+                text: None,
+                mouse: Some(MouseAction::Button {
+                    button,
+                    pressed: *pressed,
+                }),
+            }
+        }
+        InputEvent::Text { text } => Operation::SendInput {
+            text: Some(text.clone()),
+            mouse: None,
+        },
+        // Keys, wheel, touch and gamepads are outside the helper's owner-approved operation set.
+        _ => return,
+    };
+    if let Err(error) = client.request(&operation) {
+        eprintln!("secure desktop input was refused: {error}");
+    }
+}
+
 impl WindowSource for WindowsSource {
     fn list_windows(&self) -> Vec<WindowInfo> {
-        windows_list::list()
+        let mut windows = windows_list::list();
+        use windowcast_secure_helper::SecureScreenStatus;
+        let status = self.secure.permission_status();
+        let notice = match status {
+            SecureScreenStatus::Enabled => 1,
+            SecureScreenStatus::Disabled => 2,
+            SecureScreenStatus::Absent | SecureScreenStatus::NotAvailable => 3,
+        };
+        if self
+            .secure_notice
+            .swap(notice, std::sync::atomic::Ordering::Relaxed)
+            != notice
+        {
+            match status {
+                SecureScreenStatus::Disabled => {
+                    eprintln!("Secure screen is unavailable: the installed helper is disabled.")
+                }
+                SecureScreenStatus::Absent => {
+                    eprintln!("Secure screen is unavailable: the helper is not installed.")
+                }
+                SecureScreenStatus::NotAvailable => {
+                    eprintln!("Secure screen is not available on this platform.")
+                }
+                SecureScreenStatus::Enabled => {}
+            }
+        }
+        if status == SecureScreenStatus::Enabled {
+            let (width, height) = *self.secure_size.lock().expect("secure size");
+            windows.push(WindowInfo {
+                id: SECURE_DESKTOP_WINDOW_ID,
+                title: "Secure desktop".into(),
+                app_id: "secure-desktop".into(),
+                width,
+                height,
+                focused: false,
+                content: ContentHint::General,
+                owner: None,
+                kind: WindowKind::Normal,
+                position: Some((0, 0)),
+            });
+        }
+        windows
     }
 
     fn cursor(&self) -> Option<windowcast_host::CursorState> {
@@ -157,6 +268,10 @@ impl WindowSource for WindowsSource {
     }
 
     fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
+        if input_targets_secure(event, focus) {
+            route_secure_input(&self.secure, &self.secure_size, event);
+            return;
+        }
         self.injector.inject(event, focus);
     }
 
@@ -195,6 +310,14 @@ impl WindowSource for WindowsSource {
     }
 
     fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
+        if window == SECURE_DESKTOP_WINDOW_ID {
+            return Ok(Box::new(SecureStream::new(
+                self.secure.clone(),
+                Arc::clone(&self.secure_size),
+                Arc::clone(&self.current),
+                codec,
+            )));
+        }
         check_window(window)?;
         Ok(Box::new(self.open_stream(window, codec, false)))
     }
@@ -204,6 +327,9 @@ impl WindowSource for WindowsSource {
         window: WindowId,
         codec: VideoCodec,
     ) -> Result<Box<dyn FrameSource>, String> {
+        if window == SECURE_DESKTOP_WINDOW_ID {
+            return self.open(window, codec);
+        }
         check_window(window)?;
         Ok(Box::new(self.open_stream(window, codec, true)))
     }
@@ -216,6 +342,11 @@ impl WindowSource for WindowsSource {
         &self,
         window: WindowId,
     ) -> Option<Result<Box<dyn windowcast_host::PictureSource>, String>> {
+        if window == SECURE_DESKTOP_WINDOW_ID {
+            return Some(Err(
+                "the secure desktop is available only through its helper stream".into(),
+            ));
+        }
         if let Err(e) = check_window(window) {
             return Some(Err(e));
         }
@@ -254,6 +385,184 @@ fn check_window(window: WindowId) -> Result<(), String> {
         return Err("no such window".into());
     }
     Ok(())
+}
+
+struct SecureStream {
+    client: windowcast_secure_helper::Client,
+    size: Arc<std::sync::Mutex<(u32, u32)>>,
+    current: Arc<RwLock<Current>>,
+    codec: VideoCodec,
+    encoder: Option<Box<dyn Encoder>>,
+    encoder_name: String,
+    encoded_size: (usize, usize),
+    generation: u64,
+    settings: Option<Settings>,
+    quality: Quality,
+    frames: u64,
+    pending: std::collections::VecDeque<Vec<u8>>,
+    announce: Option<(u32, u32)>,
+    last_sent: Instant,
+    next_at: Instant,
+}
+
+impl SecureStream {
+    fn new(
+        client: windowcast_secure_helper::Client,
+        size: Arc<std::sync::Mutex<(u32, u32)>>,
+        current: Arc<RwLock<Current>>,
+        codec: VideoCodec,
+    ) -> Self {
+        Self {
+            client,
+            size,
+            current,
+            codec,
+            encoder: None,
+            encoder_name: String::new(),
+            encoded_size: (0, 0),
+            generation: u64::MAX,
+            settings: None,
+            quality: Quality::default(),
+            frames: 0,
+            pending: Default::default(),
+            announce: None,
+            last_sent: Instant::now(),
+            next_at: Instant::now(),
+        }
+    }
+
+    fn take_pending(&mut self) -> Option<EncodedFrame> {
+        let data = self.pending.pop_front()?;
+        let duration = self.last_sent.elapsed();
+        self.last_sent = Instant::now();
+        Some(EncodedFrame {
+            data,
+            duration,
+            size: self.announce.take(),
+        })
+    }
+}
+
+// The encoder is constructed and used only on the host's stream thread.
+unsafe impl Send for SecureStream {}
+
+impl FrameSource for SecureStream {
+    fn describe(&self) -> String {
+        self.encoder_name.clone()
+    }
+
+    fn frame_rate(&self) -> u32 {
+        self.current.read().expect("options").options.fps
+    }
+
+    fn set_quality(&mut self, quality: Quality) {
+        self.quality = quality;
+    }
+
+    fn next_frame(&mut self, mut keyframe: bool) -> Option<EncodedFrame> {
+        if !keyframe {
+            if let Some(frame) = self.take_pending() {
+                return Some(frame);
+            }
+        }
+        loop {
+            let (options, generation) = {
+                let current = self.current.read().expect("options");
+                (current.options.clone(), current.generation)
+            };
+            let interval = frame_time(fps(&options, &self.quality));
+            std::thread::sleep(self.next_at.saturating_duration_since(Instant::now()));
+            let response = match self
+                .client
+                .request(&windowcast_secure_helper::operations::Operation::CaptureFrame)
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    eprintln!("secure desktop capture stopped: {error}");
+                    return None;
+                }
+            };
+            let windowcast_secure_helper::operations::Response::Frame {
+                width,
+                height,
+                stride,
+                bgra,
+            } = response
+            else {
+                eprintln!("secure desktop helper returned the wrong response");
+                return None;
+            };
+            *self.size.lock().expect("secure size") = (width, height);
+            let picture = convert::Picture::Bgra(convert::Bgra {
+                data: &bgra,
+                width: width as usize,
+                height: height as usize,
+                stride: stride as usize,
+            });
+            let size = convert::even(picture.width(), picture.height());
+            if size.0 < 2 || size.1 < 2 {
+                continue;
+            }
+            let wanted = settings(&options, &self.quality, self.codec, size.0, size.1);
+            let reopen = self.encoder.is_none()
+                || size != self.encoded_size
+                || generation != self.generation
+                || self.settings.is_some_and(|old| old.fps != wanted.fps);
+            if reopen {
+                let opened = encoder::open(options.encoder, &wanted)
+                    .or_else(|_| encoder::open(EncoderChoice::Auto, &wanted));
+                let encoder = match opened {
+                    Ok(encoder) => encoder,
+                    Err(error) => {
+                        eprintln!("secure desktop encoder failed: {error}");
+                        return None;
+                    }
+                };
+                self.encoder_name = encoder.describe();
+                self.encoder = Some(encoder);
+                self.encoded_size = size;
+                self.generation = generation;
+                self.settings = Some(wanted);
+                self.announce = Some((size.0 as u32, size.1 as u32));
+                self.pending.clear();
+                keyframe = true;
+            } else if self
+                .settings
+                .is_some_and(|old| old.bitrate != wanted.bitrate)
+            {
+                if self
+                    .encoder
+                    .as_mut()
+                    .is_some_and(|encoder| encoder.set_bitrate(wanted.bitrate))
+                {
+                    self.settings = Some(wanted);
+                } else {
+                    self.encoder = None;
+                    continue;
+                }
+            }
+            self.next_at = Instant::now() + interval;
+            let time = interval * self.frames as u32;
+            match self
+                .encoder
+                .as_mut()
+                .expect("secure encoder")
+                .encode(&picture, keyframe, time)
+            {
+                Ok(units) => {
+                    self.frames += 1;
+                    self.pending.extend(units);
+                    if let Some(frame) = self.take_pending() {
+                        return Some(frame);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("secure desktop encoding failed: {error}");
+                    return None;
+                }
+            }
+        }
+    }
 }
 
 struct State {

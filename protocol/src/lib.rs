@@ -17,6 +17,10 @@ pub const PROTOCOL_VERSION: u16 = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
 
+/// Reserved synthetic entry for the Windows secure desktop. On the wire IDs
+/// are numeric, so `u64::MAX` is the stable representation of `secure-desktop`.
+pub const SECURE_DESKTOP_WINDOW_ID: WindowId = WindowId(u64::MAX);
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WindowInfo {
     pub id: WindowId,

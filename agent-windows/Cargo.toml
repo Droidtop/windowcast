@@ -23,6 +23,7 @@ windowcast-pty = { path = "../pty" }
 tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+windowcast-secure-helper = { path = "../windowcast-secure-helper" }
 # For #[implement] (the audio activation's completion handler).
 windows-core = "0.62"
 # Virtual Xbox 360 pads through the ViGEmBus driver (which Parsec and
