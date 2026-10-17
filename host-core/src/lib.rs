@@ -31,8 +31,8 @@ use windowcast_identity::{Identity, PeerId, TrustStore};
 use windowcast_protocol::selection;
 use windowcast_protocol::{AccountCredential, OidcProviderInfo, SignInMethod};
 use windowcast_protocol::{
-    BackendKind, ControlMessage, HostState, InputEvent, StreamBackend, StreamLimits, StreamOptions,
-    StreamQuality, StreamTarget, VideoCodec, WindowId, WindowInfo,
+    BackendKind, ControlMessage, HostState, InputEvent, PointerButton, StreamBackend, StreamLimits,
+    StreamOptions, StreamQuality, StreamTarget, TouchPhase, VideoCodec, WindowId, WindowInfo,
 };
 use windowcast_transport::remote::RemotePeers;
 use windowcast_transport::{
@@ -1541,7 +1541,9 @@ pub fn deliver_input(
         // session ends and its sender goes.
         let mut pads: Option<Box<dyn gamepad::GamepadSink>> = None;
         let mut no_pads = false;
+        let mut held = HeldInput::default();
         for (event, focus) in rx {
+            held.track(&event, focus);
             match event {
                 InputEvent::Gamepad { pad, state } if pad < gamepad::MAX_PADS => {
                     if pads.is_none() && !no_pads {
@@ -1567,8 +1569,103 @@ pub fn deliver_input(
                 event => source.input(&event, focus),
             }
         }
+        // The client is gone (the sender was dropped, closing `rx`); a key, mouse button
+        // or touch it left pressed would otherwise stay down on the host indefinitely.
+        for (event, focus) in held.release() {
+            source.input(&event, focus);
+        }
     });
     tx
+}
+
+/// What the session's client currently has pressed: tracked so that if it disconnects
+/// mid-gesture, [`deliver_input`] can release everything itself rather than leaving a
+/// stuck key, mouse button or touch on the host.
+#[derive(Default)]
+struct HeldInput {
+    /// Keycode -> the input focus it was pressed with, for releasing it the same way.
+    keys: HashMap<u32, Option<WindowId>>,
+    buttons: std::collections::HashSet<(WindowId, PointerButton)>,
+    /// (window, touch id) -> its last known position, for the release event.
+    touches: HashMap<(WindowId, u32), (f32, f32)>,
+}
+
+impl HeldInput {
+    fn track(&mut self, event: &InputEvent, focus: Option<WindowId>) {
+        match event {
+            InputEvent::Key { keycode, pressed } => {
+                if *pressed {
+                    self.keys.insert(*keycode, focus);
+                } else {
+                    self.keys.remove(keycode);
+                }
+            }
+            InputEvent::PointerButton {
+                window,
+                button,
+                pressed,
+            } => {
+                if *pressed {
+                    self.buttons.insert((*window, *button));
+                } else {
+                    self.buttons.remove(&(*window, *button));
+                }
+            }
+            InputEvent::Touch {
+                window,
+                id,
+                x,
+                y,
+                phase,
+            } => match phase {
+                TouchPhase::Start | TouchPhase::Move => {
+                    self.touches.insert((*window, *id), (*x, *y));
+                }
+                TouchPhase::End | TouchPhase::Cancel => {
+                    self.touches.remove(&(*window, *id));
+                }
+            },
+            _ => {}
+        }
+    }
+
+    /// Release events for everything still held, draining this tracker so it is only
+    /// ever asked once.
+    fn release(&mut self) -> Vec<(InputEvent, Option<WindowId>)> {
+        let mut out = Vec::new();
+        for (keycode, focus) in self.keys.drain() {
+            out.push((
+                InputEvent::Key {
+                    keycode,
+                    pressed: false,
+                },
+                focus,
+            ));
+        }
+        for (window, button) in self.buttons.drain() {
+            out.push((
+                InputEvent::PointerButton {
+                    window,
+                    button,
+                    pressed: false,
+                },
+                None,
+            ));
+        }
+        for ((window, id), (x, y)) in self.touches.drain() {
+            out.push((
+                InputEvent::Touch {
+                    window,
+                    id,
+                    x,
+                    y,
+                    phase: TouchPhase::Cancel,
+                },
+                None,
+            ));
+        }
+        out
+    }
 }
 
 /// The window an input event names, if it names one.
@@ -2161,4 +2258,165 @@ fn feed_audio(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod deliver_input_tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    type Recorded = Vec<(InputEvent, Option<WindowId>)>;
+
+    /// Records every `input()` call it is given; everything else is unused by
+    /// [`deliver_input`] and left at its default.
+    struct Recording(Arc<StdMutex<Recorded>>);
+
+    impl WindowSource for Recording {
+        fn list_windows(&self) -> Vec<WindowInfo> {
+            Vec::new()
+        }
+
+        fn encoders(&self) -> Vec<VideoCodec> {
+            Vec::new()
+        }
+
+        fn open(
+            &self,
+            _window: WindowId,
+            _codec: VideoCodec,
+        ) -> Result<Box<dyn FrameSource>, String> {
+            Err("not used by this test".into())
+        }
+
+        fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
+            self.0
+                .lock()
+                .expect("recorded events")
+                .push((event.clone(), focus));
+        }
+    }
+
+    /// A key held down, a mouse button held down, and a touch mid-gesture: all three
+    /// are left pressed when the client vanishes. Dropping the sender (as happens when
+    /// a session ends) must release every one of them, so nothing stays stuck on the
+    /// host after the client that was holding it is gone.
+    #[test]
+    fn dropping_the_sender_releases_everything_still_held() {
+        let recorded = Arc::new(StdMutex::new(Vec::new()));
+        let source: Arc<dyn WindowSource> = Arc::new(Recording(Arc::clone(&recorded)));
+        let window = WindowId(1);
+        let tx = deliver_input(source);
+
+        tx.send((
+            InputEvent::Key {
+                keycode: 30,
+                pressed: true,
+            },
+            Some(window),
+        ))
+        .unwrap();
+        tx.send((
+            InputEvent::PointerButton {
+                window,
+                button: PointerButton::Left,
+                pressed: true,
+            },
+            None,
+        ))
+        .unwrap();
+        tx.send((
+            InputEvent::Touch {
+                window,
+                id: 7,
+                x: 0.5,
+                y: 0.5,
+                phase: TouchPhase::Start,
+            },
+            None,
+        ))
+        .unwrap();
+        // A key that was pressed and released before the drop must not be released
+        // again: only what is still held when the sender drops should be synthesized.
+        tx.send((
+            InputEvent::Key {
+                keycode: 31,
+                pressed: true,
+            },
+            Some(window),
+        ))
+        .unwrap();
+        tx.send((
+            InputEvent::Key {
+                keycode: 31,
+                pressed: false,
+            },
+            Some(window),
+        ))
+        .unwrap();
+
+        drop(tx);
+        // The input thread processes the channel and releases held state after it
+        // closes; give it a moment rather than racing it.
+        std::thread::sleep(Duration::from_millis(100));
+
+        let events = recorded.lock().expect("recorded events");
+        let released_key = events.iter().any(|(e, focus)| {
+            matches!(
+                e,
+                InputEvent::Key {
+                    keycode: 30,
+                    pressed: false
+                }
+            ) && *focus == Some(window)
+        });
+        assert!(released_key, "the held key must be released: {events:?}");
+
+        let released_button = events.iter().any(|(e, _)| {
+            matches!(
+                e,
+                InputEvent::PointerButton {
+                    window: w,
+                    button: PointerButton::Left,
+                    pressed: false
+                } if *w == window
+            )
+        });
+        assert!(
+            released_button,
+            "the held mouse button must be released: {events:?}"
+        );
+
+        let released_touch = events.iter().any(|(e, _)| {
+            matches!(
+                e,
+                InputEvent::Touch {
+                    window: w,
+                    id: 7,
+                    phase: TouchPhase::Cancel,
+                    ..
+                } if *w == window
+            )
+        });
+        assert!(
+            released_touch,
+            "the held touch must be cancelled: {events:?}"
+        );
+
+        let re_released_other_key = events
+            .iter()
+            .filter(|(e, _)| {
+                matches!(
+                    e,
+                    InputEvent::Key {
+                        keycode: 31,
+                        pressed: false
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            re_released_other_key, 1,
+            "a key already released before the drop must not be released again: {events:?}"
+        );
+    }
 }

@@ -356,14 +356,35 @@ class MainActivity : Activity() {
             status.text = "Another app asked to open a host, but did not give its device id and address (HOST:PORT)."
             return
         }
-        address.setText(request.address)
-        wanted = request.window
-        wantedSince = System.currentTimeMillis()
         val current = session
         if (current != null && current.isOpen && current.hostId == request.hostId) {
+            wanted = request.window
+            wantedSince = System.currentTimeMillis()
             worker.execute { current.requestWindows() }
             return
         }
+        if (current != null && current.isOpen) {
+            AlertDialog.Builder(this)
+                .setTitle("Switch host?")
+                .setMessage(
+                    "Another app wants to open ${request.address}, but this viewer is still " +
+                        "connected to a different host. Opening it closes that connection.",
+                )
+                .setPositiveButton("Switch") { _, _ -> openRequest(request) }
+                .setNegativeButton("Stay connected") { _, _ -> }
+                .show()
+            return
+        }
+        openRequest(request)
+    }
+
+    /** Opens [request]'s host, replacing whatever session is current. Only called once the
+     *  caller has either confirmed the switch with the user or there was nothing to switch away
+     *  from. */
+    private fun openRequest(request: ConnectRequest) {
+        address.setText(request.address)
+        wanted = request.window
+        wantedSince = System.currentTimeMillis()
         startSession(
             "Opening ${request.address}…",
             "Could not open ${request.address} (only a host this viewer has paired with opens this way)",
