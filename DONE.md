@@ -1,43 +1,116 @@
-# Secure-screen helper: done and not done
+# Secure-screen helper: implementation state
 
 Built:
-- `windowcast-secure-helper` crate in the workspace (`Cargo.toml` updated).
-- Binary (`main.rs`) that runs as SYSTEM, checks permission gate before any operation, logs refusal and exits if absent.
-- `client` module (`src/client.rs`) with API for install, enable, disable, uninstall, and permission status.
-- `permission` module (`src/permission.rs`) reading `HKLM\SOFTWARE\windowcast\SecureScreen` with stub cross-check behavior.
-- `operations` module (`src/operations.rs`) with closed set (`capture_frame`, `send_input`, `secure_desktop_state`), length-checked encode/decode, and allowlist.
-- `pipe` module (`src/pipe.rs`) with named pipe stub and client verification stub.
-- `desktop` module (`src/desktop.rs`) with `WTSGetActiveConsoleSessionId`, `OpenInputDesktop`, `SetThreadDesktop`, and `winlogon_active` stub.
-- Unit tests for permission parsing, operation codec, client-check logic (with fakes), and allowlist.
-- `docs/BACKENDS.md` "Secure screen" section and `docs/SECURITY.md` threat model, quoting owner's lines verbatim.
 
-Not built / stub / needs real Windows rig:
-- Real registry read/write (stub denies; requires elevated process on Windows).
-- Real named-pipe creation with DACL and client token verification (stub denies).
-- Real DXGI desktop duplication capture and SendInput injection (stubs in operations).
-- Real desktop switching verification (stub always returns false for `winlogon_active`).
-- `run_server` loop is a sleep stub; the binary exits after the permission check.
-- The scheduled task registration (`enable`) is a stub; no task is actually registered.
-- No actual `secure-screen` subcommands wired into `cli-tools` or the app.
-- The host integration (reserved window list entry `secure-desktop`, routing input to the helper) is described in BACKENDS.md but not implemented in host-core or agent-windows.
+- `windows` is target-gated. The client API, protocol and tests compile
+  without the Windows dependency on non-Windows targets and report that
+  secure-screen support is unavailable there.
+- The HKLM permission gate is real and fail-closed: `Enabled=1` and a
+  syntactically valid `GrantSid` are both required. Only the elevated
+  management API writes it; disable removes the key. The broker re-reads
+  the grant before every operation and while idle.
+- The binary requires LocalSystem, moves its fixed executable from Task
+  Scheduler's Session 0 into `WTSGetActiveConsoleSessionId`, verifies that
+  it is in that session, follows `OpenInputDesktop` with
+  `SetThreadDesktop`, and identifies Winlogon with
+  `GetUserObjectInformation(UOI_NAME)`.
+- `\\.\pipe\windowcast-secure` has a protected SYSTEM + grant-SID DACL.
+  Every client is checked with `GetNamedPipeClientProcessId`, its primary
+  token SID, and its full image path. Only `windowcast-agent-windows.exe`
+  and `windowcast-app.exe` directly under the administrator-owned
+  `%ProgramFiles%\windowcast` directory pass.
+- The length-prefixed protocol has three variants only. Requests, text and
+  frame replies have hard size limits; malformed messages, unknown variants
+  and empty input are refused. Tests cover the codec and allowlist.
+- `capture_frame` uses DXGI Desktop Duplication and a CPU-readable D3D11
+  staging texture. `send_input` accepts bounded Unicode text, absolute
+  moves and left/right/middle button transitions and calls `SendInput`.
+  `secure_desktop_state` reports whether Winlogon is the input desktop.
+- The library client API exposes install, enable, disable, uninstall,
+  status and request/response operations. The existing reference app wires
+  these as `windowcast-app secure-screen
+  install|enable|disable|uninstall|status`; downstream applications can
+  present the API in their own UI. Management is fixed to `%ProgramFiles%`,
+  UAC elevation uses the `runas` verb, enable shows a plain consent prompt,
+  and the SYSTEM task has boot, console-connect and unlock triggers.
+- The Windows host offers `secure-desktop` (numeric wire reservation
+  `WindowId(u64::MAX)`) only while installed and enabled, encodes helper
+  frames through the existing encoder stack, and routes only that entry's
+  text and mouse input to the helper. It logs a plain absent/disabled
+  explanation otherwise.
+- Unit tests cover permission parsing, operation framing and limits,
+  allowlist rejection, XML escaping, and client SID/name/folder
+  verification with fakes.
 
-Checks that passed (`cargo check --target x86_64-pc-windows-gnu -p windowcast-secure-helper`, `cargo clippy -D warnings`, `cargo fmt --check`).
+Not run or changed on this development machine:
 
-`cargo test` fails due to a pre-existing `windows-future` crate issue unrelated to this package.
+- No helper was installed, no task was registered or started, no HKLM key
+  was written, and no process was run as SYSTEM.
+- Winlogon/UAC capture and input cannot be exercised by an ordinary test
+  process. They require the owner's Windows rig.
+- `x86_64-unknown-linux-gnu` is not installed (the only installed target is
+  `x86_64-pc-windows-msvc`), so the requested Linux workspace check could
+  not be run. The dependency and cfg layout is ready for it.
 
-Needs a rig check (owner's PC):
-1. Install `windowcast-secure-helper` to `%ProgramFiles%\windowcast\secure-helper` with the binary.
-2. Run `secure-screen enable` elevated and confirm `Enabled` DWORD and SID appear in `HKLM\SOFTWARE\windowcast\SecureScreen`.
-3. Confirm `secure-screen disable` removes them.
-4. Confirm the scheduled task exists after enable and is removed after disable/uninstall.
-5. Confirm the named pipe `\\.\pipe\windowcast-secure` exists with DACL allowing only SYSTEM + grant SID.
-6. Confirm the binary refuses any operation when the registry value is 0 or missing, logging the refusal.
-7. Confirm it accepts only `CAPTURE_FRAME`, `SEND_INPUT`, `SECURE_DESKTOP_STATE` over the pipe, and verifies the client's image path is the installed agent/app binary.
-8. Confirm desktop sync (`OpenInputDesktop` / `SetThreadDesktop`) works on both Default and Winlogon desktops.
-9. Confirm DXGI desktop duplication delivers secure-screen pictures when the input desktop is Winlogon.
-10. Confirm `SendInput` reaches the Winlogon desktop when called after `sync_to_input_desktop`.
+Validation on this checkout:
 
-Unsure:
-- Whether the `windows` crate's `DESKTOP_ACCESS_FLAGS` newtype allows bitwise OR via `.0` (used in desktop.rs; compiles but not verified at runtime).
-- Whether `HDESK` returned by `OpenInputDesktop` is directly usable with `SetThreadDesktop` (signature matches docs but untested on real Windows).
-- Whether the `client` module's `install_binary` should enforce admin-only destination (stub allows any folder).
+- `cargo fmt --all -- --check` passes.
+- The secure-helper unit and documentation tests pass (9 unit tests), the
+  protocol tests pass (17 tests), and the Windows agent library tests pass
+  (14 tests).
+- The helper, protocol and Windows agent pass focused clippy with warnings
+  denied, and the reference app passes its Windows target check. A warning
+  from the vendored `ironrdp-connector` dependency remains outside these
+  changes.
+- Full `cargo test --workspace` and `cargo clippy --workspace -- -D warnings`
+  stop in the existing unconditional `wayland-sys` dependency on Windows:
+  it imports `std::os::unix::io::RawFd` while compiling for MSVC. This is
+  unrelated to secure-screen code; the focused Windows checks above pass.
+
+Known limitations / rig questions:
+
+- Desktop Duplication currently chooses adapter 0/output 0. Confirm that
+  this is the desired secure-screen display on hybrid-GPU and multi-monitor
+  rigs; if not, output selection or stitching needs a follow-up.
+- Confirm that the console-session SYSTEM token created with
+  `SetTokenInformation(TokenSessionId)` can open both Default and Winlogon
+  on supported Windows 10/11 configurations.
+- Confirm Task Scheduler accepts the generated UTF-16 XML on the supported
+  Windows versions and fires the console-connect/unlock triggers after boot.
+- Release packaging must place `windowcast`, helper, agent and app binaries
+  in the expected layout. Authenticode is not required: for an unsigned
+  install, the administrator approving UAC is the trust decision for the
+  helper bytes being copied. Runtime authorization still relies on the
+  protected install folder, recorded SID and exact client paths. This
+  branch has no Windows installer definition to update.
+
+Needs a rig check:
+
+1. Build release binaries from the reviewed source. Put `windowcast-app.exe` and
+   `windowcast-secure-helper.exe` together, and install the agent or
+   app directly under `%ProgramFiles%\windowcast`.
+2. Run `windowcast-app secure-screen install`. Confirm only
+   `%ProgramFiles%\windowcast\secure-helper\windowcast-secure-helper.exe`
+   is added and service mode remains disabled.
+3. Run `windowcast-app secure-screen enable`, read the explanation, accept the
+   UAC prompt and consent, and confirm `Enabled=1` plus the consenting
+   account SID under `HKLM\SOFTWARE\windowcast\SecureScreen`.
+4. Confirm Task Scheduler has `\windowcast\Secure screen helper`, principal
+   LocalSystem, boot/console-connect/unlock triggers, and the fixed installed
+   helper action. Confirm its broker child runs as SYSTEM in the active
+   console session, not Session 0.
+5. Confirm `\\.\pipe\windowcast-secure` grants only SYSTEM and the recorded
+   SID. Try a same-named executable outside Program Files, a different user,
+   and another executable inside the folder; all must be refused.
+6. Stream `secure-desktop`, lock the PC, and raise a UAC prompt. Confirm the
+   image changes between Default and Winlogon and that text, pointer moves
+   and left/right/middle clicks work on both.
+7. Exercise a multi-monitor and, if available, hybrid-GPU machine. Record
+   which display adapter 0/output 0 selects and whether the desired secure
+   screen is complete.
+8. While a request is active, run `windowcast-app secure-screen disable`.
+   Confirm the operation is refused, the broker exits, the task and HKLM
+   grant disappear, and the host removes `secure-desktop` with a plain
+   disabled message.
+9. Re-enable, then run `windowcast-app secure-screen uninstall`. Confirm the
+   task, grant and helper binary are gone and no SYSTEM helper remains.

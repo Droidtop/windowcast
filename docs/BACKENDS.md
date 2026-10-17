@@ -536,73 +536,52 @@ the plain reason), available, or active. A client asks with
 `PrivateSessionRequest { start, password }` and is answered with the new
 `HostState` or a `PrivateSessionRefused { reason, password_needed }`.
 
-### The secure screen (design from Sunshine; being built)
+### The secure screen (built; hardware check pending)
 
-Owner, 2026-10-14: "Just pull in how sunshine does it, including how they
-refer to it". Read in LizardByte/Sunshine `src/platform/windows/misc.cpp`
-and `display_base.cpp`. Sunshine has no name for the lock screen or UAC's
-secure desktop: it calls the thing that makes them reachable "Sunshine
-running as a service" (its docs: "Sunshine runs as a service on Windows"
-with the SYSTEM account's access), and its code only speaks of the input
-desktop. So windowcast says "runs as a service" in the host's setting, and
-"the secure screen" only in plain explanations for people.
+The owner chose a smaller privilege boundary than a SYSTEM host: an
+opt-in `windowcast-secure-helper.exe` performs only Desktop Duplication,
+text/mouse `SendInput`, and an input-desktop state query. It cannot run a
+command, open a caller-selected file, load a plug-in, serve a terminal or
+handle gamepads. The ordinary host and all application code remain in the
+user's process.
 
-How Sunshine does it, and what windowcast takes:
+- The reusable client API installs, enables, disables and uninstalls the
+  helper. The reference app exposes it as `windowcast-app secure-screen
+  install|enable|disable|uninstall|status`; downstream applications choose
+  how to present the same API. Install copies the helper only to
+  `%ProgramFiles%\windowcast\secure-helper`. Enable explains service
+  mode, asks for confirmation, elevates through UAC, records the granting
+  account's SID in `HKLM\SOFTWARE\windowcast\SecureScreen`, and registers
+  a fixed Task Scheduler definition for SYSTEM at boot, console connect
+  and unlock. `disable` removes the task and grant; `uninstall` also
+  removes the binary. None of these operations is run by a normal host.
+- Task Scheduler begins SYSTEM tasks in Session 0. The fixed launcher
+  duplicates only its own SYSTEM token, changes that token's session ID to
+  `WTSGetActiveConsoleSessionId`, and starts only the installed helper on
+  `winsta0\default`. The broker refuses to run as any account but
+  LocalSystem or outside the active console session.
+- Before every operation the broker re-reads the grant. Its named pipe
+  `\\.\pipe\windowcast-secure` has a protected DACL for SYSTEM and the
+  granting SID. The peer PID comes from `GetNamedPipeClientProcessId`; its
+  primary token SID must match the grant and its image must be exactly an
+  installed `windowcast-agent-windows.exe` or `windowcast-app.exe` in the
+  admin-only `%ProgramFiles%\windowcast` folder.
+- The broker calls `OpenInputDesktop(DF_ALLOWOTHERACCOUNTHOOK)` and
+  `SetThreadDesktop` before each request. Capture uses DXGI Desktop
+  Duplication and returns bounded packed BGRA. Input uses bounded Unicode
+  text, absolute pointer moves, and left/right/middle button changes. The
+  desktop name from `GetUserObjectInformation(UOI_NAME)` distinguishes
+  Winlogon from Default.
+- When enabled, the Windows host lists one reserved synthetic window:
+  `secure-desktop` (`WindowId(u64::MAX)` on the numeric wire). It encodes
+  helper frames through the existing encoder path and routes that entry's
+  text and mouse input to the helper. When absent or disabled, the host
+  logs a plain explanation instead of offering the entry.
 
-- **A SYSTEM process in the user's session.** `is_running_as_system()`
-  (CreateWellKnownSid(WinLocalSystemSid) and CheckTokenMembership); the
-  user's programs are launched with `retrieve_users_token()`
-  (WTSGetActiveConsoleSessionId, WTSQueryUserToken, TokenLinkedToken when
-  elevated), `CreateEnvironmentBlock`, `ImpersonateLoggedOnUser` and
-  `CreateProcessAsUserW`. Only SYSTEM can open the Winlogon desktop that
-  shows the lock screen and UAC prompts.
-- **Follow the input desktop.** `syncThreadDesktop()` is
-  OpenInputDesktop(DF_ALLOWOTHERACCOUNTHOOK) then SetThreadDesktop, run on
-  a thread before it duplicates the output or sends input. Capture
-  treats DXGI_ERROR_ACCESS_LOST and ACCESS_DENIED as "reinit" and starts
-  again after syncing.
-- windowcast: a host service (agent-windows, installed with the host,
-  off by default, asked for with the administrator's consent) starts the
-  agent as SYSTEM in the console session; the agent's capture and input
-  threads call the same sync before every (re)start of a Desktop Duplication
-  capture of the screen and before SendInput, and a failed capture on
-  access lost starts again. `lock::input_desktop_reachable` (today's test)
-  then reports true as a service, so the posted-message fallback is used
-  only without the service. Windows Graphics Capture stays the capture for
-  windows, as Sunshine's does not use it for the secure desktop either.
-
-- **Nothing a client asks for runs as SYSTEM** (decided 2026-10-16, in
-  the coordinator's words for the owner: "Nothing a client asks for ever
-  runs as SYSTEM"). A host running as SYSTEM starts a client's terminals,
-  commands and launched programs as the user signed in at the PC: their
-  token (WTSQueryUserToken on the console session, which only SYSTEM may
-  ask), their environment (CreateEnvironmentBlock, with the host's
-  launch variables on top), their profile folder as the working folder,
-  on `winsta0\default`, through CreateProcessAsUserW
-  (`agent-windows/src/user_process.rs`, installed as the host's
-  `ProcessStarter` when the agent finds itself SYSTEM). A command's
-  pipes are the only handles it inherits. A terminal cannot be opened
-  that way through portable-pty (it starts its program as its caller), so
-  the host starts `windowcast-agent-windows pty-relay` as the user, which
-  opens the pseudo-terminal itself, writes its output, and reads typed
-  text and resizes as frames (`agent-windows/src/relay.rs`). With nobody
-  signed in the host refuses: "Nobody is signed in at this PC, so there
-  is nobody to run this as. Sign in at the PC, then try again." Built and
-  tested on CI with the runner's own token through the same path
-  (`agent-windows/tests/user_process.rs`); the console user's token
-  itself needs the service.
-- **Service mode is a separate SYSTEM host with a named-pipe controller**
-  (decided 2026-10-16, relayed by the coordinator from the owner). The
-  service is its own host process running as SYSTEM, separate from the
-  user's, and it is controlled through a named pipe.
-
-
-The rest is not built yet: the service, following the input desktop and
-Desktop Duplication cannot be checked in CI as it is (the runner is not
-a SYSTEM service in an interactive session with a lock screen) and need
-the owner's PC; the pieces above are the plan so that the rig check has
-exact things to look for. Until then a locked PC keeps the window capture
-and posted input (above), and the private session.
+Unit tests cover fail-closed grant parsing, framed-message limits and the
+operation allowlist, and client SID/image verification with fakes. The
+remaining check needs a Windows rig: CI is not a SYSTEM task in an
+interactive session and cannot show Winlogon or a UAC secure desktop.
 
 ## Choosing a backend
 
@@ -631,16 +610,6 @@ Until a backend is built, hosts do not list it as available, so every
 request falls back to `Native` and nothing breaks while the others arrive.
 Clients expose the user rules as options with these defaults; droidtop's
 Desktop mode is one such client.
-
-## Secure screen
-
-The `windowcast-secure-helper` crate provides a Windows-only binary (`windowcast-secure-helper.exe`) plus a `client` module that applications link. It is registered as a scheduled task that runs as SYSTEM, at startup and on session change. It is NOT a long-lived service the host can drive freely.
-
-The permission gate (`HKLM\SOFTWARE\windowcast\SecureScreen`, value `Enabled` plus the SID of the granting user) is written only by the elevated `enable` command and read before every operation. The named pipe (`\\.\pipe\windowcast-secure`) has an explicit DACL: SYSTEM plus the interactive user whose SID matches the recorded grant. Each client's token SID and image path are checked: it must be the installed `windowcast-agent-windows.exe` or `windowcast-app.exe` under the admin-only install folder.
-
-Operations are a closed set: `capture_frame` (DXGI desktop duplication of the input desktop), `send_input` (SendInput through the current input desktop), and `secure_desktop_state` (whether the Winlogon desktop is active). The helper follows the input desktop with `OpenInputDesktop` and `SetThreadDesktop`, running in the active console session.
-
-Install, enable, disable and uninstall are exposed through the client API and as `windowcast` subcommands (`secure-screen install`, `enable`, `disable`, `uninstall`). When the helper is absent, the host says so plainly.
 
 ## Commands and terminals
 

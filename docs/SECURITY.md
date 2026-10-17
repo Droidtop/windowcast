@@ -187,9 +187,37 @@ And: "It's not a new repo. It's part of the windowcast library, and applications
 
 - The helper binary (`windowcast-secure-helper`) runs only as a scheduled task under SYSTEM; it is not a long-lived service the host drives freely.
 - Each application (windowcast's own host, and later Pythia and droidtop-agent) requests and installs the binary through the client API; the binary itself performs no arbitrary command execution.
+- Authenticode is not assumed. Installing an unsigned build makes the
+  administrator's UAC approval of those reviewed helper bytes the install
+  trust decision. After installation, the administrator-owned Program
+  Files directory prevents the granting user from replacing either the
+  broker or an allowed client; runtime checks do not mistake a signature
+  for authorization.
 - The permission gate (`HKLM\SOFTWARE\windowcast\SecureScreen`) requires administrator elevation to write. The helper re-reads it before every operation; if absent or 0, it refuses, logs the refusal, and exits.
 - The named pipe (`\\.\pipe\windowcast-secure`) uses an explicit DACL (SYSTEM + interactive user whose SID matches the grant) and verifies each client's token SID and image path.
 - Operations are a closed set: `capture_frame`, `send_input`, and `secure_desktop_state`. No other commands, file access, or code loading is permitted.
+- Requests and replies use a length-prefixed binary codec. A request is at
+  most 64 KiB, text at most 16 KiB, and a frame reply at most 128 MiB;
+  unknown enum variants, empty input, malformed lengths and trailing
+  payloads are refused before dispatch. `send_input` contains only Unicode
+  text, an absolute pointer move, or a left/right/middle button transition.
+- Task Scheduler starts LocalSystem in Session 0, which cannot see the
+  interactive Winlogon desktop. The task therefore duplicates only its own
+  token, sets `TokenSessionId` to `WTSGetActiveConsoleSessionId`, and starts
+  only the installed helper in that console session. The broker verifies
+  both LocalSystem (`S-1-5-18`) and the active session before opening its
+  pipe and exits if the console session or protected grant changes.
+- The pipe DACL is not the sole authorization check. For every connection,
+  `GetNamedPipeClientProcessId`, `OpenProcessToken(TokenUser)`, and
+  `QueryFullProcessImageNameW` must identify the granting SID and exactly
+  `%ProgramFiles%\windowcast\windowcast-agent-windows.exe` or
+  `windowcast-app.exe`. The Program Files parent is administrator-owned;
+  a same-named executable elsewhere is refused.
+- The user's host remains unprivileged. It offers the synthetic
+  `secure-desktop` entry only while the protected grant and installed
+  helper are present, and sends that entry's screen/text/mouse traffic over
+  the authenticated local pipe. Normal windows, commands, terminals,
+  clipboard, audio and gamepads never pass through the SYSTEM broker.
 
 ## Authorization is separate from authentication
 
