@@ -15,6 +15,22 @@
 fn main() {
     use windowcast_agent_windows::relay;
 
+    // Every window position, size and click this process handles — captured
+    // or injected (capture.rs, input.rs) — is in physical pixels. Without
+    // this, Windows scales this process's view of the desktop to its own
+    // notion of 96 DPI on a scaled monitor, so captures come out blurry and
+    // clicks land away from the finger or cursor they were sent for. Set
+    // once, before any window or display API runs, including in the
+    // `pty-relay` subprocess spawned below (it shares this entry point, and
+    // while it only relays a terminal today, never a GUI one, a process
+    // this inconsistent about its own DPI mode is a bug waiting for the
+    // first caller that isn't).
+    let _ = unsafe {
+        windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+            windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        )
+    };
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some(relay::SUBCOMMAND) {
         let spawn = relay::parse_args(&args[1..]).unwrap_or_else(|e| {

@@ -81,7 +81,20 @@ impl Injector {
             }
             InputEvent::Key { keycode, pressed } => {
                 if let Some(focus) = focus {
-                    bring_forward(focus);
+                    if !bring_forward(focus) {
+                        // SendInput's key goes wherever Windows' keyboard focus
+                        // already is, not to `focus`; with the switch refused
+                        // (another window is holding the foreground lock, most
+                        // often), sending it anyway would deliver this key to
+                        // whatever window that is instead. Posting it by name
+                        // keeps it going to the right window, best effort.
+                        eprintln!(
+                            "window {}: could not bring to front; posting the key instead",
+                            focus.0
+                        );
+                        self.posted.inject(event, Some(focus));
+                        return;
+                    }
                 }
                 if let Some((scan, extended)) = windowcast_protocol::keys::scan_from_evdev(*keycode)
                 {
@@ -97,7 +110,14 @@ impl Injector {
             }
             InputEvent::Text { text } => {
                 if let Some(focus) = focus {
-                    bring_forward(focus);
+                    if !bring_forward(focus) {
+                        eprintln!(
+                            "window {}: could not bring to front; posting typed text instead",
+                            focus.0
+                        );
+                        self.posted.inject(event, Some(focus));
+                        return;
+                    }
                 }
                 let inputs: Vec<INPUT> = text
                     .encode_utf16()
@@ -250,12 +270,21 @@ fn move_to(window: WindowId, x: f32, y: f32) {
     )]);
 }
 
-fn bring_forward(window: WindowId) {
+/// Brings `window` to the foreground, where a key or typed text SendInput
+/// sends next will land (SendInput has no window of its own to target).
+/// Returns whether it is actually foreground afterwards: Windows refuses a
+/// foreground switch outright in some cases (the foreground-lock timeout,
+/// another process with the input in its own grip), and a caller sending a
+/// key or text anyway would deliver it to whichever window the switch left
+/// in front instead of `window`.
+fn bring_forward(window: WindowId) -> bool {
     let target = hwnd(window);
     unsafe {
-        if GetForegroundWindow() != target {
-            let _ = SetForegroundWindow(target);
+        if GetForegroundWindow() == target {
+            return true;
         }
+        let _ = SetForegroundWindow(target);
+        GetForegroundWindow() == target
     }
 }
 
