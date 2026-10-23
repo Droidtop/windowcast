@@ -106,6 +106,13 @@ impl Opener {
         }
     }
 
+    /// The highest packet number received and how many packets have been:
+    /// the difference is what the network lost (so far), which is what a
+    /// [`crate::recovery::LossMeter`] reports back to the sender.
+    pub fn stats(&self) -> (Option<u64>, u64) {
+        (self.replay.highest(), self.replay.accepted())
+    }
+
     /// Opens one datagram. The replay window only moves for a datagram that
     /// authenticated, so garbage and forgeries cannot disturb it.
     pub fn open(&mut self, datagram: &[u8]) -> Result<(Header, Vec<u8>), OpenError> {

@@ -97,6 +97,15 @@ pub fn fragment_with_parity(
     Ok(out)
 }
 
+/// A frame that is still waiting for data fragments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Incomplete {
+    pub stream: u16,
+    pub frame: u32,
+    /// The data fragments that have not arrived and could not be rebuilt.
+    pub missing: Vec<u16>,
+}
+
 /// A frame put back together.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
@@ -208,6 +217,40 @@ impl Reassembler {
     /// Data fragments rebuilt from parity instead of resent.
     pub fn recovered(&self) -> u64 {
         self.recovered
+    }
+
+    /// The frames waiting for fragments, and which: what a
+    /// [`crate::recovery::LossDetector`] decides about.
+    pub fn incomplete(&self) -> Vec<Incomplete> {
+        let mut out = Vec::new();
+        for (stream, state) in &self.streams {
+            for pending in &state.pending {
+                out.push(Incomplete {
+                    stream: *stream,
+                    frame: pending.frame,
+                    missing: (0..pending.slots.len())
+                        .filter(|i| pending.slots[*i].is_none())
+                        .map(|i| i as u16)
+                        .collect(),
+                });
+            }
+        }
+        out
+    }
+
+    /// Gives up on a frame that is waiting, freeing what it holds. A late
+    /// fragment of it may start it again; it is dropped like any frame older
+    /// than one already delivered. Returns whether there was such a frame.
+    pub fn abandon(&mut self, stream: u16, frame: u32) -> bool {
+        let Some(state) = self.streams.get_mut(&stream) else {
+            return false;
+        };
+        let Some(index) = state.pending.iter().position(|p| p.frame == frame) else {
+            return false;
+        };
+        state.pending.remove(index);
+        self.dropped += 1;
+        true
     }
 
     /// Adds one authenticated packet, data or parity. Returns the frame if

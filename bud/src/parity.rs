@@ -91,20 +91,41 @@ impl ParityPolicy for NoParity {
 #[derive(Debug, Clone, Copy)]
 pub struct AdaptiveParity {
     loss: f32,
+    safety: f32,
+    max_overhead: f32,
 }
 
 impl AdaptiveParity {
     /// Below this smoothed loss, no parity is sent at all.
     pub const FLOOR: f32 = 0.002;
-    /// Parity is never more than this share of a block's data.
+    /// Parity is never more than this share of a block's data (the default).
     pub const MAX_OVERHEAD: f32 = 0.5;
-    /// How much more than the expected loss to cover.
+    /// How much more than the expected loss to cover (the default).
     pub const SAFETY: f32 = 2.0;
     /// How fast the estimate follows a new report (the weight of the newest).
     pub const SMOOTHING: f32 = 0.25;
 
+    /// Parity as the only defence: it covers twice the expected loss and may
+    /// take up to half a block, so a burst usually still falls inside it.
     pub fn new() -> Self {
-        AdaptiveParity { loss: 0.0 }
+        AdaptiveParity {
+            loss: 0.0,
+            safety: Self::SAFETY,
+            max_overhead: Self::MAX_OVERHEAD,
+        }
+    }
+
+    /// Parity as the first of several defences, for when retransmission and a
+    /// refresh request ([`crate::recovery`]) stand behind it: it covers the
+    /// expected loss and no more, and never takes more than a quarter of a
+    /// block. A burst that gets past it is handled by the layers behind, so
+    /// the steady cost on the wire is lower.
+    pub fn layered() -> Self {
+        AdaptiveParity {
+            loss: 0.0,
+            safety: 1.0,
+            max_overhead: 0.25,
+        }
     }
 
     /// The smoothed loss rate, 0 to 1.
@@ -134,8 +155,8 @@ impl ParityPolicy for AdaptiveParity {
         if data == 0 || self.loss < Self::FLOOR {
             return 0;
         }
-        let wanted = (data as f32 * self.loss * Self::SAFETY).ceil() as usize;
-        let cap = ((data as f32 * Self::MAX_OVERHEAD).ceil() as usize).max(1);
+        let wanted = (data as f32 * self.loss * self.safety).ceil() as usize;
+        let cap = ((data as f32 * self.max_overhead).ceil() as usize).max(1);
         wanted.max(1).min(cap)
     }
 }

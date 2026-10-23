@@ -15,6 +15,7 @@ const WORDS: usize = (WINDOW / 64) as usize;
 #[derive(Debug, Clone)]
 pub struct ReplayWindow {
     highest: Option<u64>,
+    accepted: u64,
     /// Bit `k` (word `k / 64`, bit `k % 64`) says `highest - k` was seen.
     bits: [u64; WORDS],
 }
@@ -29,8 +30,19 @@ impl ReplayWindow {
     pub fn new() -> Self {
         ReplayWindow {
             highest: None,
+            accepted: 0,
             bits: [0; WORDS],
         }
+    }
+
+    /// The highest packet number accepted so far.
+    pub fn highest(&self) -> Option<u64> {
+        self.highest
+    }
+
+    /// How many packets have been accepted.
+    pub fn accepted(&self) -> u64 {
+        self.accepted
     }
 
     fn bit(&self, k: u64) -> bool {
@@ -56,6 +68,7 @@ impl ReplayWindow {
 
     /// Records `packet` as seen. Call it only for a packet that authenticated.
     pub fn accept(&mut self, packet: u64) {
+        self.accepted += 1;
         match self.highest {
             None => {
                 self.highest = Some(packet);
