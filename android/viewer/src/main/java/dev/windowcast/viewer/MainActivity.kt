@@ -81,6 +81,9 @@ class MainActivity : Activity() {
     private lateinit var list: LinearLayout
     private lateinit var surface: SurfaceView
 
+    /** The frame the form, the stream surfaces and the terminal sit in. */
+    private lateinit var stage: FrameLayout
+
     /**
      * A second surface stacked with [surface]: a carrier switch shows the new carrier here and
      * swaps the two on its first picture (docs/BACKENDS.md, "One window, any carrier").
@@ -321,13 +324,16 @@ class MainActivity : Activity() {
             val s = session
             if (text != null && text != fromHost && s != null) inputWorker.execute { s.setClipboard(text) }
         }.also { clipboard.addPrimaryClipChangedListener(it) }
-        setContentView(FrameLayout(this).apply {
+        stage = FrameLayout(this).apply {
             addView(form, MATCH_PARENT, MATCH_PARENT)
             addView(surface, MATCH_PARENT, MATCH_PARENT)
             addView(spare, MATCH_PARENT, MATCH_PARENT)
             addView(pointer, WRAP_CONTENT, WRAP_CONTENT)
             addView(terminalView, MATCH_PARENT, MATCH_PARENT)
-        })
+        }
+        // A new screen size (rotation, split screen) changes the room the picture is fitted in.
+        stage.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> fitSurfaces() }
+        setContentView(stage)
 
         val kept = lastNonConfigurationInstance as? Kept
         if (kept != null) {
@@ -409,7 +415,8 @@ class MainActivity : Activity() {
         wantedSince = System.currentTimeMillis()
         startSession(
             "Opening ${request.address}…",
-            "Could not open ${request.address} (only a host this viewer has paired with opens this way)",
+            "Could not open ${request.address}",
+            describe = { e -> FailureText.linkOpen(request.address, e.message) },
         ) { c ->
             val s = c.connect(request.address, null)
             if (s.hostId != request.hostId) {
@@ -462,6 +469,7 @@ class MainActivity : Activity() {
     private fun startSession(
         progress: String,
         failure: String,
+        describe: ((Exception) -> String)? = null,
         open: (WindowcastClient) -> Pair<WindowcastSession, (WindowcastSession) -> String>,
     ) {
         val c = client ?: return
@@ -485,7 +493,7 @@ class MainActivity : Activity() {
                 listen(s)
                 s.requestWindows()
             } catch (e: Exception) {
-                main.post { status.text = "$failure: ${e.message}" }
+                main.post { status.text = describe?.invoke(e) ?: "$failure: ${e.message}" }
             }
         }
     }
@@ -756,6 +764,7 @@ class MainActivity : Activity() {
                         else if (event.window == watching?.id) stopDecoding()
                     }
                     is Event.Cursor -> main.post { if (event.window == watching?.id) showPointer(event) }
+                    is Event.WindowResized -> main.post { onResized(event) }
                     is Event.HostState -> main.post {
                         val wasLocked = hostLocked
                         hostLocked = event.locked
@@ -972,6 +981,9 @@ class MainActivity : Activity() {
         val window = watching ?: return
         val s = session ?: return
         form.visibility = View.GONE
+        // Black bars around a picture that does not match the screen's shape.
+        stage.setBackgroundColor(android.graphics.Color.BLACK)
+        fitSurfaces()
         surface.visibility = View.VISIBLE
         val view = surface
         val begin = {
@@ -1394,16 +1406,7 @@ class MainActivity : Activity() {
         dialog.setTitle(info.title)
         dialog.setContentView(content)
         dialog.setCanceledOnTouchOutside(false)
-        val screen = resources.displayMetrics
-        val scale = minOf(
-            1f,
-            screen.widthPixels * 0.9f / info.width.coerceAtLeast(1),
-            screen.heightPixels * 0.8f / info.height.coerceAtLeast(1),
-        )
-        dialog.window?.setLayout(
-            (info.width * scale).toInt().coerceAtLeast(64),
-            (info.height * scale).toInt().coerceAtLeast(64),
-        )
+        sizeStreamWindow(dialog, info.width, info.height)
         // The keyboard covers the bottom of the window instead of pushing it about.
         dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         dialog.setOnDismissListener {
@@ -1584,6 +1587,55 @@ class MainActivity : Activity() {
         showForm()
     }
 
+    /**
+     * Sizes the stream surfaces to the watched window's shape, centred in the frame, so the
+     * picture is not stretched to the screen. Both surfaces, because a carrier switch shows the
+     * new one beside the old and swaps them.
+     */
+    private fun fitSurfaces() {
+        val window = watching
+        val fit = if (window == null) null else Letterbox.fit(window.width, window.height, stage.width, stage.height)
+        val width = fit?.first ?: MATCH_PARENT
+        val height = fit?.second ?: MATCH_PARENT
+        for (view in listOf<View>(surface, spare)) {
+            val params = view.layoutParams as FrameLayout.LayoutParams
+            if (params.width != width || params.height != height || params.gravity != android.view.Gravity.CENTER) {
+                params.width = width
+                params.height = height
+                params.gravity = android.view.Gravity.CENTER
+                view.layoutParams = params
+            }
+        }
+    }
+
+    /** The host resized a window: refit the picture, or the floating window, to its new shape. */
+    private fun onResized(event: Event.WindowResized) {
+        if (event.width <= 0 || event.height <= 0) return
+        val window = watching
+        if (window != null && window.id == event.window) {
+            watching = window.copy(width = event.width, height = event.height)
+            if (streaming()) {
+                fitSurfaces()
+                lastCursor?.let { showPointer(it) }
+            }
+        }
+        extras[event.window]?.let { sizeStreamWindow(it.dialog, event.width, event.height) }
+    }
+
+    /** Sizes a floating stream window to a [width] by [height] picture, shrunk to fit the screen. */
+    private fun sizeStreamWindow(dialog: Dialog, width: Int, height: Int) {
+        val screen = resources.displayMetrics
+        val scale = minOf(
+            1f,
+            screen.widthPixels * 0.9f / width.coerceAtLeast(1),
+            screen.heightPixels * 0.8f / height.coerceAtLeast(1),
+        )
+        dialog.window?.setLayout(
+            (width * scale).toInt().coerceAtLeast(64),
+            (height * scale).toInt().coerceAtLeast(64),
+        )
+    }
+
     /** What the status line says when nothing is going on, so no old message outlives its screen. */
     private fun showIdleStatus() {
         status.text = if (session?.isOpen == true) "${windows.size} windows. Tap one to watch it." else "Not connected"
@@ -1628,8 +1680,9 @@ class MainActivity : Activity() {
             params.height = height
             pointer.layoutParams = params
         }
-        pointer.translationX = cursor.x * surface.width - hotspot.first * scale
-        pointer.translationY = cursor.y * surface.height - hotspot.second * scale
+        // The picture may sit inside bars, so its position in the frame counts.
+        pointer.translationX = surface.left + cursor.x * surface.width - hotspot.first * scale
+        pointer.translationY = surface.top + cursor.y * surface.height - hotspot.second * scale
         pointer.visibility = View.VISIBLE
     }
 
@@ -1640,6 +1693,7 @@ class MainActivity : Activity() {
         pointer.visibility = View.GONE
         lastCursor = null
         surface.visibility = View.GONE
+        stage.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         form.visibility = View.VISIBLE
         // The stream's title (window name and counters) goes with the stream.
         title = APP_TITLE

@@ -48,6 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   switch stays in the host window.
 
 ### Fixed
+- Viewer: a picture keeps its shape. It used to be stretched to fill the screen whatever the
+  window's proportions were, so a 4:3 window on a 16:9 handheld came out wide. It is now the
+  largest picture of the window's own shape that fits, centred, with black bars, and it
+  follows the host resizing the window (the viewer used to ignore `WindowResized`). The host's
+  pointer is drawn at the right place inside the bars.
+- Viewer: a link from another app that fails because the host is off or the network is down
+  says so. It used to say every failure was because the viewer had not paired with the host,
+  which is true only when it is the cause.
 - Viewer: watching a second window no longer puts a second decoder on the first window's
   surface. The first window watched fills the screen; any other gets a floating window of its
   own with its own surface, decoder and sound, kept until the user closes it, the host closes

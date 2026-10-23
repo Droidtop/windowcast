@@ -69,6 +69,10 @@ So the viewer streams as many windows as the user asks for:
 - Carrier switching (video or RDP pictures, compatibility mode, the private session) acts on
   the full-screen window only. A floating window shows the carrier the host started it on.
 
+A stream keeps its window's shape: the picture is the largest one of the window's own
+proportions that fits the screen, centred, with black bars, and it follows the host resizing the
+window. The host's pointer is drawn over the picture, not over the bars.
+
 Typing without a hardware keyboard: the menu's **Keyboard** (or the button on a floating
 window) brings up the soft keyboard over the bottom of the screen; the stream does not move.
 Keys go to the host as a hardware keyboard's would; a character a keyboard can only commit as
