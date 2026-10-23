@@ -93,6 +93,16 @@ class MainActivity : Activity() {
     private var switching: Switch? = null
 
     /**
+     * Switches a host has refused, as host:window:backend, so the menu stops offering one it
+     * has already said it cannot serve (Droidtop/tracker#471). Per window, since a host can
+     * refuse one window's switch and serve another's.
+     */
+    private val refusedSwitches = mutableSetOf<String>()
+
+    private fun refusedKey(window: Long, backend: String): String =
+        "${session?.hostId}:$window:$backend"
+
+    /**
      * The host's pointer, drawn over the watched window where the host says it is (the host
      * leaves it out of its pictures, so it looks the same on every carrier), and its shapes.
      */
@@ -701,6 +711,7 @@ class MainActivity : Activity() {
                     }
                     is Event.CarrierRefused -> main.post {
                         if (event.window == watching?.id && switching?.generation == event.generation) {
+                            switching?.let { refusedSwitches += refusedKey(event.window, it.backend) }
                             cancelSwitch()
                             tell("No switch: ${event.reason}")
                         }
@@ -840,8 +851,11 @@ class MainActivity : Activity() {
 
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
         val on = streaming() && switching == null
-        menu.findItem(MENU_VIDEO)?.isVisible = on && carrier != "Native"
-        menu.findItem(MENU_PICTURES)?.isVisible = on && carrier != "Rdp"
+        val window = watching?.id
+        fun offered(backend: String) =
+            window == null || refusedKey(window, backend) !in refusedSwitches
+        menu.findItem(MENU_VIDEO)?.isVisible = on && carrier != "Native" && offered("Native")
+        menu.findItem(MENU_PICTURES)?.isVisible = on && carrier != "Rdp" && offered("Rdp")
         menu.findItem(MENU_COMPATIBILITY)?.let {
             it.isVisible = streaming()
             it.isChecked = compatibility

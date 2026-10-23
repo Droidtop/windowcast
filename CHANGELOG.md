@@ -38,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GameStream's fixed 4+2 code with Sunshine's matrix, which stays in `gamestream::fec` with
   the same functions. GameStream's parity is byte-identical to before (a known-answer test
   pins it). The Direct transport uses the general code for parity that follows the loss.
+- The reference app's host lets clients drive the windows they stream (`input`) by
+  default, since a host that streams but ignores the pointer and keys looks broken to
+  a new user. A saved configuration that sets it to `false` keeps that choice, and the
+  switch stays in the host window.
+
+### Fixed
+- Viewer: once a host has refused to switch a window's carrier, the options menu stops
+  offering that switch for that window on that host (Droidtop/tracker#471).
 
 ## [0.35.0] - 2026-10-16
 
