@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `windowcast-bud`, the packet layer of `Direct`, windowcast's own low-latency datagram
+  transport built from the public design of Parsec's BUD between our own peers
+  (Droidtop/tracker#441, docs/research/parsec.md): a 24-byte header, ChaCha20-Poly1305
+  datagrams with the header as associated data and the packet number as the nonce, a
+  1024-packet replay window, and a Noise IK handshake between pinned identities. No
+  sockets and no clock, and nothing uses it yet: fragmenting, loss recovery, congestion
+  control and pacing are the next steps.
+
 ## [0.35.0] - 2026-10-16
 
 ### Added

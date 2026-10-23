@@ -6078,6 +6078,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "snow"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "850948bee068e713b8ab860fe1adc4d109676ab4c3b621fd8147f06b261f2f85"
+dependencies = [
+ "aes-gcm 0.10.3",
+ "blake2 0.10.6",
+ "chacha20poly1305",
+ "curve25519-dalek 4.1.3",
+ "rand_core 0.6.4",
+ "rustc_version",
+ "sha2 0.10.9",
+ "subtle",
+]
+
+[[package]]
 name = "socket2"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7444,6 +7460,17 @@ dependencies = [
  "windowcast-transport",
  "windowcast-vnc",
  "windows 0.62.2",
+]
+
+[[package]]
+name = "windowcast-bud"
+version = "0.35.0"
+dependencies = [
+ "chacha20poly1305",
+ "sha2 0.10.9",
+ "snow",
+ "thiserror 1.0.69",
+ "windowcast-identity",
 ]
 
 [[package]]

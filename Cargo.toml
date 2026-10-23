@@ -15,6 +15,7 @@ members = [
     "rendezvous",
     "vnc",
     "transport",
+    "bud",
     "host-core",
     "client-core",
     "agent-linux",

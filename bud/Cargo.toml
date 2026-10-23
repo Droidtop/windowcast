@@ -1,0 +1,17 @@
+[package]
+name = "windowcast-bud"
+description = "Direct: windowcast's own low-latency datagram transport (Droidtop/tracker#441), built from the public design of Parsec's BUD between our own peers. This crate is the packet layer: header, encryption, replay window and handshake. No sockets."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+windowcast-identity = { path = "../identity" }
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
+# risky-raw-split: the handshake is Noise, but the datagrams are sealed by our own
+# AEAD (src/packet.rs) because the header has to be authenticated as associated
+# data, which snow's transport mode cannot do. The raw keys never leave this crate.
+snow = { version = "0.9", default-features = false, features = ["default-resolver", "risky-raw-split"] }
+thiserror = { workspace = true }
