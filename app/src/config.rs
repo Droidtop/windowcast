@@ -110,7 +110,7 @@ impl Default for HostSettings {
             codec: String::new(),
             fps: 30,
             bitrate_mbps: 8.0,
-            input: false,
+            input: true,
             clipboard: false,
             microphone: false,
             microphone_device: String::new(),
