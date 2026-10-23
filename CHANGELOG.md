@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Viewer: a soft keyboard. The menu's Keyboard (and a button on each floating window) brings
+  it up over the bottom of the screen without moving the stream; keys reach the host as a
+  hardware keyboard's would, and text a keyboard can only commit as characters goes as text
+  input. "Watch another window" in the menu lists the host's windows not yet showing.
+
 ### Changed
 - The reference app's host lets clients drive the windows they stream (`input`) by
   default, since a host that streams but ignores the pointer and keys looks broken to
@@ -14,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   switch stays in the host window.
 
 ### Fixed
+- Viewer: watching a second window no longer puts a second decoder on the first window's
+  surface. The first window watched fills the screen; any other gets a floating window of its
+  own with its own surface, decoder and sound, kept until the user closes it, the host closes
+  the window, or the session ends. Asking for a window already showing does nothing (the
+  owner's rule, docs/ANDROID-VIEWER.md, "Several windows at once").
 - Viewer: once a host has refused to switch a window's carrier, the options menu stops
   offering that switch for that window on that host (Droidtop/tracker#471).
 
