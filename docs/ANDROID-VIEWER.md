@@ -51,6 +51,30 @@ address is refused with a message and changes nothing. Parsing is
 `android/viewer/src/main/java/dev/windowcast/viewer/ConnectRequest.kt`, tested
 in `ConnectRequestTest.kt` (CI's `:viewer:testDebugUnitTest`).
 
+## Several windows at once, and typing
+
+The owner's rule (Droidtop/tracker#118): "since windowcast is arbitrary window casting,
+multiple streams is intended behavior. A window stream should only close when it is
+instructed to, or when the session closes."
+
+So the viewer streams as many windows as the user asks for:
+
+- The first window watched fills the screen. Any other window watched while one is up (the
+  menu's **Watch another window**, or a link from another app) gets a floating window of its
+  own, with its own surface, decoder and sound, a **Keyboard** button and a **Close** button.
+- Asking for a window that is already showing does nothing.
+- A window stops only when the user closes it (Close, or Back), when the host closes the
+  window, or when the session ends. Ending the full-screen window does not close the others,
+  and a new connection or a lost one closes them all.
+- Carrier switching (video or RDP pictures, compatibility mode, the private session) acts on
+  the full-screen window only. A floating window shows the carrier the host started it on.
+
+Typing without a hardware keyboard: the menu's **Keyboard** (or the button on a floating
+window) brings up the soft keyboard over the bottom of the screen; the stream does not move.
+Keys go to the host as a hardware keyboard's would; a character a keyboard can only commit as
+text, such as an emoji, goes as text input. Keys typed while a floating window is up go to the
+host and follow whichever window was touched last.
+
 ## Getting the viewer
 
 Each windowcast release from the one carrying this change has

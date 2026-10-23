@@ -166,6 +166,18 @@ class MainActivity : Activity() {
 
     /** The open popups, by window id. */
     private val popups = mutableMapOf<Long, PopupView>()
+
+    /** Which windows are showing, and what asking to watch one does (docs/ANDROID-VIEWER.md). */
+    private val watchSet = WatchSet()
+
+    /**
+     * A window watched beside the one that fills the screen: a floating window with its own
+     * surface, decoder and sound, kept until it is closed, the host closes the window, or the
+     * session ends.
+     */
+    private class StreamWindow(val dialog: Dialog, var renderer: WindowRenderer?, var audio: AudioPlayer?)
+
+    private val extras = mutableMapOf<Long, StreamWindow>()
     private var audio: AudioPlayer? = null
     @Volatile private var soundPackets = 0L
     private var windows: List<WindowInfo> = emptyList()
@@ -287,11 +299,11 @@ class MainActivity : Activity() {
         }
         // The whole form scrolls, so a list of windows is never squeezed into what the form leaves.
         form = ScrollView(this).apply { addView(column, MATCH_PARENT, WRAP_CONTENT) }
-        surface = SurfaceView(this).apply {
+        surface = StreamSurfaceView(this) { send(Input.text(it)) }.apply {
             visibility = View.GONE
             setOnTouchListener { view, event -> touch(view, event) }
         }
-        spare = SurfaceView(this).apply {
+        spare = StreamSurfaceView(this) { send(Input.text(it)) }.apply {
             visibility = View.GONE
             setOnTouchListener { view, event -> touch(view, event) }
         }
@@ -454,6 +466,8 @@ class MainActivity : Activity() {
     ) {
         val c = client ?: return
         status.text = progress
+        // Windows watched beside the others belong to the session being replaced.
+        closeStreamWindows(notifyHost = false)
         worker.execute {
             try {
                 stopMicrophone()
@@ -704,7 +718,13 @@ class MainActivity : Activity() {
                     is Event.StreamStarted -> main.post {
                         // The window being watched, or one it owns that the
                         // library opened as it appeared.
-                        if (event.window == watching?.id) startDecoding(event) else openPopup(event)
+                        if (event.window == watching?.id) {
+                            startDecoding(event)
+                        } else if (watchSet.isExtra(event.window)) {
+                            openStreamWindow(event)
+                        } else {
+                            openPopup(event)
+                        }
                     }
                     is Event.CarrierStarted -> main.post {
                         if (event.window == watching?.id) switchCarrier(event)
@@ -721,6 +741,9 @@ class MainActivity : Activity() {
                         if (event.window == watching?.id) {
                             status.text = "Refused: ${event.reason}"
                             showForm()
+                        } else if (watchSet.isExtra(event.window)) {
+                            watchSet.extraEnded(event.window)
+                            tell("Refused: ${event.reason}")
                         } else {
                             // A window the host opened as it appeared (a
                             // dialog such as Save As) that could not be shown.
@@ -729,6 +752,7 @@ class MainActivity : Activity() {
                     }
                     is Event.StreamStopped -> main.post {
                         if (popups.containsKey(event.window)) closePopup(event.window)
+                        else if (extras.containsKey(event.window)) closeStreamWindow(event.window, notifyHost = false)
                         else if (event.window == watching?.id) stopDecoding()
                     }
                     is Event.Cursor -> main.post { if (event.window == watching?.id) showPointer(event) }
@@ -766,7 +790,14 @@ class MainActivity : Activity() {
                         clipboard.setPrimaryClip(ClipData.newPlainText("windowcast", event.text))
                     }
                     is Event.Closed -> {
-                        if (listener === me) main.post { status.text = "Disconnected"; stopMicrophone(); stopDecoding() }
+                        if (listener === me) {
+                            main.post {
+                                status.text = "Disconnected"
+                                stopMicrophone()
+                                closeStreamWindows(notifyHost = false)
+                                stopDecoding()
+                            }
+                        }
                         break
                     }
                     else -> {}
@@ -783,7 +814,7 @@ class MainActivity : Activity() {
      */
     private fun tell(text: String) {
         status.text = text
-        if (streaming()) android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show()
+        if (streamingAny()) android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show()
     }
 
     private fun showWindows(list: List<WindowInfo>) {
@@ -833,8 +864,19 @@ class MainActivity : Activity() {
 
     private fun watch(window: WindowInfo) {
         val s = session ?: return
-        watching = window
-        status.text = "Starting ${window.title}…"
+        when (watchSet.begin(window.id)) {
+            // Asking again for a window already showing does nothing (it used to put a second
+            // decoder on the same surface).
+            WatchSet.Plan.ALREADY_SHOWING -> {
+                tell("${window.title} is already on screen")
+                return
+            }
+            WatchSet.Plan.PRIMARY -> {
+                watching = window
+                status.text = "Starting ${window.title}…"
+            }
+            WatchSet.Plan.EXTRA -> tell("Starting ${window.title} beside the others…")
+        }
         val codecs = WindowDecoder.decodableCodecs()
         worker.execute { s.startWindow(window.id, codecs) }
     }
@@ -844,6 +886,8 @@ class MainActivity : Activity() {
         menu.add(Menu.NONE, MENU_PICTURES, Menu.NONE, "Show as RDP pictures")
         menu.add(Menu.NONE, MENU_COMPATIBILITY, Menu.NONE, "Compatibility mode")
             .setCheckable(true)
+        menu.add(Menu.NONE, MENU_KEYBOARD, Menu.NONE, "Keyboard")
+        menu.add(Menu.NONE, MENU_ANOTHER, Menu.NONE, "Watch another window")
         menu.add(Menu.NONE, MENU_PRIVATE_START, Menu.NONE, "Use a private session")
         menu.add(Menu.NONE, MENU_PRIVATE_END, Menu.NONE, "End the private session")
         return true
@@ -861,6 +905,8 @@ class MainActivity : Activity() {
             it.isChecked = compatibility
         }
         val connected = session?.isOpen == true
+        menu.findItem(MENU_KEYBOARD)?.isVisible = streaming()
+        menu.findItem(MENU_ANOTHER)?.isVisible = connected && streaming() && windows.isNotEmpty()
         menu.findItem(MENU_PRIVATE_START)?.isVisible = connected && hostPrivate == "available"
         menu.findItem(MENU_PRIVATE_END)?.isVisible = connected && hostPrivate == "active"
         return true
@@ -869,6 +915,14 @@ class MainActivity : Activity() {
     /** Switches the watched window's carrier, keeping it on screen until the new one shows. */
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         when (item.itemId) {
+            MENU_KEYBOARD -> {
+                showKeyboard(surface)
+                return true
+            }
+            MENU_ANOTHER -> {
+                chooseAnotherWindow()
+                return true
+            }
             MENU_COMPATIBILITY -> {
                 val s = session ?: return true
                 val window = watching ?: return true
@@ -1141,6 +1195,9 @@ class MainActivity : Activity() {
 
     private fun streaming(): Boolean = surface.visibility == View.VISIBLE && watching != null
 
+    /** Whether any window is showing, filling the screen or beside it. */
+    private fun streamingAny(): Boolean = streaming() || extras.isNotEmpty()
+
     private fun send(input: Input) {
         val s = session ?: return
         inputWorker.execute { s.send(input) }
@@ -1172,16 +1229,29 @@ class MainActivity : Activity() {
         if (terminalView.visibility == View.VISIBLE && event.keyCode != KeyEvent.KEYCODE_BACK && terminalView.handleKey(event)) {
             return true
         }
-        if (!streaming() || event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
+        if (!streamingAny() || event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
+        return streamKey(event) || super.dispatchKeyEvent(event)
+    }
+
+    /**
+     * Sends a key to the host as a hardware keyboard's would go: a key it has a code for as that
+     * key, any other character as text. False if the key is not one to send.
+     */
+    private fun streamKey(event: KeyEvent): Boolean {
         if (gamepads.onKey(event)) return true
         val down = event.action == KeyEvent.ACTION_DOWN
         val evdev = Keys.evdev(event.keyCode)
-        when {
-            evdev != null -> if (event.repeatCount == 0) send(Input.key(evdev, down))
-            down && event.unicodeChar != 0 -> send(Input.text(String(Character.toChars(event.unicodeChar))))
-            else -> return super.dispatchKeyEvent(event)
+        return when {
+            evdev != null -> {
+                if (event.repeatCount == 0) send(Input.key(evdev, down))
+                true
+            }
+            down && event.unicodeChar != 0 -> {
+                send(Input.text(String(Character.toChars(event.unicodeChar))))
+                true
+            }
+            else -> false
         }
-        return true
     }
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
@@ -1266,6 +1336,149 @@ class MainActivity : Activity() {
         val popup = popups.remove(window) ?: return
         popup.renderer?.let { r -> worker.execute { r.stop() } }
         popup.dialog.dismiss()
+    }
+
+    /**
+     * Opens a window watched beside the one that fills the screen as a floating window of its
+     * own: its own surface, decoder and sound, with buttons to type into it and to close it. It
+     * stays until the user closes it (Close, or Back), the host closes the window, or the
+     * session ends. It is not closed when the full-screen window is.
+     */
+    private fun openStreamWindow(event: Event.StreamStarted) {
+        val s = session ?: return
+        val info = windows.firstOrNull { it.id == event.window }
+        if (info == null) {
+            watchSet.extraEnded(event.window)
+            return
+        }
+        if (extras.containsKey(event.window)) return
+        val view = StreamSurfaceView(this) { send(Input.text(it)) }
+        view.setOnTouchListener { v, e -> touchWindow(event.window, v, e) }
+        val dialog = object : Dialog(this@MainActivity) {
+            // Keys typed while this window is up go to the host like any others; Back closes it.
+            override fun dispatchKeyEvent(e: KeyEvent): Boolean =
+                (e.keyCode != KeyEvent.KEYCODE_BACK && streamKey(e)) || super.dispatchKeyEvent(e)
+        }
+        val buttons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(
+                Button(this@MainActivity).apply {
+                    text = "Keyboard"
+                    setOnClickListener { showKeyboard(view) }
+                },
+                WRAP_CONTENT,
+                WRAP_CONTENT,
+            )
+            addView(
+                Button(this@MainActivity).apply {
+                    text = "Close"
+                    setOnClickListener { dialog.dismiss() }
+                },
+                WRAP_CONTENT,
+                WRAP_CONTENT,
+            )
+        }
+        val content = FrameLayout(this).apply {
+            addView(view, MATCH_PARENT, MATCH_PARENT)
+            addView(
+                buttons,
+                FrameLayout.LayoutParams(
+                    WRAP_CONTENT,
+                    WRAP_CONTENT,
+                    android.view.Gravity.TOP or android.view.Gravity.END,
+                ),
+            )
+        }
+        val shown = StreamWindow(dialog, null, null)
+        extras[event.window] = shown
+        dialog.setTitle(info.title)
+        dialog.setContentView(content)
+        dialog.setCanceledOnTouchOutside(false)
+        val screen = resources.displayMetrics
+        val scale = minOf(
+            1f,
+            screen.widthPixels * 0.9f / info.width.coerceAtLeast(1),
+            screen.heightPixels * 0.8f / info.height.coerceAtLeast(1),
+        )
+        dialog.window?.setLayout(
+            (info.width * scale).toInt().coerceAtLeast(64),
+            (info.height * scale).toInt().coerceAtLeast(64),
+        )
+        // The keyboard covers the bottom of the window instead of pushing it about.
+        dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+        dialog.setOnDismissListener {
+            // Closed here (Close, Back): stop it and tell the host. A window the host closed, or
+            // one closed with the session, left the map first, so this does nothing for them.
+            if (extras.remove(event.window) != null) {
+                watchSet.extraEnded(event.window)
+                release(shown)
+                worker.execute { s.stopWindow(event.window) }
+            }
+        }
+        view.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                shown.renderer = (if (event.backend == "Rdp") {
+                    WindowPictures(s, event.window, holder)
+                } else {
+                    WindowDecoder(s, event.window, holder.surface, info.width, info.height)
+                }).also { it.start() }
+            }
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                shown.renderer?.let { r -> worker.execute { r.stop() } }
+                shown.renderer = null
+            }
+        })
+        shown.audio = AudioPlayer(s, event.window).also { it.start() }
+        dialog.show()
+    }
+
+    /** Stops what a floating stream window is running; the window itself is not touched. */
+    private fun release(shown: StreamWindow) {
+        shown.renderer?.let { r -> worker.execute { r.stop() } }
+        shown.renderer = null
+        shown.audio?.let { a -> worker.execute { a.stop() } }
+        shown.audio = null
+    }
+
+    /** Closes one floating stream window; with [notifyHost] the host is told to stop sending it. */
+    private fun closeStreamWindow(window: Long, notifyHost: Boolean) {
+        val shown = extras.remove(window) ?: return
+        watchSet.extraEnded(window)
+        release(shown)
+        shown.dialog.dismiss()
+        if (notifyHost) session?.let { s -> worker.execute { s.stopWindow(window) } }
+    }
+
+    /** Closes every floating stream window: the session they belong to is ending or gone. */
+    private fun closeStreamWindows(notifyHost: Boolean) {
+        for (window in extras.keys.toList()) closeStreamWindow(window, notifyHost)
+        watchSet.clear()
+    }
+
+    /** Brings up the soft keyboard for [view], a stream's surface. */
+    private fun showKeyboard(view: View) {
+        view.requestFocus()
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+        imm.showSoftInput(view, 0)
+    }
+
+    /** Lists the host's windows not yet showing, and watches the one picked beside the others. */
+    private fun chooseAnotherWindow() {
+        val choices = windows.filter {
+            it.owner == null && it.width > 0 && it.height > 0 && !watchSet.isWatched(it.id)
+        }
+        if (choices.isEmpty()) {
+            tell("There is no other window to watch")
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Watch another window")
+            .setItems(choices.map { "${it.title} (${it.appId})" }.toTypedArray()) { _, which ->
+                watch(choices[which])
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     /**
@@ -1421,6 +1634,8 @@ class MainActivity : Activity() {
     }
 
     private fun showForm() {
+        // The full-screen stream is gone; windows watched beside it stay.
+        watchSet.primaryEnded()
         compatibility = false
         pointer.visibility = View.GONE
         lastCursor = null
@@ -1449,6 +1664,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        val extraIds = extras.keys.toList()
+        closeStreamWindows(notifyHost = false)
         clipboardListener?.let { clipboard.removePrimaryClipChangedListener(it) }
         inputWorker.shutdown()
         val reader = listener
@@ -1463,6 +1680,8 @@ class MainActivity : Activity() {
             val s = session
             val w = watching
             if (decoder != null && s != null && w != null) worker.execute { s.stopWindow(w.id) }
+            // Nor do the windows watched beside it.
+            if (s != null) for (id in extraIds) worker.execute { s.stopWindow(id) }
             reader?.join(1000)
         } else {
             terminalSession?.close()
@@ -1484,6 +1703,8 @@ class MainActivity : Activity() {
         private const val MENU_PRIVATE_START = 3
         private const val MENU_PRIVATE_END = 4
         private const val MENU_COMPATIBILITY = 5
+        private const val MENU_KEYBOARD = 6
+        private const val MENU_ANOTHER = 7
         /** The activity's label in the manifest: the title when no stream is showing. */
         private const val APP_TITLE = "windowcast viewer"
         /** How long a browser sign-in may take before it is given up. */
