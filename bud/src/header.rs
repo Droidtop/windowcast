@@ -27,7 +27,9 @@ pub const MAX_DATAGRAM: usize = 1200;
 /// The most payload one datagram carries.
 pub const MAX_PAYLOAD: usize = MAX_DATAGRAM - HEADER_LEN - TAG_LEN;
 
-/// `flags` bit: this fragment is parity, not frame data.
+/// `flags` bit: this packet is parity, not frame data. For a parity packet
+/// `fragment` numbers the frame's parity packets and `fragments` is the
+/// frame's data fragment count (see [`crate::parity`]).
 pub const FLAG_PARITY: u8 = 0x01;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +100,11 @@ impl Header {
             packet: u64::from_be_bytes(packet),
             sent_us: be32(20),
         };
-        if header.fragments == 0 || header.fragment >= header.fragments {
+        // A parity packet's `fragment` counts parity packets, which a small
+        // frame can have more of than it has data fragments; its `fragments`
+        // is the frame's data fragment count and must still be at least 1.
+        let parity = header.flags & FLAG_PARITY != 0;
+        if header.fragments == 0 || (!parity && header.fragment >= header.fragments) {
             return Err(HeaderError::Fragment {
                 fragment: header.fragment,
                 fragments: header.fragments,
@@ -155,6 +161,7 @@ mod tests {
     #[test]
     fn a_fragment_outside_its_frame_is_refused() {
         let mut h = sample();
+        h.flags = 0;
         h.fragment = 5;
         assert!(matches!(
             Header::decode(&h.encode()),
@@ -162,6 +169,20 @@ mod tests {
         ));
         h.fragments = 0;
         h.fragment = 0;
+        assert!(matches!(
+            Header::decode(&h.encode()),
+            Err(HeaderError::Fragment { .. })
+        ));
+    }
+
+    #[test]
+    fn a_parity_packet_may_number_past_the_data_fragments() {
+        let mut h = sample();
+        h.flags = FLAG_PARITY;
+        h.fragments = 1;
+        h.fragment = 7;
+        assert_eq!(Header::decode(&h.encode()), Ok(h));
+        h.fragments = 0;
         assert!(matches!(
             Header::decode(&h.encode()),
             Err(HeaderError::Fragment { .. })

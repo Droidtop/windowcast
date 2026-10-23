@@ -14,8 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   datagrams with the header as associated data and the packet number as the nonce, a
   1024-packet replay window, a Noise IK handshake between pinned identities, and
   cutting a frame into datagrams and reassembling it (bounded in-flight frames and
-  frame size, late and repeated fragments handled, no jitter buffer). No
-  sockets and no clock, and nothing uses it yet: parity, NACKs, the reliable channel, congestion
+  frame size, late and repeated fragments handled, no jitter buffer), and parity: a frame's
+  fragments are grouped into blocks of at most 128, each with Cauchy parity from
+  `windowcast-fec`, and a lost fragment is rebuilt as soon as its block has enough shards. How
+  much parity a block gets is a `ParityPolicy`: `NoParity`, or `AdaptiveParity`, which follows
+  the loss the receiver reports. GameStream audio keeps its own fixed 4+2 code. No
+  sockets and no clock, and nothing uses it yet: NACKs, the reliable channel, congestion
   control and pacing are the next steps.
 
 ### Changed
