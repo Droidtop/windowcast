@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sockets and no clock, and nothing uses it yet: parity, NACKs, the reliable channel, congestion
   control and pacing are the next steps.
 
+### Changed
+- The Reed-Solomon code moved out of `windowcast-gamestream` into a new
+  `windowcast-fec` crate, split into the general code (the field, encoding, recovery from
+  any shards that arrive, and a Cauchy matrix for any data and parity count) and
+  GameStream's fixed 4+2 code with Sunshine's matrix, which stays in `gamestream::fec` with
+  the same functions. GameStream's parity is byte-identical to before (a known-answer test
+  pins it). The Direct transport uses the general code for parity that follows the loss.
+
 ## [0.35.0] - 2026-10-16
 
 ### Added

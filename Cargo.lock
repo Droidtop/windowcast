@@ -7526,6 +7526,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "windowcast-fec"
+version = "0.35.0"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "windowcast-gamestream"
 version = "0.35.0"
 dependencies = [
@@ -7544,6 +7551,7 @@ dependencies = [
  "tokio-rustls",
  "ureq",
  "windowcast-cli-tools",
+ "windowcast-fec",
  "windowcast-host",
  "windowcast-protocol",
  "windowcast-transport",

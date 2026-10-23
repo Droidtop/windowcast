@@ -9,6 +9,7 @@ license.workspace = true
 windowcast-protocol = { path = "../protocol" }
 windowcast-host = { path = "../host-core" }
 windowcast-transport = { path = "../transport" }
+windowcast-fec = { path = "../fec" }
 thiserror.workspace = true
 rand_core.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "time", "macros", "rt"] }
