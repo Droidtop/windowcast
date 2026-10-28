@@ -18,7 +18,8 @@ ways until it ends. Everything the stream does is a channel kind:
 | `Exec` | runs one command (argv), with a pseudo-terminal when asked | stdin in, output out | the command's exit code |
 | `Launch` | starts an application detached from the stream | nothing, or its first output | `Exited` at once with the process id; the window it makes appears in the session's window list (`ListWindows`), where the usual selection rules pick its backend. On a Windows host, a program the client's rules give RDP may run as a RemoteApp of the host's Remote Desktop instead (`remote_app`, with the Windows `password` the client has; the host runs it and its windows join the host's list, or it answers `PasswordNeeded`; docs/BACKENDS.md, "RemoteApp") |
 | `Files` | serves the folders the host application shares (see "Files") | typed requests and replies, one per `Data` | the client closing it |
-| later kinds | process operations, folder watch, chat | typed requests in `Data` | answered or refused |
+| `Watch` | looks at a folder of a share and sends each file that changed and settled | `WatchReply`s, host to client only | the client closing it |
+| later kinds | process operations, chat | typed requests in `Data` | answered or refused |
 
 The shell, application launch and every other command share the same
 open/data/resize/eof/close/exit messages, the same authorization check,
@@ -103,7 +104,7 @@ pub trait CommandAuthorizer { fn authorize(&self, who: &Principal, kind: &Channe
 * **Viewers**: the egui reference app and the Android library and viewer
   draw the screen snapshot; the emulator is in the library, not the viewers.
 
-Not built yet: process kinds, folder watch (save sync), chat / notices, X11/agent/port forwarding, SSH
+Not built yet: process kinds, chat / notices, X11/agent/port forwarding, SSH
 logins with Kerberos tickets (GSSAPI; russh has the client side), mouse
 reporting and text selection in the viewers.
 
@@ -159,6 +160,33 @@ Each kind is authorized on its own: the `CommandAuthorizer` sees
 `ChannelKind::Files`, so a host can allow shells and refuse files, or the
 reverse. Old hosts do not know the kind: they drop the open, and the client
 reports that the host may not support it.
+
+### Folder watch (save sync)
+
+`ChannelKind::Watch { share, path, pattern, existing }` is the channel a client opens to have the
+files of a folder of a share sent to it as they change: a game's save written on the host is on
+the client when the host has finished writing it. Client-initiated like every channel, so the
+trust model does not change: the same shares, the same two path checks, the same per-kind
+authorizer. The host sends nothing it was not asked to watch, and the client sends nothing on the
+channel.
+
+* The folder is `path` of the share (the share's top for `""`), followed to a depth of 4 and at
+  most 5000 files. `pattern` limits it to file names matching `*` and `?` (no folders in a
+  pattern). `existing` also sends the files already there; otherwise only changes from the
+  moment the watch starts.
+* A file is sent when it has **settled**: its size and modification time have been the same for
+  2 seconds, and it can be opened for reading. A file still being written, or held open
+  exclusively by the program that writes it, is not sent half done. The host looks at the folder
+  every half second rather than relying on operating system notifications, so the same code
+  works on every host.
+* The host sends `Started{existing}`, then for each file `File{path, size}`, its `Chunk`s and
+  `End`. A file that changes again is sent again once it settles. A file that changes while it is
+  being read arrives short, and the client drops it; the next look sends the new version.
+* The client (`ClientSession::watch_folder`) files each file under the destination folder it
+  chose, at the same relative path, through a temporary name renamed when the file is complete.
+  **The host is not trusted with where a file goes**: the client checks the path with the same
+  rules as the host does (`clean`) and refuses the watch if the host names one that fails.
+* Links that lead out of the share are not watched; neither are partial uploads (`.wcpart`).
 
 ## Limits and flow
 

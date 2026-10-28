@@ -343,6 +343,7 @@ impl Channels {
         let what = match &kind {
             ChannelKind::Shell(_) => "shell".to_owned(),
             ChannelKind::Files => "files".to_owned(),
+            ChannelKind::Watch { .. } => "watch".to_owned(),
             ChannelKind::Exec { argv, .. } | ChannelKind::Launch { argv, .. } => {
                 argv.first().cloned().unwrap_or_default()
             }
@@ -352,7 +353,7 @@ impl Channels {
             return starter.detached(argv, &launch_env());
         }
         let (process, readers, pid): (Arc<dyn RunningProcess>, Vec<Box<dyn Read + Send>>, _) =
-            if matches!(kind, ChannelKind::Files) {
+            if matches!(kind, ChannelKind::Files | ChannelKind::Watch { .. }) {
                 if self.shares.is_empty() {
                     return Err("this host shares no folders".into());
                 }
@@ -365,14 +366,26 @@ impl Channels {
                         )))
                         .is_ok()
                 });
-                (
-                    Arc::new(crate::files::FilesProcess::new(
+                let process: Arc<dyn RunningProcess> = match &kind {
+                    ChannelKind::Watch {
+                        share,
+                        path,
+                        pattern,
+                        existing,
+                    } => Arc::new(crate::watch::WatchProcess::start(
+                        &self.shares,
+                        share,
+                        path,
+                        pattern.clone(),
+                        *existing,
+                        send,
+                    )?),
+                    _ => Arc::new(crate::files::FilesProcess::new(
                         Arc::clone(&self.shares),
                         send,
                     )),
-                    Vec::new(),
-                    None,
-                )
+                };
+                (process, Vec::new(), None)
             } else {
                 let Started {
                     process,
@@ -553,7 +566,7 @@ fn start_channel(starter: &dyn ProcessStarter, kind: &ChannelKind) -> Result<Sta
             starter.piped(argv, &launch_env())
         }
         ChannelKind::Launch { .. } => Err("a launch is not a stream".into()),
-        ChannelKind::Files => Err("files are not a process".into()),
+        ChannelKind::Files | ChannelKind::Watch { .. } => Err("files are not a process".into()),
     }
 }
 

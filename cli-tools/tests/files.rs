@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windowcast_cli_tools::testpattern::TestPatternSource;
 use windowcast_client::{Client, ClientError, ClientSession};
@@ -217,4 +217,136 @@ fn the_authorizer_can_refuse_files_alone() {
         ("hi".to_owned(), Some(0))
     );
     rig.control.set_command_authorizer(Arc::new(PairedDevices));
+}
+
+fn next_saved(watch: &windowcast_client::files::FolderWatch) -> (String, u64) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        match watch.next(Duration::from_millis(250)) {
+            Some(windowcast_client::files::WatchEvent::Saved { path, size }) => {
+                return (path, size)
+            }
+            Some(windowcast_client::files::WatchEvent::Failed(reason)) => {
+                panic!("watch failed: {reason}")
+            }
+            _ => {}
+        }
+    }
+    panic!("no file arrived");
+}
+
+#[test]
+fn a_watched_folder_sends_a_changed_file_once_it_has_settled() {
+    use windowcast_client::files::WatchEvent;
+    let rig = rig("watch");
+    let root = temp_dir("watch-share");
+    std::fs::create_dir_all(root.join("profile")).unwrap();
+    std::fs::write(root.join("profile/old.sav"), b"already there").unwrap();
+    rig.control.set_file_shares(shares(&root, false));
+    let session = connect(&rig);
+    let dest = temp_dir("watch-dest");
+
+    let watch = session
+        .watch_folder("saves", "profile", Some("*.sav"), false, &dest)
+        .unwrap();
+    assert_eq!(
+        watch.next(Duration::from_secs(10)),
+        Some(WatchEvent::Started { existing: 1 })
+    );
+
+    // A save written while we watch arrives, and not before it has settled.
+    std::fs::write(root.join("profile/slot1.sav"), b"first save").unwrap();
+    std::fs::write(root.join("profile/notes.txt"), b"not a save").unwrap();
+    let started = Instant::now();
+    assert_eq!(next_saved(&watch), ("slot1.sav".to_owned(), 10));
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "sent before it had settled"
+    );
+    assert_eq!(
+        std::fs::read(dest.join("slot1.sav")).unwrap(),
+        b"first save"
+    );
+    // The file that was already there, and the one that does not match, were not sent.
+    assert!(!dest.join("old.sav").exists() && !dest.join("notes.txt").exists());
+
+    // Saving again sends the new version.
+    std::fs::write(root.join("profile/slot1.sav"), b"second, longer save").unwrap();
+    assert_eq!(next_saved(&watch), ("slot1.sav".to_owned(), 19));
+    assert_eq!(
+        std::fs::read(dest.join("slot1.sav")).unwrap(),
+        b"second, longer save"
+    );
+
+    watch.stop();
+    assert_eq!(watch.next(Duration::from_secs(10)), Some(WatchEvent::Ended));
+}
+
+#[test]
+fn a_watch_can_ask_for_the_files_already_there() {
+    let rig = rig("watch-existing");
+    let root = temp_dir("watch-existing-share");
+    std::fs::write(root.join("a.sav"), b"a").unwrap();
+    rig.control.set_file_shares(shares(&root, false));
+    let session = connect(&rig);
+    let dest = temp_dir("watch-existing-dest");
+    let watch = session
+        .watch_folder("saves", "", None, true, &dest)
+        .unwrap();
+    assert_eq!(next_saved(&watch), ("a.sav".to_owned(), 1));
+    assert_eq!(std::fs::read(dest.join("a.sav")).unwrap(), b"a");
+}
+
+#[test]
+fn a_watch_outside_the_share_or_without_shares_is_refused() {
+    let rig = rig("watch-refused");
+    let session = connect(&rig);
+    let dest = temp_dir("watch-refused-dest");
+    let reason = refused(
+        session
+            .watch_folder("saves", "", None, false, &dest)
+            .err()
+            .expect("no shares"),
+    );
+    assert!(reason.contains("shares no folders"), "{reason}");
+
+    let root = temp_dir("watch-refused-share");
+    rig.control.set_file_shares(shares(&root, false));
+    for path in ["../elsewhere", "/etc"] {
+        let reason = refused(
+            session
+                .watch_folder("saves", path, None, false, &dest)
+                .err()
+                .expect("outside"),
+        );
+        assert!(!reason.is_empty(), "{path}");
+    }
+}
+
+#[test]
+fn the_authorizer_can_refuse_watching_alone() {
+    struct NoWatch;
+    impl CommandAuthorizer for NoWatch {
+        fn authorize(&self, _who: &Principal, kind: &ChannelKind) -> Result<(), String> {
+            match kind {
+                ChannelKind::Watch { .. } => Err("watching is not allowed here".into()),
+                _ => Ok(()),
+            }
+        }
+    }
+    let rig = rig("watch-authorizer");
+    let root = temp_dir("watch-authorizer-share");
+    rig.control.set_file_shares(shares(&root, false));
+    rig.control.set_command_authorizer(Arc::new(NoWatch));
+    let session = connect(&rig);
+    let dest = temp_dir("watch-authorizer-dest");
+    let reason = refused(
+        session
+            .watch_folder("saves", "", None, false, &dest)
+            .err()
+            .expect("refused"),
+    );
+    assert!(reason.contains("not allowed"), "{reason}");
+    // Transfers on the same share still open.
+    assert!(session.open_files().is_ok());
 }

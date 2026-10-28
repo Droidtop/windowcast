@@ -117,6 +117,96 @@ pub enum FileReply {
     Error(String),
 }
 
+/// Names Windows treats as devices, with or without an extension.
+const RESERVED: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// The parts of a path a client named, or why it is refused. The path is
+/// written with `/` and is relative to the share's folder; the empty path
+/// is the folder itself.
+pub fn clean(path: &str) -> Result<Vec<&str>, String> {
+    if path.len() > MAX_PATH {
+        return Err("that path is too long".into());
+    }
+    if path.starts_with('/') {
+        return Err("give a path inside the share, not an absolute one".into());
+    }
+    let mut parts = Vec::new();
+    for part in path.split('/').filter(|p| !p.is_empty()) {
+        if part == "." || part == ".." {
+            return Err("a path may not contain . or ..".into());
+        }
+        if part
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        {
+            return Err(format!("{part:?} has a character a path may not have"));
+        }
+        if part.ends_with('.') || part.ends_with(' ') {
+            return Err(format!("{part:?} ends with a dot or a space"));
+        }
+        let stem = part.split('.').next().unwrap_or(part).to_uppercase();
+        if RESERVED.contains(&stem.as_str()) {
+            return Err(format!("{part:?} is a reserved name"));
+        }
+        if part.to_lowercase().ends_with(PART_SUFFIX) {
+            return Err(format!("a name may not end with {PART_SUFFIX}"));
+        }
+        parts.push(part);
+    }
+    Ok(parts)
+}
+
+/// What a folder watch (`ChannelKind::Watch`) sends the client: for each file that has changed
+/// and stopped changing, a `File`, its `Chunk`s and an `End`. The client files it under the folder
+/// it chose, at the relative `path`; the host is not trusted with that path, so the client
+/// checks it with [`clean`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WatchReply {
+    /// The watch is on; changes from now on are sent. `existing` is how many files were already
+    /// there (sent first when the client asked for them).
+    Started {
+        existing: u32,
+    },
+    File {
+        path: String,
+        size: u64,
+    },
+    Chunk {
+        bytes: Vec<u8>,
+    },
+    /// The file just announced is complete.
+    End,
+    /// The watch cannot go on (the folder went away, say). The channel then closes.
+    Error(String),
+}
+
+pub fn encode_watch(reply: &WatchReply) -> Vec<u8> {
+    bincode::serialize(reply).expect("a reply serializes")
+}
+
+pub fn decode_watch(bytes: &[u8]) -> Result<WatchReply, String> {
+    bincode::deserialize(bytes).map_err(|_| "that is not a watch reply".to_owned())
+}
+
+/// Whether `name` matches `pattern`, where `*` stands for any run of characters and `?` for one.
+/// The match is on a file's name, without case.
+pub fn glob_matches(pattern: &str, name: &str) -> bool {
+    fn go(p: &[char], n: &[char]) -> bool {
+        match p.split_first() {
+            None => n.is_empty(),
+            Some(('*', rest)) => (0..=n.len()).any(|skip| go(rest, &n[skip..])),
+            Some(('?', rest)) => !n.is_empty() && go(rest, &n[1..]),
+            Some((c, rest)) => n.first() == Some(c) && go(rest, &n[1..]),
+        }
+    }
+    let p: Vec<char> = pattern.to_lowercase().chars().collect();
+    let n: Vec<char> = name.to_lowercase().chars().collect();
+    go(&p, &n)
+}
+
 pub fn encode_request(request: &FileRequest) -> Vec<u8> {
     bincode::serialize(request).expect("a request serializes")
 }
@@ -165,6 +255,32 @@ mod tests {
         });
         assert_eq!(decode_reply(&encode_reply(&reply)).unwrap(), reply);
         assert!(decode_request(&[0xff; 4]).is_err());
+    }
+
+    #[test]
+    fn globs_match_names_without_case() {
+        assert!(glob_matches("*.sav", "Slot1.SAV"));
+        assert!(glob_matches("save?.dat", "save3.dat"));
+        assert!(glob_matches("*", ""));
+        assert!(glob_matches("a*b*c", "aXXbYYc"));
+        assert!(!glob_matches("*.sav", "slot1.sav.bak"));
+        assert!(!glob_matches("save?.dat", "save.dat"));
+    }
+
+    #[test]
+    fn watch_replies_round_trip() {
+        for reply in [
+            WatchReply::Started { existing: 3 },
+            WatchReply::File {
+                path: "a/b.sav".into(),
+                size: 4,
+            },
+            WatchReply::Chunk { bytes: vec![1] },
+            WatchReply::End,
+            WatchReply::Error("gone".into()),
+        ] {
+            assert_eq!(decode_watch(&encode_watch(&reply)).unwrap(), reply);
+        }
     }
 
     #[test]

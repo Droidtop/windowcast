@@ -6,12 +6,14 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use windowcast_protocol::command::ChannelKind;
 use windowcast_protocol::files::{
-    decode_reply, encode_request, Entry, FileReply, FileRequest, ShareInfo, FILE_CHUNK,
-    PART_SUFFIX, UPLOAD_WINDOW,
+    clean, decode_reply, decode_watch, encode_request, Entry, FileReply, FileRequest, ShareInfo,
+    WatchReply, FILE_CHUNK, PART_SUFFIX, UPLOAD_WINDOW,
 };
 use windowcast_terminal::{Channel, ChannelEvent};
 
@@ -33,6 +35,202 @@ impl ClientSession {
             channel: self.open_channel(ChannelKind::Files)?,
         })
     }
+}
+
+impl ClientSession {
+    /// Asks the host to watch a folder of a share (`path`, `""` for the share's top; `pattern`
+    /// limits it to file names with `*` and `?`) and files every change into `dest`, at the same
+    /// relative path, once the file has stopped changing on the host. With `existing` the files
+    /// already there are sent first. The watch ends with [`FolderWatch::stop`], when the
+    /// session ends, or when the host stops it. The host refuses when it shares no folders or
+    /// does not allow this client; the reason is in the error.
+    pub fn watch_folder(
+        &self,
+        share: &str,
+        path: &str,
+        pattern: Option<&str>,
+        existing: bool,
+        dest: &Path,
+    ) -> Result<FolderWatch, ClientError> {
+        std::fs::create_dir_all(dest)?;
+        let channel = self.open_channel(ChannelKind::Watch {
+            share: share.into(),
+            path: path.into(),
+            pattern: pattern.map(str::to_owned),
+            existing,
+        })?;
+        let (events, receiver) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (flag, dest) = (Arc::clone(&stop), dest.to_owned());
+        std::thread::spawn(move || receive(channel, &dest, &flag, &events));
+        Ok(FolderWatch {
+            events: receiver,
+            stop,
+        })
+    }
+}
+
+/// What a folder watch reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatchEvent {
+    /// The watch is on. `existing` files were already in the folder.
+    Started { existing: u32 },
+    /// A file arrived and is in place under the destination folder.
+    Saved { path: String, size: u64 },
+    /// The watch cannot go on, with the reason. It has ended.
+    Failed(String),
+    /// The watch ended (stopped, or the session ended).
+    Ended,
+}
+
+/// A folder watch running on a host. Dropping it stops it.
+pub struct FolderWatch {
+    events: mpsc::Receiver<WatchEvent>,
+    stop: Arc<AtomicBool>,
+}
+
+impl FolderWatch {
+    /// The next event, waiting up to `within`.
+    pub fn next(&self, within: Duration) -> Option<WatchEvent> {
+        self.events.recv_timeout(within).ok()
+    }
+
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Drop for FolderWatch {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Reads a watch channel to its end, filing each file it carries.
+fn receive(channel: Channel, dest: &Path, stop: &AtomicBool, events: &mpsc::Sender<WatchEvent>) {
+    struct Incoming {
+        path: String,
+        size: u64,
+        got: u64,
+        part: PathBuf,
+        target: PathBuf,
+        file: File,
+    }
+    let mut incoming: Option<Incoming> = None;
+    let fail = |reason: String| {
+        let _ = events.send(WatchEvent::Failed(reason));
+    };
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            channel.close();
+            break;
+        }
+        let bytes = match channel.next_event(Duration::from_millis(250)) {
+            Some(ChannelEvent::Data(bytes)) => bytes,
+            Some(ChannelEvent::Closed) => break,
+            Some(ChannelEvent::Exited(_)) | None => continue,
+        };
+        let reply = match decode_watch(&bytes) {
+            Ok(reply) => reply,
+            Err(reason) => {
+                fail(reason);
+                channel.close();
+                break;
+            }
+        };
+        match reply {
+            WatchReply::Started { existing } => {
+                let _ = events.send(WatchEvent::Started { existing });
+            }
+            WatchReply::File { path, size } => {
+                // The host is not trusted with where a file goes.
+                let opened = clean(&path)
+                    .and_then(|parts| {
+                        if parts.is_empty() {
+                            return Err("the host named no file".to_owned());
+                        }
+                        let mut target = dest.to_owned();
+                        parts.iter().for_each(|part| target.push(part));
+                        Ok(target)
+                    })
+                    .and_then(|target| {
+                        if let Some(folder) = target.parent() {
+                            std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
+                        }
+                        let part = part_of(&target);
+                        let file = File::create(&part).map_err(|e| e.to_string())?;
+                        Ok((target, part, file))
+                    });
+                match opened {
+                    Ok((target, part, file)) => {
+                        incoming = Some(Incoming {
+                            path,
+                            size,
+                            got: 0,
+                            part,
+                            target,
+                            file,
+                        });
+                    }
+                    Err(reason) => {
+                        fail(reason);
+                        channel.close();
+                        break;
+                    }
+                }
+            }
+            WatchReply::Chunk { bytes } => {
+                let Some(file) = incoming.as_mut() else {
+                    fail("the host sent file bytes with no file".into());
+                    channel.close();
+                    break;
+                };
+                file.got += bytes.len() as u64;
+                if file.got > file.size || file.file.write_all(&bytes).is_err() {
+                    let _ = std::fs::remove_file(&file.part);
+                    fail(format!("{} did not arrive intact", file.path));
+                    channel.close();
+                    break;
+                }
+            }
+            WatchReply::End => {
+                let Some(file) = incoming.take() else {
+                    continue;
+                };
+                drop(file.file);
+                if file.got != file.size {
+                    // The file changed while it was being read; the host sends it again.
+                    let _ = std::fs::remove_file(&file.part);
+                    continue;
+                }
+                if file.target.is_file() {
+                    let _ = std::fs::remove_file(&file.target);
+                }
+                match std::fs::rename(&file.part, &file.target) {
+                    Ok(()) => {
+                        let _ = events.send(WatchEvent::Saved {
+                            path: file.path,
+                            size: file.size,
+                        });
+                    }
+                    Err(e) => {
+                        fail(format!("{}: {e}", file.path));
+                        channel.close();
+                        break;
+                    }
+                }
+            }
+            WatchReply::Error(reason) => {
+                fail(reason);
+                channel.close();
+                break;
+            }
+        }
+    }
+    if let Some(file) = incoming {
+        let _ = std::fs::remove_file(&file.part);
+    }
+    let _ = events.send(WatchEvent::Ended);
 }
 
 impl FilesClient {

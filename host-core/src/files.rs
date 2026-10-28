@@ -18,8 +18,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::UNIX_EPOCH;
 
 use windowcast_protocol::files::{
-    decode_request, encode_reply, Entry, FileReply, FileRequest, ShareInfo, ACK_EVERY, FILE_CHUNK,
-    MAX_ENTRIES, MAX_PATH, PART_SUFFIX,
+    clean, decode_request, encode_reply, Entry, FileReply, FileRequest, ShareInfo, ACK_EVERY,
+    FILE_CHUNK, MAX_ENTRIES, PART_SUFFIX,
 };
 
 use crate::command::RunningProcess;
@@ -148,48 +148,6 @@ fn canonical_root(share: &Share) -> Result<PathBuf, String> {
         .root
         .canonicalize()
         .map_err(|_| format!("the folder of share {:?} is not available", share.name))
-}
-
-/// Names Windows treats as devices, with or without an extension.
-const RESERVED: [&str; 22] = [
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-];
-
-/// The parts of a path a client named, or why it is refused. The path is
-/// written with `/` and is relative to the share's folder; the empty path
-/// is the folder itself.
-pub fn clean(path: &str) -> Result<Vec<&str>, String> {
-    if path.len() > MAX_PATH {
-        return Err("that path is too long".into());
-    }
-    if path.starts_with('/') {
-        return Err("give a path inside the share, not an absolute one".into());
-    }
-    let mut parts = Vec::new();
-    for part in path.split('/').filter(|p| !p.is_empty()) {
-        if part == "." || part == ".." {
-            return Err("a path may not contain . or ..".into());
-        }
-        if part
-            .chars()
-            .any(|c| c.is_control() || matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
-        {
-            return Err(format!("{part:?} has a character a path may not have"));
-        }
-        if part.ends_with('.') || part.ends_with(' ') {
-            return Err(format!("{part:?} ends with a dot or a space"));
-        }
-        let stem = part.split('.').next().unwrap_or(part).to_uppercase();
-        if RESERVED.contains(&stem.as_str()) {
-            return Err(format!("{part:?} is a reserved name"));
-        }
-        if part.to_lowercase().ends_with(PART_SUFFIX) {
-            return Err(format!("a name may not end with {PART_SUFFIX}"));
-        }
-        parts.push(part);
-    }
-    Ok(parts)
 }
 
 fn entry_of(name: String, meta: &std::fs::Metadata) -> Entry {

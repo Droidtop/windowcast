@@ -17,6 +17,7 @@ pub mod gamepad;
 pub mod quality;
 pub mod remote;
 pub mod video;
+pub mod watch;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

@@ -85,6 +85,17 @@ pub enum ChannelKind {
     /// `Data`. Which folders are shared is the host application's setting;
     /// a host that shares none refuses it.
     Files,
+    /// Watch a folder of a share and have the files that change sent to the client once they
+    /// stop changing (docs/COMMAND-STREAM.md, "Files"): save sync. The channel carries
+    /// [`crate::files::WatchReply`] from the host and nothing from the client. `path` is the
+    /// folder, `pattern` limits it to file names matching `*` and `?`, and `existing` also sends
+    /// the files already there. Which folders are shared is the host application's setting.
+    Watch {
+        share: String,
+        path: String,
+        pattern: Option<String>,
+        existing: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
