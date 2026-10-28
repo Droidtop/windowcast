@@ -20,7 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A client asks the host to watch a folder of a share (optionally by file-name pattern) and
   `ClientSession::watch_folder` files each file into a folder it chose once the file has stopped
   changing on the host, so a half-written save is never sent. The client checks every path the
-  host names. Chat is still to come.
+  host names.
+- Chat and notices (Droidtop/tracker#613): `ChannelKind::Chat`, short text both ways. Off unless
+  the host application sets a `ChatHub` (`HostControl::set_chat`); the application hears clients
+  through its `ChatSink` and speaks with `ChatHub::notice` and `say_to`. Messages are size
+  limited, free of control characters, rate limited, and not stored; the client drops a host
+  message that fails the same checks. `ClientSession::open_chat` on the client.
 - `windowcast-bud`, the packet layer of `Direct`, windowcast's own low-latency datagram
   transport built from the public design of Parsec's BUD between our own peers
   (Droidtop/tracker#441, docs/research/parsec.md): a 24-byte header, ChaCha20-Poly1305

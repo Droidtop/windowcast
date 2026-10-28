@@ -19,7 +19,8 @@ ways until it ends. Everything the stream does is a channel kind:
 | `Launch` | starts an application detached from the stream | nothing, or its first output | `Exited` at once with the process id; the window it makes appears in the session's window list (`ListWindows`), where the usual selection rules pick its backend. On a Windows host, a program the client's rules give RDP may run as a RemoteApp of the host's Remote Desktop instead (`remote_app`, with the Windows `password` the client has; the host runs it and its windows join the host's list, or it answers `PasswordNeeded`; docs/BACKENDS.md, "RemoteApp") |
 | `Files` | serves the folders the host application shares (see "Files") | typed requests and replies, one per `Data` | the client closing it |
 | `Watch` | looks at a folder of a share and sends each file that changed and settled | `WatchReply`s, host to client only | the client closing it |
-| later kinds | process operations, chat | typed requests in `Data` | answered or refused |
+| `Chat` | the host application's chat hub (see "Chat and notices") | `ChatMessage`s both ways | the client closing it |
+| later kinds | process operations | typed requests in `Data` | answered or refused |
 
 The shell, application launch and every other command share the same
 open/data/resize/eof/close/exit messages, the same authorization check,
@@ -104,7 +105,7 @@ pub trait CommandAuthorizer { fn authorize(&self, who: &Principal, kind: &Channe
 * **Viewers**: the egui reference app and the Android library and viewer
   draw the screen snapshot; the emulator is in the library, not the viewers.
 
-Not built yet: process kinds, chat / notices, X11/agent/port forwarding, SSH
+Not built yet: process kinds, X11/agent/port forwarding, SSH
 logins with Kerberos tickets (GSSAPI; russh has the client side), mouse
 reporting and text selection in the viewers.
 
@@ -187,6 +188,25 @@ channel.
   **The host is not trusted with where a file goes**: the client checks the path with the same
   rules as the host does (`clean`) and refuses the watch if the host names one that fails.
 * Links that lead out of the share are not watched; neither are partial uploads (`.wcpart`).
+
+### Chat and notices
+
+`ChannelKind::Chat` carries short text both ways (`windowcast_protocol::chat`), one message per
+`Data`. It is for the host application and the person at the client to say something to each
+other ("your download finished", "I'm leaving the desk"); the library stores nothing.
+
+* **Off unless the host application turns it on**: `HostControl::set_chat(Some(hub))`. The
+  application builds a `ChatHub` around a `ChatSink` (what to do with what a client says: show it
+  on the host's screen, say) and keeps the hub to speak with: `ChatHub::notice(text)` to every
+  client with a chat open, `say_to(peer, text)` to one. A host with no hub answers `Refused`
+  ("this host has no chat"). The authorizer sees `ChannelKind::Chat` on its own, so a host can
+  allow files and refuse chat.
+* A message is non-empty text of at most 2000 bytes with no control characters other than line
+  breaks and tabs, because it is shown on a screen and must not carry terminal escapes. A client
+  refuses to send one that fails this, the host rejects one that does (`Rejected{reason}`), and
+  **the client drops a message from the host that fails it** (the host is not trusted with what
+  appears on the client's screen either).
+* At most 10 messages a second per channel; the rest are rejected.
 
 ## Limits and flow
 

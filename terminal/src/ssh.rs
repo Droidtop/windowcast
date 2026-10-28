@@ -267,7 +267,7 @@ impl SshConnection {
                 }
                 channel.exec(true, command_line(argv)).await?;
             }
-            ChannelKind::Files | ChannelKind::Watch { .. } => {
+            ChannelKind::Files | ChannelKind::Watch { .. } | ChannelKind::Chat => {
                 return Err(SshError::Command(
                     "file transfer is for windowcast hosts, not SSH servers".into(),
                 ))

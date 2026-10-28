@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use windowcast_cli_tools::testpattern::TestPatternSource;
 use windowcast_client::{Client, ClientError, ClientSession};
+use windowcast_host::chat::{ChatHub, ChatSink};
 use windowcast_host::command::{CommandAuthorizer, PairedDevices, Principal};
 use windowcast_host::files::Shares;
 use windowcast_host::{HostConfig, HostControl};
@@ -349,4 +350,80 @@ fn the_authorizer_can_refuse_watching_alone() {
     assert!(reason.contains("not allowed"), "{reason}");
     // Transfers on the same share still open.
     assert!(session.open_files().is_ok());
+}
+
+struct Heard(std::sync::Mutex<Vec<String>>);
+
+impl ChatSink for Heard {
+    fn received(&self, _from: &Principal, text: &str) {
+        self.0.lock().unwrap().push(text.to_owned());
+    }
+}
+
+#[test]
+fn chat_runs_both_ways_between_a_client_and_the_host_application() {
+    use windowcast_client::files::ChatEvent;
+    let rig = rig("chat");
+    let heard = Arc::new(Heard(std::sync::Mutex::new(Vec::new())));
+    let hub = ChatHub::new(heard.clone());
+    rig.control.set_chat(Some(Arc::clone(&hub)));
+    let session = connect(&rig);
+    let chat = session.open_chat().unwrap();
+
+    chat.say("hello from the handheld").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while heard.0.lock().unwrap().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the host application heard nothing"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(*heard.0.lock().unwrap(), ["hello from the handheld"]);
+
+    // A notice from the host application.
+    assert_eq!(hub.notice("download finished"), Ok(1));
+    assert_eq!(
+        chat.next(Duration::from_secs(10)),
+        Some(ChatEvent::Said("download finished".into()))
+    );
+
+    // Bad text is refused before it leaves the client.
+    assert!(refused(chat.say("").unwrap_err()).contains("empty"));
+    assert!(refused(chat.say(&"x".repeat(3000)).unwrap_err()).contains("at most"));
+    assert!(refused(chat.say("\u{1b}[2J").unwrap_err()).contains("control"));
+
+    // And the chat is gone from the hub when the client closes it.
+    chat.close();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while hub.open_channels() != 0 {
+        assert!(Instant::now() < deadline, "the channel stayed open");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_host_without_a_chat_hub_refuses_chat_and_the_authorizer_can_too() {
+    let rig = rig("chat-refused");
+    let session = connect(&rig);
+    let reason = refused(session.open_chat().err().expect("refused"));
+    assert!(reason.contains("no chat"), "{reason}");
+
+    struct NoChat;
+    impl CommandAuthorizer for NoChat {
+        fn authorize(&self, _who: &Principal, kind: &ChannelKind) -> Result<(), String> {
+            match kind {
+                ChannelKind::Chat => Err("chat is not allowed here".into()),
+                _ => Ok(()),
+            }
+        }
+    }
+    rig.control
+        .set_chat(Some(ChatHub::new(Arc::new(Heard(std::sync::Mutex::new(
+            Vec::new(),
+        ))))));
+    rig.control.set_command_authorizer(Arc::new(NoChat));
+    let session = connect(&rig);
+    let reason = refused(session.open_chat().err().expect("refused"));
+    assert!(reason.contains("not allowed"), "{reason}");
 }

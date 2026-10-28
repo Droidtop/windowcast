@@ -10,6 +10,7 @@
 //! (docs/ACCOUNTS.md), who is connected and what each stream is doing.
 
 pub mod audio;
+pub mod chat;
 pub mod command;
 pub mod compat;
 pub mod files;
@@ -421,6 +422,8 @@ pub struct HostControl {
     /// The folders clients may transfer files in; none until the
     /// application sets them.
     file_shares: std::sync::RwLock<Arc<files::Shares>>,
+    /// Chat and notices; none until the application sets a hub.
+    chat: std::sync::RwLock<Option<Arc<chat::ChatHub>>>,
     /// Windows in compatibility mode and the endpoints the host has.
     compat: Arc<compat::Compatibility>,
     serial: AtomicU64,
@@ -538,6 +541,7 @@ impl HostControl {
             command_authorizer: std::sync::RwLock::new(Arc::new(command::PairedDevices)),
             remote_apps: std::sync::RwLock::new(None),
             file_shares: std::sync::RwLock::new(Arc::new(files::Shares::default())),
+            chat: std::sync::RwLock::new(None),
             compat: Arc::default(),
             serial: AtomicU64::new(1),
             command_serial: Arc::new(AtomicU64::new(1)),
@@ -782,6 +786,13 @@ impl HostControl {
     /// host that never calls this shares nothing.
     pub fn set_file_shares(&self, shares: files::Shares) {
         *self.file_shares.write().expect("file shares") = Arc::new(shares);
+    }
+
+    /// Turns chat and notices on from now on with this hub (docs/COMMAND-STREAM.md, "Files"),
+    /// or off with `None`. The application keeps the hub to speak to clients with. A host that
+    /// never calls this refuses chat channels.
+    pub fn set_chat(&self, hub: Option<Arc<chat::ChatHub>>) {
+        *self.chat.write().expect("chat") = hub;
     }
 
     pub fn set_remote_apps(&self, remote_apps: Option<Arc<dyn command::RemoteApps>>) {
@@ -1069,7 +1080,10 @@ impl Host {
             control.remote_apps.read().expect("remote apps").clone(),
             Arc::clone(&control.commands),
             Arc::clone(&control.command_serial),
-            Arc::clone(&control.file_shares.read().expect("file shares")),
+            command::Services {
+                shares: Arc::clone(&control.file_shares.read().expect("file shares")),
+                chat: control.chat.read().expect("chat").clone(),
+            },
         );
         let mut streams = std::collections::HashMap::<WindowId, WindowStreams>::new();
         let input = deliver_input(Arc::clone(&self.source));

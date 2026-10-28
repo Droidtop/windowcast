@@ -204,6 +204,12 @@ struct Channel {
     serial: u64,
 }
 
+/// What the host application has turned on beyond commands: shared folders and chat.
+pub(crate) struct Services {
+    pub(crate) shares: Arc<crate::files::Shares>,
+    pub(crate) chat: Option<Arc<crate::chat::ChatHub>>,
+}
+
 /// A session's channels. Dropping it ends every command still running.
 pub(crate) struct Channels {
     session: Arc<Session>,
@@ -212,7 +218,7 @@ pub(crate) struct Channels {
     remote_apps: Option<Arc<dyn RemoteApps>>,
     status: StatusMap,
     serial: Arc<AtomicU64>,
-    shares: Arc<crate::files::Shares>,
+    services: Services,
     open: HashMap<ChannelId, Channel>,
 }
 
@@ -224,7 +230,7 @@ impl Channels {
         remote_apps: Option<Arc<dyn RemoteApps>>,
         status: StatusMap,
         serial: Arc<AtomicU64>,
-        shares: Arc<crate::files::Shares>,
+        services: Services,
     ) -> Self {
         Channels {
             session,
@@ -233,7 +239,7 @@ impl Channels {
             remote_apps,
             status,
             serial,
-            shares,
+            services,
             open: HashMap::new(),
         }
     }
@@ -344,6 +350,7 @@ impl Channels {
             ChannelKind::Shell(_) => "shell".to_owned(),
             ChannelKind::Files => "files".to_owned(),
             ChannelKind::Watch { .. } => "watch".to_owned(),
+            ChannelKind::Chat => "chat".to_owned(),
             ChannelKind::Exec { argv, .. } | ChannelKind::Launch { argv, .. } => {
                 argv.first().cloned().unwrap_or_default()
             }
@@ -352,50 +359,58 @@ impl Channels {
         if let ChannelKind::Launch { argv, .. } = &kind {
             return starter.detached(argv, &launch_env());
         }
-        let (process, readers, pid): (Arc<dyn RunningProcess>, Vec<Box<dyn Read + Send>>, _) =
-            if matches!(kind, ChannelKind::Files | ChannelKind::Watch { .. }) {
-                if self.shares.is_empty() {
-                    return Err("this host shares no folders".into());
-                }
-                let (session, runtime) =
-                    (Arc::clone(&self.session), tokio::runtime::Handle::current());
-                let send = Box::new(move |bytes: Vec<u8>| {
+        let (process, readers, pid): (Arc<dyn RunningProcess>, Vec<Box<dyn Read + Send>>, _) = if matches!(
+            kind,
+            ChannelKind::Files | ChannelKind::Watch { .. } | ChannelKind::Chat
+        ) {
+            if !matches!(kind, ChannelKind::Chat) && self.services.shares.is_empty() {
+                return Err("this host shares no folders".into());
+            }
+            let (session, runtime) = (Arc::clone(&self.session), tokio::runtime::Handle::current());
+            let send: Box<dyn Fn(Vec<u8>) -> bool + Send + Sync> =
+                Box::new(move |bytes: Vec<u8>| {
                     runtime
                         .block_on(session.send_control(&ControlMessage::Command(
                             CommandMessage::Data { id, bytes },
                         )))
                         .is_ok()
                 });
-                let process: Arc<dyn RunningProcess> = match &kind {
-                    ChannelKind::Watch {
-                        share,
-                        path,
-                        pattern,
-                        existing,
-                    } => Arc::new(crate::watch::WatchProcess::start(
-                        &self.shares,
-                        share,
-                        path,
-                        pattern.clone(),
-                        *existing,
-                        send,
-                    )?),
-                    _ => Arc::new(crate::files::FilesProcess::new(
-                        Arc::clone(&self.shares),
-                        send,
-                    )),
-                };
-                (process, Vec::new(), None)
-            } else {
-                let Started {
-                    process,
-                    output,
-                    pid,
-                } = tokio::task::spawn_blocking(move || start_channel(&*starter, &kind))
-                    .await
-                    .map_err(|e| e.to_string())??;
-                (process, output, pid)
+            let process: Arc<dyn RunningProcess> = match &kind {
+                ChannelKind::Chat => {
+                    let Some(hub) = self.services.chat.as_ref() else {
+                        return Err("this host has no chat".into());
+                    };
+                    Arc::new(hub.open(self.principal.clone(), Arc::from(send)))
+                }
+                ChannelKind::Watch {
+                    share,
+                    path,
+                    pattern,
+                    existing,
+                } => Arc::new(crate::watch::WatchProcess::start(
+                    &self.services.shares,
+                    share,
+                    path,
+                    pattern.clone(),
+                    *existing,
+                    send,
+                )?),
+                _ => Arc::new(crate::files::FilesProcess::new(
+                    Arc::clone(&self.services.shares),
+                    send,
+                )),
             };
+            (process, Vec::new(), None)
+        } else {
+            let Started {
+                process,
+                output,
+                pid,
+            } = tokio::task::spawn_blocking(move || start_channel(&*starter, &kind))
+                .await
+                .map_err(|e| e.to_string())??;
+            (process, output, pid)
+        };
 
         let closed = Arc::new(AtomicBool::new(false));
         let (input, input_rx) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
@@ -566,7 +581,9 @@ fn start_channel(starter: &dyn ProcessStarter, kind: &ChannelKind) -> Result<Sta
             starter.piped(argv, &launch_env())
         }
         ChannelKind::Launch { .. } => Err("a launch is not a stream".into()),
-        ChannelKind::Files | ChannelKind::Watch { .. } => Err("files are not a process".into()),
+        ChannelKind::Files | ChannelKind::Watch { .. } | ChannelKind::Chat => {
+            Err("files and chat are not a process".into())
+        }
     }
 }
 

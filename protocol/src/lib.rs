@@ -3,6 +3,7 @@
 //! by anything embedding windowcast without pulling in WebRTC or capture
 //! backends it doesn't need.
 
+pub mod chat;
 pub mod command;
 pub mod files;
 pub mod keys;

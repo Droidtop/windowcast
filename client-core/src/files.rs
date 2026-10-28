@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
+use windowcast_protocol::chat::{self, ChatMessage};
 use windowcast_protocol::command::ChannelKind;
 use windowcast_protocol::files::{
     clean, decode_reply, decode_watch, encode_request, Entry, FileReply, FileRequest, ShareInfo,
@@ -67,6 +68,79 @@ impl ClientSession {
             events: receiver,
             stop,
         })
+    }
+}
+
+impl ClientSession {
+    /// Opens chat with the host application (docs/COMMAND-STREAM.md, "Files"). The host refuses
+    /// when its application provides none or does not allow this client.
+    pub fn open_chat(&self) -> Result<ChatClient, ClientError> {
+        Ok(ChatClient {
+            channel: self.open_channel(ChannelKind::Chat)?,
+        })
+    }
+}
+
+/// What chat reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatEvent {
+    /// The host application said something (a notice, or an answer).
+    Said(String),
+    /// The host did not accept the last message you sent, with the reason.
+    Rejected(String),
+    /// The chat ended.
+    Closed,
+}
+
+/// An open chat with a host application. Messages are not stored.
+pub struct ChatClient {
+    channel: Channel,
+}
+
+impl ChatClient {
+    /// Says `text` to the host application. Refused here when it is empty, too long or holds
+    /// control characters; the host checks again and may reject it too (see [`ChatEvent`]).
+    pub fn say(&self, text: &str) -> Result<(), ClientError> {
+        if let Some(problem) = chat::problem_with(text) {
+            return Err(ClientError::Refused(problem));
+        }
+        self.channel.write(&chat::encode(&ChatMessage::Text {
+            text: text.to_owned(),
+        }));
+        Ok(())
+    }
+
+    /// The next thing that happened, waiting up to `within`. What the host says is checked like
+    /// what a client says: a message with control characters (which could move a terminal or
+    /// hide text) is dropped.
+    pub fn next(&self, within: Duration) -> Option<ChatEvent> {
+        let deadline = Instant::now() + within;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self
+                .channel
+                .next_event(left.min(Duration::from_millis(250)))
+            {
+                Some(ChannelEvent::Data(bytes)) => match chat::decode(&bytes) {
+                    Ok(ChatMessage::Text { text }) if chat::problem_with(&text).is_none() => {
+                        return Some(ChatEvent::Said(text))
+                    }
+                    Ok(ChatMessage::Rejected { reason }) => {
+                        return Some(ChatEvent::Rejected(reason))
+                    }
+                    _ => {}
+                },
+                Some(ChannelEvent::Closed) => return Some(ChatEvent::Closed),
+                Some(ChannelEvent::Exited(_)) | None => {}
+            }
+            if left.is_zero() {
+                return None;
+            }
+        }
+    }
+
+    pub fn close(&self) {
+        self.channel.close();
     }
 }
 

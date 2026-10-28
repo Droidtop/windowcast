@@ -96,6 +96,10 @@ pub enum ChannelKind {
         pattern: Option<String>,
         existing: bool,
     },
+    /// Short text both ways ([`crate::chat::ChatMessage`], one per `Data`): the host application
+    /// shows what the client says, and tells the client things (a notice is a message the host
+    /// sends on its own). A host whose application provides no chat refuses it.
+    Chat,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
