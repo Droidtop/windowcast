@@ -267,6 +267,11 @@ impl SshConnection {
                 }
                 channel.exec(true, command_line(argv)).await?;
             }
+            ChannelKind::Files => {
+                return Err(SshError::Command(
+                    "file transfer is for windowcast hosts, not SSH servers".into(),
+                ))
+            }
             ChannelKind::Launch { argv, .. } => {
                 if argv.is_empty() {
                     return Err(SshError::Command("no application".into()));

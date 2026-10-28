@@ -17,7 +17,8 @@ ways until it ends. Everything the stream does is a channel kind:
 | `Shell` | runs the user's shell on a pseudo-terminal (ConPTY on Windows, openpty elsewhere) | terminal bytes, both ways; `Resize` | the shell's exit |
 | `Exec` | runs one command (argv), with a pseudo-terminal when asked | stdin in, output out | the command's exit code |
 | `Launch` | starts an application detached from the stream | nothing, or its first output | `Exited` at once with the process id; the window it makes appears in the session's window list (`ListWindows`), where the usual selection rules pick its backend. On a Windows host, a program the client's rules give RDP may run as a RemoteApp of the host's Remote Desktop instead (`remote_app`, with the Windows `password` the client has; the host runs it and its windows join the host's list, or it answers `PasswordNeeded`; docs/BACKENDS.md, "RemoteApp") |
-| later kinds | file and process operations | typed requests in `Data` | answered or refused |
+| `Files` | serves the folders the host application shares (see "Files") | typed requests and replies, one per `Data` | the client closing it |
+| later kinds | process operations, folder watch, chat | typed requests in `Data` | answered or refused |
 
 The shell, application launch and every other command share the same
 open/data/resize/eof/close/exit messages, the same authorization check,
@@ -102,9 +103,62 @@ pub trait CommandAuthorizer { fn authorize(&self, who: &Principal, kind: &Channe
 * **Viewers**: the egui reference app and the Android library and viewer
   draw the screen snapshot; the emulator is in the library, not the viewers.
 
-Not built yet: file and process kinds, X11/agent/port forwarding, SSH
+Not built yet: process kinds, folder watch (save sync), chat / notices, X11/agent/port forwarding, SSH
 logins with Kerberos tickets (GSSAPI; russh has the client side), mouse
 reporting and text selection in the viewers.
+
+## Files
+
+`ChannelKind::Files` opens a channel of typed requests and replies
+(`windowcast_protocol::files`), one per `Data`, for moving files in the
+folders a host shares. It is off unless the host application turns it on.
+
+**The host application sets the scope; the client never widens it** (owner,
+Droidtop/tracker#613). The application calls
+`HostControl::set_file_shares(Shares)`, adding each folder with a name, its
+path and whether it is writable. A host that never does shares nothing and
+answers a `Files` open with `Refused`. A client names a share and a path
+inside it, written with `/`, relative to the share's top. It cannot name an
+absolute path or a folder that is not a share.
+
+Every path is checked twice, and nothing the client sends changes either
+check:
+
+* *Spelling.* No `..` or `.`, no leading `/`, no backslash, drive letter or
+  stream (`:`), none of `* ? " < > |`, no control characters, no name that
+  ends in a dot or a space or is a Windows device name (`CON`, `NUL`,
+  `COM1`..), no name ending in `.wcpart`, at most 1024 bytes.
+* *Where it lands.* The path is resolved on the host with symbolic links
+  followed, and the result must still be inside the share's folder. A link
+  that leads out is not listed and cannot be read or written. A new file's
+  folder is resolved the same way and the name itself must not be a link.
+
+What a host application sets is trusted; what a client sends is not. The
+check resolves paths at the time of the request, so it does not defend
+against another local program swapping a folder for a link in between. The
+share's folder is the boundary, and the host runs as the user who shared
+it.
+
+| Request | Reply |
+|---|---|
+| `Shares` | `Shares`: the names and whether each is writable |
+| `List` / `Stat` | `Entries` (sorted, at most 5000, files and folders only) / `Info` |
+| `Read{offset}` | `Chunk`s, then `End{size}`; the client resumes by asking from the bytes it holds |
+| `Write{size, resume}` | `Ready{offset}`; then the client's `Chunk`s and `Finish`; the host sends `Ack` every 256 KiB and `Done{size}` |
+| any, refused | `Error(reason)`, for the user |
+
+An upload goes to `<name>.wcpart` and is renamed into place only when
+`Finish` finds every byte there; until then the file is not listed or
+readable. With `resume` the host continues a partial file of that name, so
+an upload cut by a lost connection carries on. The client keeps at most 1
+MiB unacknowledged. Uploads larger than the share's `max_file_size`
+(default 4 GiB) are refused before any byte is sent. A read-only share
+refuses `Write`. Downloads keep a `.wcpart` file on the client the same way.
+
+Each kind is authorized on its own: the `CommandAuthorizer` sees
+`ChannelKind::Files`, so a host can allow shells and refuse files, or the
+reverse. Old hosts do not know the kind: they drop the open, and the client
+reports that the host may not support it.
 
 ## Limits and flow
 

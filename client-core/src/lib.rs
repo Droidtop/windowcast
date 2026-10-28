@@ -16,6 +16,7 @@
 mod command;
 pub mod ffi;
 pub mod ffi_terminal;
+pub mod files;
 mod selector;
 
 pub use command::SshSession;

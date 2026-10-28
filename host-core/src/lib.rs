@@ -12,6 +12,7 @@
 pub mod audio;
 pub mod command;
 pub mod compat;
+pub mod files;
 pub mod gamepad;
 pub mod quality;
 pub mod remote;
@@ -416,6 +417,9 @@ pub struct HostControl {
     command_authorizer: std::sync::RwLock<Arc<dyn command::CommandAuthorizer>>,
     /// Serves launches as RemoteApps; `None` starts every launch here.
     remote_apps: std::sync::RwLock<Option<Arc<dyn command::RemoteApps>>>,
+    /// The folders clients may transfer files in; none until the
+    /// application sets them.
+    file_shares: std::sync::RwLock<Arc<files::Shares>>,
     /// Windows in compatibility mode and the endpoints the host has.
     compat: Arc<compat::Compatibility>,
     serial: AtomicU64,
@@ -532,6 +536,7 @@ impl HostControl {
             commands: Default::default(),
             command_authorizer: std::sync::RwLock::new(Arc::new(command::PairedDevices)),
             remote_apps: std::sync::RwLock::new(None),
+            file_shares: std::sync::RwLock::new(Arc::new(files::Shares::default())),
             compat: Arc::default(),
             serial: AtomicU64::new(1),
             command_serial: Arc::new(AtomicU64::new(1)),
@@ -768,6 +773,14 @@ impl HostControl {
     /// it (the host's owner turns a window on or off here).
     pub fn compatibility(&self) -> &Arc<compat::Compatibility> {
         &self.compat
+    }
+
+    /// Shares these folders for file transfer from now on (docs/COMMAND-STREAM.md,
+    /// "Files"). The application decides the scope; a client can only name
+    /// a share and a path inside it. Sessions starting later use it. A
+    /// host that never calls this shares nothing.
+    pub fn set_file_shares(&self, shares: files::Shares) {
+        *self.file_shares.write().expect("file shares") = Arc::new(shares);
     }
 
     pub fn set_remote_apps(&self, remote_apps: Option<Arc<dyn command::RemoteApps>>) {
@@ -1055,6 +1068,7 @@ impl Host {
             control.remote_apps.read().expect("remote apps").clone(),
             Arc::clone(&control.commands),
             Arc::clone(&control.command_serial),
+            Arc::clone(&control.file_shares.read().expect("file shares")),
         );
         let mut streams = std::collections::HashMap::<WindowId, WindowStreams>::new();
         let input = deliver_input(Arc::clone(&self.source));

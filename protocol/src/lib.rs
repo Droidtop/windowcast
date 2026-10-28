@@ -4,6 +4,7 @@
 //! backends it doesn't need.
 
 pub mod command;
+pub mod files;
 pub mod keys;
 pub mod selection;
 

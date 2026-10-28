@@ -212,6 +212,7 @@ pub(crate) struct Channels {
     remote_apps: Option<Arc<dyn RemoteApps>>,
     status: StatusMap,
     serial: Arc<AtomicU64>,
+    shares: Arc<crate::files::Shares>,
     open: HashMap<ChannelId, Channel>,
 }
 
@@ -223,6 +224,7 @@ impl Channels {
         remote_apps: Option<Arc<dyn RemoteApps>>,
         status: StatusMap,
         serial: Arc<AtomicU64>,
+        shares: Arc<crate::files::Shares>,
     ) -> Self {
         Channels {
             session,
@@ -231,6 +233,7 @@ impl Channels {
             remote_apps,
             status,
             serial,
+            shares,
             open: HashMap::new(),
         }
     }
@@ -339,6 +342,7 @@ impl Channels {
         self.authorizer.authorize(&self.principal, &kind)?;
         let what = match &kind {
             ChannelKind::Shell(_) => "shell".to_owned(),
+            ChannelKind::Files => "files".to_owned(),
             ChannelKind::Exec { argv, .. } | ChannelKind::Launch { argv, .. } => {
                 argv.first().cloned().unwrap_or_default()
             }
@@ -347,13 +351,38 @@ impl Channels {
         if let ChannelKind::Launch { argv, .. } = &kind {
             return starter.detached(argv, &launch_env());
         }
-        let Started {
-            process,
-            output: readers,
-            pid,
-        } = tokio::task::spawn_blocking(move || start_channel(&*starter, &kind))
-            .await
-            .map_err(|e| e.to_string())??;
+        let (process, readers, pid): (Arc<dyn RunningProcess>, Vec<Box<dyn Read + Send>>, _) =
+            if matches!(kind, ChannelKind::Files) {
+                if self.shares.is_empty() {
+                    return Err("this host shares no folders".into());
+                }
+                let (session, runtime) =
+                    (Arc::clone(&self.session), tokio::runtime::Handle::current());
+                let send = Box::new(move |bytes: Vec<u8>| {
+                    runtime
+                        .block_on(session.send_control(&ControlMessage::Command(
+                            CommandMessage::Data { id, bytes },
+                        )))
+                        .is_ok()
+                });
+                (
+                    Arc::new(crate::files::FilesProcess::new(
+                        Arc::clone(&self.shares),
+                        send,
+                    )),
+                    Vec::new(),
+                    None,
+                )
+            } else {
+                let Started {
+                    process,
+                    output,
+                    pid,
+                } = tokio::task::spawn_blocking(move || start_channel(&*starter, &kind))
+                    .await
+                    .map_err(|e| e.to_string())??;
+                (process, output, pid)
+            };
 
         let closed = Arc::new(AtomicBool::new(false));
         let (input, input_rx) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
@@ -524,6 +553,7 @@ fn start_channel(starter: &dyn ProcessStarter, kind: &ChannelKind) -> Result<Sta
             starter.piped(argv, &launch_env())
         }
         ChannelKind::Launch { .. } => Err("a launch is not a stream".into()),
+        ChannelKind::Files => Err("files are not a process".into()),
     }
 }
 

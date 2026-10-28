@@ -79,6 +79,12 @@ pub enum ChannelKind {
         remote_app: bool,
         password: Option<String>,
     },
+    /// File transfer on the host's shares (docs/COMMAND-STREAM.md,
+    /// "Files"): the channel carries [`crate::files::FileRequest`]s from
+    /// the client and [`crate::files::FileReply`]s from the host, one per
+    /// `Data`. Which folders are shared is the host application's setting;
+    /// a host that shares none refuses it.
+    Files,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

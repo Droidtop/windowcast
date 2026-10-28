@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- File transfer on shared folders (Droidtop/tracker#613, docs/COMMAND-STREAM.md, "Files"):
+  a new `Files` channel kind. The host application sets what is shared
+  (`HostControl::set_file_shares`; nothing is shared by default) and whether each share is
+  writable; a client can only name a share and a path inside it. Paths are refused by spelling
+  (`..`, absolute and drive paths, streams, device names) and again by where they land, with
+  links followed. Listing, stat, download and upload with resume; uploads are written under a
+  temporary name and renamed when complete. `ClientSession::open_files` on the client. Each kind
+  is authorized on its own. Folder watch (save sync) and chat are still to come.
 - `windowcast-bud`, the packet layer of `Direct`, windowcast's own low-latency datagram
   transport built from the public design of Parsec's BUD between our own peers
   (Droidtop/tracker#441, docs/research/parsec.md): a 24-byte header, ChaCha20-Poly1305
