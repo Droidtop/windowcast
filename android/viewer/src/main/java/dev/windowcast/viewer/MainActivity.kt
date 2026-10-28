@@ -184,6 +184,9 @@ class MainActivity : Activity() {
     private var audio: AudioPlayer? = null
     @Volatile private var soundPackets = 0L
     private var windows: List<WindowInfo> = emptyList()
+
+    /** What launching a program said, kept in front of the next window-count line so the list does not wipe it. */
+    private var launchNote: String? = null
     private var watching: WindowInfo? = null
 
     /**
@@ -844,7 +847,8 @@ class MainActivity : Activity() {
                 }
             }, MATCH_PARENT, WRAP_CONTENT)
         }
-        status.text = "${list.size} windows. Tap one to watch it."
+        status.text = (launchNote?.let { "$it. " } ?: "") + "${list.size} windows. Tap one to watch it."
+        launchNote = null
         watchWanted(list)
     }
 
@@ -1070,7 +1074,8 @@ class MainActivity : Activity() {
                 val pid = s.launch(argv, password)
                 s.requestWindows()
                 main.post {
-                    status.text = "Started ${argv[0]}" + if (pid > 0) " (process $pid)" else ""
+                    launchNote = "Started ${argv[0]}" + if (pid > 0) " (process $pid)" else ""
+                    status.text = launchNote
                     refreshWindowsSoon()
                 }
             } catch (e: dev.windowcast.PasswordNeededException) {

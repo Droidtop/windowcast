@@ -66,6 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   switch stays in the host window.
 
 ### Fixed
+- The viewer's "Started <program>" line is no longer wiped by the window list arriving a moment
+  later; it stays in front of the window count (Droidtop/tracker#466).
 - Viewer: a picture keeps its shape. It used to be stretched to fill the screen whatever the
   window's proportions were, so a 4:3 window on a 16:9 handheld came out wide. It is now the
   largest picture of the window's own shape that fits, centred, with black bars, and it
