@@ -18,7 +18,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::UNIX_EPOCH;
 
 use windowcast_protocol::files::{
-    decode_request, encode_reply, ACK_EVERY, Entry, FileReply, FileRequest, ShareInfo, FILE_CHUNK,
+    decode_request, encode_reply, Entry, FileReply, FileRequest, ShareInfo, ACK_EVERY, FILE_CHUNK,
     MAX_ENTRIES, MAX_PATH, PART_SUFFIX,
 };
 
