@@ -1855,6 +1855,121 @@ fn connect_rdp(
     });
 }
 
+/// What a stream start's answer means: a carrier switch's outcome, a new
+/// stream's start, or its refusal.
+fn stream_start_event(
+    shared: &Shared,
+    window: WindowId,
+    generation: u32,
+    accepted: bool,
+    backend: StreamBackend,
+    reason: Option<String>,
+) -> Event {
+    let switching = shared.switching(window, generation);
+    if switching && !accepted {
+        if let Some(entry) = shared.carriers.lock().expect("carriers").get_mut(&window) {
+            entry.end_switch(false);
+        }
+        Event::CarrierRefused {
+            window: window.0,
+            generation,
+            reason: reason.unwrap_or_default(),
+        }
+    } else if switching {
+        if backend.session_codec().is_some() {
+            shared.slot(window);
+        }
+        Event::CarrierStarted {
+            window: window.0,
+            generation,
+            backend: backend.kind(),
+            codec: backend.session_codec(),
+        }
+    } else if accepted {
+        if backend.session_codec().is_some() {
+            shared.slot(window);
+        }
+        shared.started(window, generation, backend.kind());
+        Event::StreamStarted {
+            window: window.0,
+            backend: backend.kind(),
+            codec: backend.session_codec(),
+        }
+    } else {
+        Event::StreamRefused {
+            window: window.0,
+            reason: reason.unwrap_or_default(),
+        }
+    }
+}
+
+/// Ends a window's frame queue and takes it out of the map, so a new stream
+/// of the same window gets a fresh queue instead of the ended one.
+fn end_queue(shared: &Shared, window: WindowId) {
+    let slot = shared.slots.lock().expect("slots").remove(&window);
+    if let Some(slot) = slot {
+        slot.sender.lock().expect("sender").take();
+    }
+}
+
+fn host_state_event(state: windowcast_protocol::HostState) -> Event {
+    let (private_session, private_session_reason) = match state.private_session {
+        windowcast_protocol::PrivateSession::Off => ("off", None),
+        windowcast_protocol::PrivateSession::Unavailable(reason) => ("unavailable", Some(reason)),
+        windowcast_protocol::PrivateSession::Available => ("available", None),
+        windowcast_protocol::PrivateSession::Active => ("active", None),
+    };
+    Event::HostState {
+        locked: state.locked,
+        private_session: private_session.into(),
+        private_session_reason,
+    }
+}
+
+/// The host's compatibility endpoints, with an RDP endpoint that names no
+/// address pointing at the host the session is with.
+fn compatibility_event(
+    shared: &Shared,
+    window: WindowId,
+    mut endpoints: Vec<windowcast_protocol::CompatEndpoint>,
+    refused: Option<String>,
+) -> Event {
+    let host = shared.host_ip.map(|ip| ip.to_string()).unwrap_or_default();
+    for endpoint in &mut endpoints {
+        if let windowcast_protocol::CompatEndpoint::Rdp(target) = endpoint {
+            if target.address.is_empty() {
+                target.address = host.clone();
+            }
+        }
+    }
+    Event::Compatibility {
+        window: window.0,
+        described: endpoints.iter().map(|e| e.describe(&host)).collect(),
+        endpoints,
+        refused,
+    }
+}
+
+/// The pointer is over one window at a time: showing it on `window` hides it
+/// on the others.
+fn cursor_event(shared: &Shared, window: WindowId, cursor: Cursor) -> Event {
+    let mut cursors = shared.cursors.lock().expect("cursors");
+    for (other, last) in cursors.iter_mut() {
+        if *other != window {
+            last.visible = false;
+        }
+    }
+    let event = Event::Cursor {
+        window: window.0,
+        x: cursor.x,
+        y: cursor.y,
+        visible: cursor.visible,
+        shape: cursor.shape,
+    };
+    cursors.insert(window, cursor);
+    event
+}
+
 async fn pump_events(
     session: Arc<Session>,
     shared: Arc<Shared>,
@@ -1913,52 +2028,11 @@ async fn pump_events(
                 backend,
                 reason,
                 ..
-            } => {
-                let switching = shared.switching(window, generation);
-                if switching && !accepted {
-                    if let Some(entry) = shared.carriers.lock().expect("carriers").get_mut(&window)
-                    {
-                        entry.end_switch(false);
-                    }
-                    Event::CarrierRefused {
-                        window: window.0,
-                        generation,
-                        reason: reason.unwrap_or_default(),
-                    }
-                } else if switching {
-                    if backend.session_codec().is_some() {
-                        shared.slot(window);
-                    }
-                    Event::CarrierStarted {
-                        window: window.0,
-                        generation,
-                        backend: backend.kind(),
-                        codec: backend.session_codec(),
-                    }
-                } else if accepted {
-                    if backend.session_codec().is_some() {
-                        shared.slot(window);
-                    }
-                    shared.started(window, generation, backend.kind());
-                    Event::StreamStarted {
-                        window: window.0,
-                        backend: backend.kind(),
-                        codec: backend.session_codec(),
-                    }
-                } else {
-                    Event::StreamRefused {
-                        window: window.0,
-                        reason: reason.unwrap_or_default(),
-                    }
-                }
-            }
+            } => stream_start_event(&shared, window, generation, accepted, backend, reason),
             ControlMessage::TrackEnded(window) => {
                 // The window's video track ended; its stream may go on on
                 // another carrier, so only the frame queue ends.
-                let slot = shared.slots.lock().expect("slots").remove(&window);
-                if let Some(slot) = slot {
-                    slot.sender.lock().expect("sender").take();
-                }
+                end_queue(&shared, window);
                 continue;
             }
             ControlMessage::StreamStopped(StreamTarget::Window(window)) => {
@@ -1966,10 +2040,7 @@ async fn pump_events(
                 // holds its sender; dropping it ends the queue. The slot
                 // leaves the map, so a new stream of the same window gets a
                 // fresh queue instead of this ended one.
-                let slot = shared.slots.lock().expect("slots").remove(&window);
-                if let Some(slot) = slot {
-                    slot.sender.lock().expect("sender").take();
-                }
+                end_queue(&shared, window);
                 shared.rdp.lock().expect("rdp").remove(&window);
                 shared.carriers.lock().expect("carriers").remove(&window);
                 shared.cursors.lock().expect("cursors").remove(&window);
@@ -1985,21 +2056,7 @@ async fn pump_events(
                 height,
             },
             ControlMessage::WindowFocused(window) => Event::WindowFocused { window: window.0 },
-            ControlMessage::HostState(state) => {
-                let (private_session, private_session_reason) = match state.private_session {
-                    windowcast_protocol::PrivateSession::Off => ("off", None),
-                    windowcast_protocol::PrivateSession::Unavailable(reason) => {
-                        ("unavailable", Some(reason))
-                    }
-                    windowcast_protocol::PrivateSession::Available => ("available", None),
-                    windowcast_protocol::PrivateSession::Active => ("active", None),
-                };
-                Event::HostState {
-                    locked: state.locked,
-                    private_session: private_session.into(),
-                    private_session_reason,
-                }
-            }
+            ControlMessage::HostState(state) => host_state_event(state),
             ControlMessage::PrivateSessionRefused {
                 reason,
                 password_needed,
@@ -2009,24 +2066,9 @@ async fn pump_events(
             },
             ControlMessage::Compatibility {
                 window,
-                mut endpoints,
+                endpoints,
                 refused,
-            } => {
-                let host = shared.host_ip.map(|ip| ip.to_string()).unwrap_or_default();
-                for endpoint in &mut endpoints {
-                    if let windowcast_protocol::CompatEndpoint::Rdp(target) = endpoint {
-                        if target.address.is_empty() {
-                            target.address = host.clone();
-                        }
-                    }
-                }
-                Event::Compatibility {
-                    window: window.0,
-                    described: endpoints.iter().map(|e| e.describe(&host)).collect(),
-                    endpoints,
-                    refused,
-                }
-            }
+            } => compatibility_event(&shared, window, endpoints, refused),
             ControlMessage::CursorShape(image) => {
                 shared
                     .cursor_shapes
@@ -2041,29 +2083,16 @@ async fn pump_events(
                 y,
                 visible,
                 shape,
-            } => {
-                let cursor = Cursor {
+            } => cursor_event(
+                &shared,
+                window,
+                Cursor {
                     x,
                     y,
                     visible,
                     shape,
-                };
-                let mut cursors = shared.cursors.lock().expect("cursors");
-                // Over one window at a time: it leaves the others.
-                for (other, last) in cursors.iter_mut() {
-                    if *other != window {
-                        last.visible = false;
-                    }
-                }
-                cursors.insert(window, cursor);
-                Event::Cursor {
-                    window: window.0,
-                    x,
-                    y,
-                    visible,
-                    shape,
-                }
-            }
+                },
+            ),
             ControlMessage::Clipboard(text) => Event::Clipboard { text },
             ControlMessage::SshCertificateResponse(answer) => match answer {
                 Ok(certificate) => Event::SshCertificate {
