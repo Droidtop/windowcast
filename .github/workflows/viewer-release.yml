@@ -1,7 +1,9 @@
 name: Viewer release
 
 # The Android viewer (dev.windowcast.viewer) as a signed APK on each windowcast
-# release, so droidtop can offer it (Droidtop/tracker#552). Signed with the key
+# release, so droidtop can offer it (Droidtop/tracker#552), and the Android
+# library (windowcast-android-<version>.aar) that droidtop embeds
+# (Droidtop/tracker#428), each with its own checksum file. Signed with the key
 # in this repository's secrets, under the names droidtop's releases use
 # (SIGNING_KEYSTORE_BASE64, SIGNING_STORE_PASSWORD, SIGNING_KEY_ALIAS,
 # SIGNING_KEY_PASSWORD): one key for every release, so each installs over the
@@ -76,7 +78,7 @@ jobs:
           SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
           SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
           SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
-        run: ./gradlew :viewer:testDebugUnitTest :viewer:assembleRelease --stacktrace
+        run: ./gradlew :windowcast:testDebugUnitTest :viewer:testDebugUnitTest :windowcast:assembleRelease :viewer:assembleRelease --stacktrace
 
       - name: Check the signature and name the APK
         run: |
@@ -86,7 +88,15 @@ jobs:
           "$apksigner" verify --print-certs "$apk"
           mkdir out
           cp "$apk" "out/windowcast-viewer-$VERSION.apk"
-          (cd out && sha256sum -- * > SHA256SUMS-viewer)
+          (cd out && sha256sum -- "windowcast-viewer-$VERSION.apk" > SHA256SUMS-viewer)
+          # The library droidtop embeds: both ABIs of client-core inside, unsigned (it is not installed).
+          aar=$(ls android/windowcast/build/outputs/aar/*-release.aar)
+          cp "$aar" "out/windowcast-android-$VERSION.aar"
+          (cd out && sha256sum -- "windowcast-android-$VERSION.aar" > SHA256SUMS-android-library)
+          for abi in arm64-v8a x86_64; do
+            unzip -l "out/windowcast-android-$VERSION.aar" | grep -q "jni/$abi/.*\.so" \
+              || { echo "the AAR carries no native library for $abi"; exit 1; }
+          done
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
