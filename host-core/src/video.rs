@@ -6,6 +6,65 @@
 //! dimensions. Pictures can be scaled down on the way (adaptive quality).
 //! Shared by the agents (agent-windows, agent-linux).
 
+/// Paces a source (video capture, a test pattern, an audio tone) to its rate: [`wait`](Pacer::wait) sleeps until the next item
+/// is due and [`tick`](Pacer::tick) says one was taken.
+///
+/// Catch-up policy, the same for every source: the next item is due one interval after the previous one was *due*, not after it
+/// was taken, so time spent capturing and encoding does not slow the stream below its rate. A source that is late delivers the
+/// next items without waiting until it is on time again, but only while it is less than [`CATCH_UP`](Pacer::CATCH_UP) behind;
+/// further behind (a stalled capture, a suspended machine) the debt is dropped instead of being paid back as a burst.
+/// Each source used to keep its own `next_at` and apply one of two accidental policies: from the time the item was taken (the
+/// rate drifts lower) or by adding the interval (any stall came back as a burst).
+#[derive(Debug, Clone, Copy)]
+pub struct Pacer {
+    due: std::time::Instant,
+}
+
+impl Default for Pacer {
+    fn default() -> Pacer {
+        Pacer::new()
+    }
+}
+
+impl Pacer {
+    /// How far behind a source may be and still deliver late items back to back.
+    pub const CATCH_UP: std::time::Duration = std::time::Duration::from_millis(250);
+
+    /// Due now: the first item is not waited for.
+    pub fn new() -> Pacer {
+        Pacer {
+            due: std::time::Instant::now(),
+        }
+    }
+
+    /// The time between items at `fps` (at least 1).
+    pub fn interval(fps: u32) -> std::time::Duration {
+        std::time::Duration::from_nanos(1_000_000_000 / u64::from(fps.max(1)))
+    }
+
+    /// Sleeps until the next item is due.
+    pub fn wait(&self) {
+        std::thread::sleep(
+            self.due
+                .saturating_duration_since(std::time::Instant::now()),
+        );
+    }
+
+    /// An item was taken; the next is due `interval` after this one was.
+    pub fn tick(&mut self, interval: std::time::Duration) {
+        self.tick_at(std::time::Instant::now(), interval);
+    }
+
+    fn tick_at(&mut self, now: std::time::Instant, interval: std::time::Duration) {
+        let next = self.due + interval;
+        self.due = if now.saturating_duration_since(next) > Self::CATCH_UP {
+            now
+        } else {
+            next
+        };
+    }
+}
+
 /// A captured picture: 8-bit BGRA rows, `stride` bytes apart.
 pub struct Bgra<'a> {
     pub data: &'a [u8],
@@ -490,5 +549,32 @@ mod tests {
         assert_eq!(i420.len(), 4 * 2 * 3 / 2);
         let (u, v) = (i420[8], i420[10]);
         assert!(v > 200 && u < 128, "u {u} v {v}");
+    }
+
+    #[test]
+    fn the_pacer_keeps_the_rate_catches_up_a_little_and_drops_a_stall() {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let frame = Pacer::interval(10);
+        assert_eq!(frame, Duration::from_millis(100));
+        assert_eq!(
+            Pacer::interval(0),
+            Duration::from_secs(1),
+            "a rate of 0 is read as 1"
+        );
+        let mut pacer = Pacer { due: start };
+
+        // Taking an item late by processing time does not move the schedule: the next is due one interval after the last was due.
+        pacer.tick_at(start + Duration::from_millis(30), frame);
+        assert_eq!(pacer.due, start + Duration::from_millis(100));
+        // Late by less than CATCH_UP: still on the old schedule, so the late items come back to back.
+        pacer.tick_at(start + Duration::from_millis(300), frame);
+        assert_eq!(pacer.due, start + Duration::from_millis(200));
+        // A stall of seconds: the debt is dropped, the next is due now, and no burst follows.
+        let late = start + Duration::from_secs(10);
+        pacer.tick_at(late, frame);
+        assert_eq!(pacer.due, late);
+        pacer.tick_at(late, frame);
+        assert_eq!(pacer.due, late + frame);
     }
 }

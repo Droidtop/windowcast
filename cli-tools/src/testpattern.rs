@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use openh264::encoder::{Encoder, EncoderConfig, FrameRate, IntraFramePeriod};
 use openh264::formats::YUVBuffer;
 use openh264::OpenH264API;
+use windowcast_host::video::Pacer;
 use windowcast_host::{
     CursorState, EncodedFrame, FrameSource, Handoff, Picture, PictureSource, WindowSource,
 };
@@ -57,7 +58,7 @@ impl WindowSource for TestPatternSource {
         (window == WINDOW).then(|| {
             Ok(Box::new(TestPictures {
                 frame: 0,
-                next_at: Instant::now(),
+                pacer: Pacer::new(),
                 still: false,
             }) as _)
         })
@@ -99,7 +100,7 @@ impl WindowSource for StillTextSource {
         (window == WINDOW).then(|| {
             Ok(Box::new(TestPictures {
                 frame: 0,
-                next_at: Instant::now(),
+                pacer: Pacer::new(),
                 still: true,
             }) as _)
         })
@@ -123,7 +124,7 @@ fn open_pattern(window: WindowId, codec: VideoCodec, still: bool) -> Result<Test
     Ok(TestPattern {
         encoder,
         frame: 0,
-        next_at: Instant::now(),
+        pacer: Pacer::new(),
         still,
     })
 }
@@ -131,21 +132,18 @@ fn open_pattern(window: WindowId, codec: VideoCodec, still: bool) -> Result<Test
 /// The test pattern's pictures, unencoded.
 struct TestPictures {
     frame: u64,
-    next_at: Instant,
+    pacer: Pacer,
     still: bool,
 }
 
 impl PictureSource for TestPictures {
     fn next_picture(&mut self) -> Option<Picture> {
-        let now = Instant::now();
-        if self.next_at > now {
-            std::thread::sleep(self.next_at - now);
-        }
+        self.pacer.wait();
         if self.still {
-            self.next_at += STILL_TIME;
+            self.pacer.tick(STILL_TIME);
             return Some(still_bgra());
         }
-        self.next_at += FRAME_TIME;
+        self.pacer.tick(FRAME_TIME);
         let picture = draw_bgra(self.frame);
         self.frame += 1;
         Some(picture)
@@ -336,7 +334,7 @@ impl WindowSource for TestPatternWithTone {
         (window == WINDOW).then(|| {
             Ok(Box::new(Tone {
                 phase: 0.0,
-                next_at: Instant::now(),
+                pacer: Pacer::new(),
             }) as _)
         })
     }
@@ -345,17 +343,14 @@ impl WindowSource for TestPatternWithTone {
 /// A 440 Hz sine at a quarter of full scale, in real time.
 struct Tone {
     phase: f32,
-    next_at: Instant,
+    pacer: Pacer,
 }
 
 impl windowcast_host::audio::AudioSource for Tone {
     fn next_samples(&mut self) -> Option<Vec<i16>> {
         const CHUNK: Duration = Duration::from_millis(20);
-        let now = Instant::now();
-        if self.next_at > now {
-            std::thread::sleep(self.next_at - now);
-        }
-        self.next_at += CHUNK;
+        self.pacer.wait();
+        self.pacer.tick(CHUNK);
         let mut samples = Vec::with_capacity(960 * 2);
         for _ in 0..960 {
             let value = (self.phase.sin() * 8192.0) as i16;
@@ -372,7 +367,7 @@ impl windowcast_host::audio::AudioSource for Tone {
 struct TestPattern {
     encoder: Encoder,
     frame: u64,
-    next_at: Instant,
+    pacer: Pacer,
     still: bool,
 }
 
@@ -380,16 +375,13 @@ const FRAME_TIME: Duration = Duration::from_nanos(1_000_000_000 / FPS as u64);
 
 impl FrameSource for TestPattern {
     fn next_frame(&mut self, keyframe: bool) -> Option<EncodedFrame> {
-        let now = Instant::now();
-        if self.next_at > now {
-            std::thread::sleep(self.next_at - now);
-        }
+        self.pacer.wait();
         let (time, pixels) = if self.still {
             (STILL_TIME, draw_still())
         } else {
             (FRAME_TIME, draw(self.frame))
         };
-        self.next_at += time;
+        self.pacer.tick(time);
 
         let picture = YUVBuffer::from_vec(pixels, WIDTH, HEIGHT);
         if keyframe {

@@ -7,6 +7,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use windowcast_host::quality::Quality;
+use windowcast_host::video::Pacer;
 use windowcast_host::{EncodedFrame, FrameSource, WindowSource};
 use windowcast_protocol::{
     BackendKind, ContentHint, HostState, InputEvent, VideoCodec, WindowId, WindowInfo, WindowKind,
@@ -116,7 +117,7 @@ impl WindowsSource {
             current: Arc::clone(&self.current),
             generation: u64::MAX,
             state: None,
-            next_at: Instant::now(),
+            pacer: Pacer::new(),
             last_sent: Instant::now(),
             frames: 0,
             pending: Default::default(),
@@ -386,8 +387,8 @@ impl WindowSource for WindowsSource {
         Some(Ok(Box::new(WindowPictures {
             window,
             capture: None,
-            frame_time: frame_time(fps),
-            next_at: Instant::now(),
+            frame_time: Pacer::interval(fps),
+            pacer: Pacer::new(),
             last_sent: None,
         })))
     }
@@ -434,7 +435,7 @@ struct SecureStream {
     pending: std::collections::VecDeque<Vec<u8>>,
     announce: Option<(u32, u32)>,
     last_sent: Instant,
-    next_at: Instant,
+    pacer: Pacer,
 }
 
 impl SecureStream {
@@ -459,7 +460,7 @@ impl SecureStream {
             pending: Default::default(),
             announce: None,
             last_sent: Instant::now(),
-            next_at: Instant::now(),
+            pacer: Pacer::new(),
         }
     }
 
@@ -502,8 +503,8 @@ impl FrameSource for SecureStream {
                 let current = self.current.read().expect("options");
                 (current.options.clone(), current.generation)
             };
-            let interval = frame_time(fps(&options, &self.quality));
-            std::thread::sleep(self.next_at.saturating_duration_since(Instant::now()));
+            let interval = Pacer::interval(fps(&options, &self.quality));
+            self.pacer.wait();
             let response = match self
                 .client
                 .request(&windowcast_secure_helper::operations::Operation::CaptureFrame)
@@ -573,7 +574,7 @@ impl FrameSource for SecureStream {
                     continue;
                 }
             }
-            self.next_at = Instant::now() + interval;
+            self.pacer.tick(interval);
             let time = interval * self.frames as u32;
             match self
                 .encoder
@@ -620,7 +621,7 @@ struct WindowStream {
     /// The options generation the encoder was opened with.
     generation: u64,
     state: Option<State>,
-    next_at: Instant,
+    pacer: Pacer,
     last_sent: Instant,
     frames: u64,
     pending: std::collections::VecDeque<Vec<u8>>,
@@ -743,7 +744,7 @@ struct WindowPictures {
     window: WindowId,
     capture: Option<Capture>,
     frame_time: Duration,
-    next_at: Instant,
+    pacer: Pacer,
     last_sent: Option<Instant>,
 }
 
@@ -772,7 +773,7 @@ impl windowcast_host::PictureSource for WindowPictures {
             if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
                 return None;
             }
-            std::thread::sleep(self.next_at.saturating_duration_since(Instant::now()));
+            self.pacer.wait();
             let changed = match capture.poll(self.frame_time) {
                 Ok(changed) => changed,
                 Err(e) => {
@@ -792,7 +793,7 @@ impl windowcast_host::PictureSource for WindowPictures {
             for y in 0..picture.height {
                 data.extend_from_slice(&picture.data[y * picture.stride..][..row]);
             }
-            self.next_at = Instant::now() + self.frame_time;
+            self.pacer.tick(self.frame_time);
             self.last_sent = Some(Instant::now());
             return Some(windowcast_host::Picture {
                 width: picture.width as u32,
@@ -810,10 +811,6 @@ fn fps(options: &Options, quality: &Quality) -> u32 {
         .fps
         .map_or(options.fps, |fps| fps.min(options.fps))
         .max(1)
-}
-
-fn frame_time(fps: u32) -> Duration {
-    Duration::from_nanos(1_000_000_000 / u64::from(fps.max(1)))
 }
 
 /// Encoder settings for a picture size; the bitrate scales with area, and
@@ -910,10 +907,10 @@ impl FrameSource for WindowStream {
                 }
             }
             let (options, generation) = self.options();
-            let frame_time = frame_time(fps(&options, &self.quality));
+            let frame_time = Pacer::interval(fps(&options, &self.quality));
             // Never faster than the frame rate: wait out the frame time, then
             // up to one more frame time for a new picture.
-            std::thread::sleep(self.next_at.saturating_duration_since(Instant::now()));
+            self.pacer.wait();
             let state = self.state.as_mut().expect("state");
             let changed = match state.capture.poll(frame_time) {
                 Ok(changed) => changed,
@@ -988,7 +985,7 @@ impl FrameSource for WindowStream {
                 self.pending.clear();
                 keyframe = true;
             }
-            self.next_at = Instant::now() + frame_time;
+            self.pacer.tick(frame_time);
             let time = frame_time * self.frames as u32;
             let started = Instant::now();
             let encoded = state.encoder.encode(&picture, keyframe, time);

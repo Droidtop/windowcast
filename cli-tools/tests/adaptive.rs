@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use windowcast_client::{Client, ClientSession, FramePoll};
 use windowcast_host::quality::Quality;
-use windowcast_host::video::OpenH264;
+use windowcast_host::video::{OpenH264, Pacer};
 use windowcast_host::{EncodedFrame, FrameSource, HostConfig, HostControl, WindowSource};
 use windowcast_identity::{Identity, TrustStore};
 use windowcast_protocol::{ContentHint, StreamQuality, VideoCodec, WindowId, WindowInfo};
@@ -52,7 +52,7 @@ impl WindowSource for Busy {
             encoder: OpenH264::new(NOMINAL, FPS)?,
             frame: 0,
             seed: 1,
-            next_at: Instant::now(),
+            pacer: Pacer::new(),
             fps: FPS,
             rate: (NOMINAL, FPS),
             announced: false,
@@ -65,7 +65,7 @@ struct BusyStream {
     encoder: OpenH264,
     frame: usize,
     seed: u32,
-    next_at: Instant,
+    pacer: Pacer,
     fps: u32,
     rate: (u32, u32),
     announced: bool,
@@ -90,8 +90,8 @@ impl FrameSource for BusyStream {
         // The encoder's rate control may skip a picture: try the next.
         loop {
             let frame_time = Duration::from_secs(1) / self.fps;
-            std::thread::sleep(self.next_at.saturating_duration_since(Instant::now()));
-            self.next_at = Instant::now() + frame_time;
+            self.pacer.wait();
+            self.pacer.tick(frame_time);
             self.frame += 1;
             let (t, seed) = (self.frame, &mut self.seed);
             let encoded = self

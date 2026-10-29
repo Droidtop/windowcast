@@ -6,7 +6,7 @@ use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use windowcast_host::quality::Quality;
-use windowcast_host::video::{self, OpenH264};
+use windowcast_host::video::{self, OpenH264, Pacer};
 use windowcast_host::{EncodedFrame, FrameSource, WindowSource};
 use windowcast_protocol::{
     BackendKind, HostState, InputEvent, PrivateSession, VideoCodec, WindowId, WindowInfo,
@@ -114,8 +114,8 @@ impl WindowSource for LinuxSource {
         Some(Capture::window(window).map(|capture| {
             Box::new(WindowPictures {
                 capture,
-                frame_time: Duration::from_nanos(1_000_000_000 / u64::from(fps)),
-                next_at: Instant::now(),
+                frame_time: Pacer::interval(fps),
+                pacer: Pacer::new(),
                 last_sent: None,
             }) as _
         }))
@@ -214,14 +214,14 @@ const REFRESH: Duration = Duration::from_secs(1);
 struct WindowPictures {
     capture: Capture,
     frame_time: Duration,
-    next_at: Instant,
+    pacer: Pacer,
     last_sent: Option<Instant>,
 }
 
 impl windowcast_host::PictureSource for WindowPictures {
     fn next_picture(&mut self) -> Option<windowcast_host::Picture> {
         loop {
-            std::thread::sleep(self.next_at.saturating_duration_since(Instant::now()));
+            self.pacer.wait();
             let changed = match self.capture.poll(self.frame_time) {
                 Ok(changed) => changed,
                 Err(e) => {
@@ -236,7 +236,7 @@ impl windowcast_host::PictureSource for WindowPictures {
             let Some(picture) = self.capture.picture() else {
                 continue;
             };
-            self.next_at = Instant::now() + self.frame_time;
+            self.pacer.tick(self.frame_time);
             self.last_sent = Some(Instant::now());
             return Some(copy_picture(&picture));
         }
@@ -263,7 +263,7 @@ struct WindowStream {
     options: Options,
     encoder: Option<OpenH264>,
     size: (usize, usize),
-    next_at: Instant,
+    pacer: Pacer,
     last_sent: Instant,
     /// What adaptive quality holds the stream to.
     quality: Quality,
@@ -280,7 +280,7 @@ impl WindowStream {
             options: options.clone(),
             encoder: None,
             size: (0, 0),
-            next_at: Instant::now(),
+            pacer: Pacer::new(),
             last_sent: Instant::now(),
             quality: Quality::default(),
             rate: (0, 0),
@@ -321,10 +321,9 @@ impl FrameSource for WindowStream {
 
     fn next_frame(&mut self, mut keyframe: bool) -> Option<EncodedFrame> {
         loop {
-            let frame_time =
-                Duration::from_nanos(1_000_000_000 / u64::from(fps(&self.options, &self.quality)));
+            let frame_time = Pacer::interval(fps(&self.options, &self.quality));
             // Never faster than the frame rate.
-            std::thread::sleep(self.next_at.saturating_duration_since(Instant::now()));
+            self.pacer.wait();
             let changed = match self.capture.poll(frame_time) {
                 Ok(changed) => changed,
                 Err(e) => {
@@ -365,7 +364,7 @@ impl FrameSource for WindowStream {
                 }
                 self.rate = rate;
             }
-            self.next_at = Instant::now() + frame_time;
+            self.pacer.tick(frame_time);
             let picture = if size == video::even(picture.width, picture.height) {
                 picture
             } else {
