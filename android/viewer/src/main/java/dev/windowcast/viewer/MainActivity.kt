@@ -13,7 +13,6 @@ import dev.windowcast.OidcProvider
 import dev.windowcast.SignIn
 import dev.windowcast.SignInOptions
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
@@ -40,6 +39,8 @@ import dev.windowcast.ConnectRequest
 import dev.windowcast.Event
 import dev.windowcast.EventPump
 import dev.windowcast.SessionListener
+import dev.windowcast.SignInAttempts
+import dev.windowcast.SignInPlan
 import dev.windowcast.WantedWindow
 import dev.windowcast.WatchSet
 import dev.windowcast.WindowDecoder
@@ -149,8 +150,7 @@ class MainActivity : Activity() {
     private lateinit var cancelBrowserSignIn: Button
     private var clipboardListener: ClipboardManager.OnPrimaryClipChangedListener? = null
     /** Counts browser sign-ins; a finished one acts only if it is still the latest, so Cancel can drop one. */
-    private val signInAttempt = AtomicInteger()
-    @Volatile private var browserSignInWaiting = false
+    private val attempts = SignInAttempts()
     /** Set once the system has asked for the state to keep across a recreation (onDestroy keeps the session then). */
     private var keepSession = false
     private lateinit var sendMicrophone: CheckBox
@@ -231,7 +231,7 @@ class MainActivity : Activity() {
         cancelBrowserSignIn = Button(this).apply {
             text = "Cancel sign-in"
             visibility = View.GONE
-            setOnClickListener { giveUpBrowserSignIn("Sign-in cancelled") }
+            setOnClickListener { giveUpBrowserSignIn(SignInPlan.CANCELLED) }
         }
         status = TextView(this).apply { text = "Not connected" }
         sendMicrophone = CheckBox(this).apply {
@@ -445,15 +445,14 @@ class MainActivity : Activity() {
     /** Back from the browser: if the sign-in there did not finish, say what is happening and how to stop it. */
     override fun onResume() {
         super.onResume()
-        if (browserSignInWaiting) {
+        if (attempts.waiting) {
             status.text = "Still waiting for the sign-in in the browser. Finish it there, or press Cancel sign-in."
         }
     }
 
     /** Gives up the browser sign-in that is waiting, if any; its result is ignored when it arrives or times out. */
     private fun giveUpBrowserSignIn(message: String) {
-        signInAttempt.incrementAndGet()
-        browserSignInWaiting = false
+        attempts.cancel()
         cancelBrowserSignIn.visibility = View.GONE
         status.text = message
     }
@@ -524,38 +523,35 @@ class MainActivity : Activity() {
     }
 
     private fun confirmHost(address: String, options: SignInOptions) {
-        if (options.trusted) {
-            chooseSignIn(address, options, null)
+        val plan = SignInPlan.of(options)
+        if (!plan.needsConfirmation) {
+            chooseSignIn(address, plan)
             return
         }
         AlertDialog.Builder(this)
             .setTitle("Is this your host?")
-            .setMessage(
-                "This device has not signed in to this host before. Check that the host shows " +
-                    "this fingerprint:\n\n${options.fingerprint}\n\nIf it shows another, cancel: " +
-                    "a different machine is answering.",
-            )
-            .setPositiveButton("It matches") { _, _ -> chooseSignIn(address, options, options.hostId) }
-            .setNegativeButton("Cancel") { _, _ -> status.text = "Sign-in cancelled" }
+            .setMessage(plan.confirmationText)
+            .setPositiveButton("It matches") { _, _ -> chooseSignIn(address, plan) }
+            .setNegativeButton("Cancel") { _, _ -> status.text = SignInPlan.CANCELLED }
             .show()
     }
 
-    /** The ways this host takes; [accept] is the host identity the user confirmed, if any. */
-    private fun chooseSignIn(address: String, options: SignInOptions, accept: String?) {
-        val choices = mutableListOf<Pair<String, () -> Unit>>()
-        if (options.password) choices += "User name and password" to { askPassword(address, accept) }
-        for (provider in options.providers) {
-            choices += "${provider.name} in the browser" to { browserSignIn(address, provider, accept) }
-            choices += "${provider.name} with a code on another device" to { deviceSignIn(address, provider, accept) }
-        }
-        if (choices.isEmpty()) {
-            status.text = "This host takes no sign-in this app can do"
+    /** The ways this host takes ([SignInPlan.methods]); [SignInPlan.acceptHost] is the identity the person confirmed, if any. */
+    private fun chooseSignIn(address: String, plan: SignInPlan) {
+        if (plan.methods.isEmpty()) {
+            status.text = plan.noMethodsLine
             return
         }
         AlertDialog.Builder(this)
             .setTitle("Sign in")
-            .setItems(choices.map { it.first }.toTypedArray()) { _, which -> choices[which].second() }
-            .setNegativeButton("Cancel") { _, _ -> status.text = "Sign-in cancelled" }
+            .setItems(plan.methods.map { it.label }.toTypedArray()) { _, which ->
+                when (val method = plan.methods[which]) {
+                    SignInPlan.Method.Password -> askPassword(address, plan.acceptHost)
+                    is SignInPlan.Method.Browser -> browserSignIn(address, method.provider, plan.acceptHost)
+                    is SignInPlan.Method.DeviceCode -> deviceSignIn(address, method.provider, plan.acceptHost)
+                }
+            }
+            .setNegativeButton("Cancel") { _, _ -> status.text = SignInPlan.CANCELLED }
             .show()
     }
 
@@ -577,7 +573,7 @@ class MainActivity : Activity() {
             .setPositiveButton("Sign in") { _, _ ->
                 connectAccount(address, SignIn.Password(user.text.toString().trim(), password.text.toString()), accept)
             }
-            .setNegativeButton("Cancel") { _, _ -> status.text = "Sign-in cancelled" }
+            .setNegativeButton("Cancel") { _, _ -> status.text = SignInPlan.CANCELLED }
             .show()
     }
 
@@ -588,8 +584,7 @@ class MainActivity : Activity() {
      */
     private fun browserSignIn(address: String, provider: OidcProvider, accept: String?) {
         val c = client ?: return
-        val attempt = signInAttempt.incrementAndGet()
-        browserSignInWaiting = true
+        val attempt = attempts.begin()
         cancelBrowserSignIn.visibility = View.VISIBLE
         status.text = "Opening ${provider.name}…"
         Thread({
@@ -605,16 +600,16 @@ class MainActivity : Activity() {
                 val token = signIn.finish(SIGN_IN_TIMEOUT_MS)
                 main.post {
                     // Cancelled meanwhile: the token is dropped.
-                    if (signInAttempt.get() != attempt) return@post
-                    browserSignInWaiting = false
+                    if (!attempts.isCurrent(attempt)) return@post
+                    attempts.finish()
                     cancelBrowserSignIn.visibility = View.GONE
                     backToFront()
                     connectAccount(address, SignIn.Oidc(provider, token), accept)
                 }
             } catch (e: Exception) {
                 main.post {
-                    if (signInAttempt.get() != attempt) return@post
-                    giveUpBrowserSignIn("Could not sign in with ${provider.name}: ${e.message}")
+                    if (!attempts.isCurrent(attempt)) return@post
+                    giveUpBrowserSignIn(SignInPlan.failedWith(provider.name, e.message))
                 }
             }
         }, "windowcast-sign-in").start()
@@ -628,7 +623,7 @@ class MainActivity : Activity() {
             val signIn = try {
                 c.oidcDevice(provider)
             } catch (e: Exception) {
-                main.post { status.text = "Could not sign in with ${provider.name}: ${e.message}" }
+                main.post { status.text = SignInPlan.failedWith(provider.name, e.message) }
                 null
             }
             if (signIn != null) awaitDeviceSignIn(address, provider, accept, signIn)
@@ -663,13 +658,13 @@ class MainActivity : Activity() {
                     backToFront()
                     connectAccount(address, SignIn.Oidc(provider, token), accept)
                 } else {
-                    status.text = "Sign-in cancelled"
+                    status.text = SignInPlan.CANCELLED
                 }
             }
         } catch (e: Exception) {
             main.post {
                 dialog[0]?.dismiss()
-                status.text = "Could not sign in with ${provider.name}: ${e.message}"
+                status.text = SignInPlan.failedWith(provider.name, e.message)
             }
         } finally {
             signIn.close()

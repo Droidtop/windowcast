@@ -18,6 +18,7 @@ belongs in the library, not in `MainActivity`.
 | Decide primary / extra / already showing | `WatchSet` |
 | Switch a window's carrier (video / RDP pictures) | `CarrierSwitcher`: the switch under way, the first-picture handover, the host's refusals so a refused switch is not offered again |
 | Wait for a window asked for by title | `WantedWindow` (time passed in; the viewer and droidtop wait the same way) |
+| Sign in with an account | `signInOptions` → `SignInPlan.of(options)` (confirmation, methods, words) → `connectAccount`; `SignInAttempts` for waiting sign-ins |
 | Open a host from another app | `ConnectRequest` (parses the link / intent contract of docs/ANDROID-VIEWER.md) |
 | Stream a window | `startWindow`, `switchWindow`, `stopWindow`; `WindowDecoder`, `WindowPictures` render |
 | Input, clipboard, audio, gamepads, terminal | `send`, `setClipboard`, `AudioPlayer`, `Microphone`, `Gamepads`, `openTerminal` |
@@ -30,8 +31,7 @@ already know their addresses, and the directory and LAN discovery are Droidtop/t
 `MainActivity` (about 1,700 lines) still decides, with no library call to share:
 - popups and extra windows: which events open which floating window, placement against the owner;
 - the pointer overlay and its shape cache; letterboxing (`Letterbox.kt`);
-- the connect flow's order (try PIN, else sign-in options, host confirmation, password / browser /
-  device sign-in);
+- starting a session (stop the reader, close the old session, connect, ask for windows);
 - the host-state messages (locked, private session) as text.
 
 Each moves behind a library type with the same shape as `WatchSet` and `WantedWindow`: plain Kotlin
@@ -39,7 +39,10 @@ where it can be, the Android pieces (surfaces, decoders) behind interfaces the c
 1. (this change) `EventPump` / `SessionListener`, `WantedWindow`; `ConnectRequest` and `WatchSet` move
    into the library; the viewer uses them.
 2. (done) Carrier switching and refused-switch memory as `CarrierSwitcher` (plain Kotlin, tested).
-3. The connect / sign-in sequence as a `ConnectFlow` that asks the client only for what a person must
-   answer (a PIN, a password, a browser).
+3. (done, as a plan rather than a threaded flow) The account sign-in rules as `SignInPlan` (confirm an
+   untrusted host by fingerprint, then the methods offered, in order, and the words) and
+   `SignInAttempts` (a cancelled or replaced browser/device sign-in is ignored when it answers). The
+   dialogs stay the client's. The PIN connect and the starting of a session (stop the reader, close
+   the old session, open, ask for windows) are still in the viewer's `startSession`.
 4. Popups and extras as a `WindowLayout` the client draws.
 Then droidtop's `ComputerLaunch` calls the same types instead of opening the viewer.

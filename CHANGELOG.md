@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Android library: `Event.StreamQuality` and `Quality` (adaptive quality as the host sees it), which
   the viewer shows beside the frame count in its title while a window is watched
   (Droidtop/tracker#114; docs/ANDROID-VIEWER.md, "Stream statistics").
+- Android library: `SignInPlan` and `SignInAttempts`, the account sign-in rules (confirm an untrusted host
+  by fingerprint, the methods to offer and the words, ignoring a cancelled sign-in's late answer),
+  moved out of the viewer (Droidtop/tracker#428, #115).
 - Android library: `EventPump` and `SessionListener` (one way to follow a session's events),
   `WantedWindow` (waiting for a window asked for by title), and `ConnectRequest` and `WatchSet`,
   moved out of the viewer, so the viewer and droidtop make the same calls (Droidtop/tracker#428,
