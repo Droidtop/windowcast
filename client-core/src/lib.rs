@@ -809,6 +809,21 @@ struct Carrier {
 struct Carriers {
     shown: Option<Carrier>,
     next: Option<Carrier>,
+    /// The task that gives `next` up if it shows nothing in time ([`SWITCH_WITHIN`]); ended when `next` is.
+    giving_up: Option<tokio::task::AbortHandle>,
+}
+
+impl Carriers {
+    /// Ends the pending switch: its carrier, and the timer that would have given it up (unless the timer is the caller, whose
+    /// own task must run on to tell the host).
+    fn end_switch(&mut self, caller_is_timer: bool) -> Option<Carrier> {
+        if let Some(timer) = self.giving_up.take() {
+            if !caller_is_timer {
+                timer.abort();
+            }
+        }
+        self.next.take()
+    }
 }
 
 /// How long a switch's new carrier has to show its first picture.
@@ -840,12 +855,13 @@ impl Shared {
 
     /// Ends a switch that did not happen: its carrier stops and the window
     /// stays on the one shown.
-    fn abandon_switch(
+    async fn abandon_switch(
         &self,
-        (runtime, session): (&tokio::runtime::Handle, &Session),
+        session: &Session,
         window: WindowId,
         generation: u32,
         reason: String,
+        caller_is_timer: bool,
     ) {
         let next = {
             let mut carriers = self.carriers.lock().expect("carriers");
@@ -855,13 +871,13 @@ impl Shared {
             if entry.next.is_none_or(|n| n.generation != generation) {
                 return;
             }
-            entry.next.take()
+            entry.end_switch(caller_is_timer)
         };
         if next.is_some_and(|n| n.backend == BackendKind::Rdp) {
             self.rdp.lock().expect("rdp").remove(&window);
         }
         let stop = ControlMessage::CarrierStop { window, generation };
-        let _ = runtime.block_on(session.send_control(&stop));
+        let _ = session.send_control(&stop).await;
         self.emit(Event::CarrierRefused {
             window: window.0,
             generation,
@@ -1376,21 +1392,35 @@ impl ClientSession {
             },
             generation,
         })?;
-        // A carrier that shows nothing in time is given up.
+        // A carrier that shows nothing in time is given up; the task ends with the switch, however it ends.
         let shared = Arc::downgrade(&self.shared);
         let session = Arc::clone(&self.session);
-        let runtime = self.runtime.handle().clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(SWITCH_WITHIN);
-            if let Some(shared) = shared.upgrade() {
-                shared.abandon_switch(
-                    (&runtime, &session),
-                    window,
-                    generation,
-                    format!("no picture within {} s", SWITCH_WITHIN.as_secs()),
-                );
+        let timer = self
+            .runtime
+            .spawn(async move {
+                tokio::time::sleep(SWITCH_WITHIN).await;
+                if let Some(shared) = shared.upgrade() {
+                    let reason = format!("no picture within {} s", SWITCH_WITHIN.as_secs());
+                    shared
+                        .abandon_switch(&session, window, generation, reason, true)
+                        .await;
+                }
+            })
+            .abort_handle();
+        if let Some(entry) = self
+            .shared
+            .carriers
+            .lock()
+            .expect("carriers")
+            .get_mut(&window)
+        {
+            if entry.next.is_some_and(|n| n.generation == generation) {
+                entry.giving_up = Some(timer);
+            } else {
+                // The switch ended before the timer could be recorded.
+                timer.abort();
             }
-        });
+        }
         Ok(generation)
     }
 
@@ -1410,7 +1440,7 @@ impl ClientSession {
             };
             match entry.next {
                 Some(next) if next.generation == generation => {
-                    entry.next = None;
+                    entry.end_switch(false);
                     entry.shown.replace(next)
                 }
                 _ => return Ok(()),
@@ -1741,7 +1771,6 @@ impl Drop for ClientSession {
     }
 }
 
-/// The window an input event names, if it names one.
 /// Logs in to the RDP server the host started for `window`, on a thread of
 /// its own, then announces the stream (or its refusal, telling the host to
 /// stop serving it).
@@ -1799,12 +1828,13 @@ fn connect_rdp(
                 }
             }
             Err(reason) if switching => {
-                shared.abandon_switch(
-                    (&runtime, &session),
+                runtime.block_on(shared.abandon_switch(
+                    &session,
                     window,
                     generation,
                     format!("RDP: {reason}"),
-                );
+                    false,
+                ));
                 return;
             }
             Err(reason) => {
@@ -1888,7 +1918,7 @@ async fn pump_events(
                 if switching && !accepted {
                     if let Some(entry) = shared.carriers.lock().expect("carriers").get_mut(&window)
                     {
-                        entry.next = None;
+                        entry.end_switch(false);
                     }
                     Event::CarrierRefused {
                         window: window.0,
@@ -2147,5 +2177,45 @@ mod tests {
         )));
         assert!(!pairing_could_help(&TransportError::Timeout));
         assert!(!pairing_could_help(&TransportError::Closed));
+    }
+
+    fn carrier(generation: u32) -> Carrier {
+        Carrier {
+            generation,
+            backend: BackendKind::Rdp,
+        }
+    }
+
+    /// A switch that ends, however it ends, ends the task that would have given it up; the task that is the giver-up itself is
+    /// not cut off in the middle of telling the host.
+    #[tokio::test]
+    async fn a_switch_ending_stops_its_timer_except_the_timer_itself() {
+        let sleeper = || tokio::spawn(tokio::time::sleep(Duration::from_secs(3600)));
+
+        let shown = sleeper();
+        let mut carriers = Carriers {
+            next: Some(carrier(2)),
+            giving_up: Some(shown.abort_handle()),
+            ..Default::default()
+        };
+        assert_eq!(carriers.end_switch(false), Some(carrier(2)));
+        assert!(
+            shown.await.unwrap_err().is_cancelled(),
+            "the timer should have been aborted"
+        );
+        assert!(carriers.next.is_none() && carriers.giving_up.is_none());
+
+        let firing = sleeper();
+        let mut carriers = Carriers {
+            next: Some(carrier(3)),
+            giving_up: Some(firing.abort_handle()),
+            ..Default::default()
+        };
+        assert_eq!(carriers.end_switch(true), Some(carrier(3)));
+        assert!(
+            !firing.is_finished(),
+            "the timer that is calling must not be aborted"
+        );
+        firing.abort();
     }
 }
