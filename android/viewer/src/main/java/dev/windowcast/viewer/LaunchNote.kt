@@ -26,7 +26,7 @@ class LaunchNote(private val keepMs: Long = KEEP_MS) {
         (current(nowMs)?.let { "$it. " } ?: "") + "$count windows. Tap one to watch it."
 
     companion object {
-        /** Longer than the refreshes after a launch (see REFRESH_DELAYS_MS), short enough to be gone when the person moves on. */
+        /** Long enough to be read, short enough to be gone when the person moves on. */
         const val KEEP_MS = 20_000L
     }
 }

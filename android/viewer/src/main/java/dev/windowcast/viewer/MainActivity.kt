@@ -64,6 +64,7 @@ import android.content.ClipboardManager
 import android.view.KeyEvent
 import android.view.MotionEvent
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.Executors
 
 /**
@@ -73,6 +74,8 @@ import java.util.concurrent.Executors
  */
 class MainActivity : Activity() {
     private val worker = Executors.newSingleThreadExecutor()
+    /** Sign-ins wait for a person for minutes: they must not hold up [worker]. */
+    private val signInWorker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     /** Input goes out in order, off the main thread. */
     private val inputWorker = Executors.newSingleThreadExecutor()
@@ -495,7 +498,8 @@ class MainActivity : Activity() {
                 }
                 listen(s)
                 s.requestWindows()
-            } catch (e: Exception) {
+            } catch (e: IOException) {
+                android.util.Log.w(TAG, "connect failed", e)
                 main.post { status.text = describe?.invoke(e) ?: "$failure: ${e.message}" }
             }
         }
@@ -516,7 +520,8 @@ class MainActivity : Activity() {
             try {
                 val options = c.signInOptions(address)
                 main.post { confirmHost(address, options) }
-            } catch (e: Exception) {
+            } catch (e: IOException) {
+                android.util.Log.w(TAG, "ask the host how to sign in failed", e)
                 main.post { status.text = "Could not ask the host: ${e.message}" }
             }
         }
@@ -587,13 +592,13 @@ class MainActivity : Activity() {
         val attempt = attempts.begin()
         cancelBrowserSignIn.visibility = View.VISIBLE
         status.text = "Opening ${provider.name}…"
-        Thread({
+        signInWorker.execute {
             try {
                 val signIn = c.oidcBrowser(provider)
                 main.post {
                     try {
                         CustomTabsIntent.Builder().build().launchUrl(this, Uri.parse(signIn.url))
-                    } catch (e: Exception) {
+                    } catch (e: android.content.ActivityNotFoundException) {
                         status.text = "No browser to sign in with: ${e.message}"
                     }
                 }
@@ -606,28 +611,30 @@ class MainActivity : Activity() {
                     backToFront()
                     connectAccount(address, SignIn.Oidc(provider, token), accept)
                 }
-            } catch (e: Exception) {
+            } catch (e: IOException) {
+                android.util.Log.w(TAG, "browser sign-in failed", e)
                 main.post {
                     if (!attempts.isCurrent(attempt)) return@post
                     giveUpBrowserSignIn(SignInPlan.failedWith(provider.name, e.message))
                 }
             }
-        }, "windowcast-sign-in").start()
+        }
     }
 
     /** The provider's code, entered on another device (or opened here); waits until the user is done. */
     private fun deviceSignIn(address: String, provider: OidcProvider, accept: String?) {
         val c = client ?: return
         status.text = "Asking ${provider.name} for a code…"
-        Thread({
+        signInWorker.execute {
             val signIn = try {
                 c.oidcDevice(provider)
-            } catch (e: Exception) {
+            } catch (e: IOException) {
+                android.util.Log.w(TAG, "device sign-in failed", e)
                 main.post { status.text = SignInPlan.failedWith(provider.name, e.message) }
                 null
             }
             if (signIn != null) awaitDeviceSignIn(address, provider, accept, signIn)
-        }, "windowcast-sign-in").start()
+        }
     }
 
     /** Shows the code and waits (on the calling thread) until the user is done or cancels. */
@@ -661,7 +668,8 @@ class MainActivity : Activity() {
                     status.text = SignInPlan.CANCELLED
                 }
             }
-        } catch (e: Exception) {
+        } catch (e: IOException) {
+            android.util.Log.w(TAG, "device sign-in failed", e)
             main.post {
                 dialog[0]?.dismiss()
                 status.text = SignInPlan.failedWith(provider.name, e.message)
@@ -1002,7 +1010,8 @@ class MainActivity : Activity() {
         worker.execute {
             try {
                 s.switchWindow(window.id, backend, codecs)
-            } catch (e: Exception) {
+            } catch (e: IOException) {
+                android.util.Log.w(TAG, "switch window failed", e)
                 main.post { status.text = "No switch: ${e.message}" }
             }
         }
@@ -1081,7 +1090,8 @@ class MainActivity : Activity() {
             try {
                 val t = s.openTerminal(cols, rows)
                 main.post { showTerminal(t) }
-            } catch (e: Exception) {
+            } catch (e: IOException) {
+                android.util.Log.w(TAG, "open shell failed", e)
                 main.post { status.text = "No shell: ${e.message}" }
             }
         }
@@ -1108,11 +1118,11 @@ class MainActivity : Activity() {
                     val note = "Started ${argv[0]}" + if (pid > 0) " (process $pid)" else ""
                     launchNote.set(note, System.currentTimeMillis())
                     status.text = note
-                    refreshWindowsSoon()
                 }
             } catch (e: dev.windowcast.PasswordNeededException) {
                 main.post { askWindowsPassword(line, e.user) }
-            } catch (e: Exception) {
+            } catch (e: IOException) {
+                android.util.Log.w(TAG, "launch failed", e)
                 main.post { status.text = "Could not start it: ${e.message}" }
             }
         }
@@ -1176,13 +1186,6 @@ class MainActivity : Activity() {
             .show()
     }
 
-    /** The new window is not mapped when the launch returns: ask for the list again a few times. */
-    private fun refreshWindowsSoon() {
-        for (delay in REFRESH_DELAYS_MS) {
-            main.postDelayed({ session?.let { s -> worker.execute { s.requestWindows() } } }, delay)
-        }
-    }
-
     /**
      * Logs in to an SSH server. A server not seen before is not trusted silently: its key is
      * shown, and pressing the button again trusts that key.
@@ -1218,7 +1221,8 @@ class MainActivity : Activity() {
                     sshButton.text = "Trust this key and log in"
                     status.text = "$host is not known yet. Its key is ${e.fingerprint}. Press the button to trust it."
                 }
-            } catch (e: Exception) {
+            } catch (e: IOException) {
+                android.util.Log.w(TAG, "ssh login failed", e)
                 main.post { status.text = "Could not log in: ${e.message}" }
             }
         }
@@ -1758,6 +1762,10 @@ class MainActivity : Activity() {
         closeStreamWindows(notifyHost = false)
         clipboardListener?.let { clipboard.removePrimaryClipChangedListener(it) }
         inputWorker.shutdown()
+        // Work still queued or waiting on the network ends with the activity, and nothing it posted runs after.
+        worker.shutdownNow()
+        signInWorker.shutdownNow()
+        main.removeCallbacksAndMessages(null)
         val reader = listener
         stopListening(wait = false)
         terminalView.detach()
@@ -1796,6 +1804,5 @@ class MainActivity : Activity() {
         private const val APP_TITLE = "windowcast viewer"
         /** How long a browser sign-in may take before it is given up. */
         private const val SIGN_IN_TIMEOUT_MS = 2 * 60 * 1000
-        private val REFRESH_DELAYS_MS = longArrayOf(1000, 2500, 5000, 10000)
     }
 }
