@@ -1012,39 +1012,52 @@ impl Drop for Stream {
     }
 }
 
-impl Host {
-    async fn serve(
-        self: &Arc<Self>,
-        stream: TcpStream,
-        address: String,
-    ) -> Result<(), TransportError> {
-        // A host that only listens on loopback opens nothing else either.
-        let local = stream
-            .local_addr()
-            .is_ok_and(|local| local.ip().is_loopback());
-        let session = if local {
-            Session::local_only().await?
-        } else {
-            Session::new().await?
-        };
-        self.serve_session(stream, address, session, true).await
-    }
+/// What ends with a session, in the order it lets go.
+struct Guards<'a> {
+    _listed: Listed<'a>,
+    _tasks: [AbortOnDrop; 5],
+    _compat: CompatSession,
+    _cursor: StopFlag,
+}
 
-    /// Serves one client over a signaling stream (a LAN TCP socket, or a
-    /// punched UDP stream from away), on `session`. Pairing by PIN only
-    /// where `pairing` allows (on the LAN: a host found from away takes
-    /// only clients it already trusts).
-    async fn serve_session<S>(
-        self: &Arc<Self>,
+/// One admitted client's session: what the host keeps for it, and a method
+/// for each message it can send.
+struct Serving<'a> {
+    host: &'a Arc<Host>,
+    session: Arc<Session>,
+    peer: PeerId,
+    /// This session's number in the host's client list.
+    serial: u64,
+    decision: Decision,
+    channels: command::Channels,
+    streams: std::collections::HashMap<WindowId, WindowStreams>,
+    /// The window the client's input is going to.
+    focus: Option<WindowId>,
+    input: std::sync::mpsc::Sender<(InputEvent, Option<WindowId>)>,
+    clipboard: Arc<std::sync::Mutex<Option<String>>>,
+    /// The window list as last sent; `None` until the client asks for it.
+    listed: Arc<tokio::sync::Mutex<Option<Vec<WindowInfo>>>>,
+    /// The windows this session streams, for following the pointer.
+    streamed: Arc<std::sync::Mutex<Vec<WindowId>>>,
+    private: EndPrivate,
+    rtt: Arc<RoundTrip>,
+    _guards: Guards<'a>,
+}
+
+impl<'a> Serving<'a> {
+    /// Admits the client (pairing, sign-in or trust), lists it, and starts
+    /// the tasks that push to it for as long as the session lives.
+    async fn open<S>(
+        host: &'a Arc<Host>,
         stream: S,
         address: String,
         session: Session,
         pairing: bool,
-    ) -> Result<(), TransportError>
+    ) -> Result<Serving<'a>, TransportError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
-        let control = &self.control;
+        let control = &host.control;
         let trusted = control.admitted().await;
         let pin = if pairing {
             control.pairing.current().await
@@ -1071,7 +1084,7 @@ impl Host {
         let peer = established.peer;
         if established.paired {
             control.pairing.paired().await;
-            self.pin_client(peer).await;
+            host.pin_client(peer).await;
             println!("paired with {peer}; pairing is now closed");
         } else if let Some(account) = &established.account {
             let days = control
@@ -1111,13 +1124,13 @@ impl Host {
                 account: account.clone(),
             },
         );
-        let _listed = Listed {
+        let listed_guard = Listed {
             map: &control.clients,
             serial,
         };
 
         let session = Arc::new(established.session);
-        let mut channels = command::Channels::new(
+        let channels = command::Channels::new(
             Arc::clone(&session),
             command::Principal {
                 peer,
@@ -1132,48 +1145,47 @@ impl Host {
                 chat: control.chat.read().expect("chat").clone(),
             },
         );
-        let mut streams = std::collections::HashMap::<WindowId, WindowStreams>::new();
-        let input = deliver_input(Arc::clone(&self.source));
-        let mut focus: Option<WindowId> = None;
+        let streams = std::collections::HashMap::<WindowId, WindowStreams>::new();
+        let input = deliver_input(Arc::clone(&host.source));
         let clipboard = Arc::new(std::sync::Mutex::new(None::<String>));
         let clipboard_task = tokio::spawn(share_clipboard(
-            Arc::clone(&self.source),
+            Arc::clone(&host.source),
             Arc::clone(&session),
             Arc::clone(&clipboard),
         ));
-        let _clipboard_task = AbortOnDrop(clipboard_task);
-        let _microphone_task = AbortOnDrop(tokio::spawn(receive_microphone(
+        let clipboard_guard = AbortOnDrop(clipboard_task);
+        let microphone_guard = AbortOnDrop(tokio::spawn(receive_microphone(
             Arc::clone(&session),
-            Arc::clone(&self.source),
+            Arc::clone(&host.source),
         )));
         let rtt = Arc::new(RoundTrip::default());
-        let _ping_task = AbortOnDrop(tokio::spawn(ping(Arc::clone(&session), Arc::clone(&rtt))));
+        let ping_guard = AbortOnDrop(tokio::spawn(ping(Arc::clone(&session), Arc::clone(&rtt))));
         // The window list as last sent; `None` until the client asks for it.
         let listed = Arc::new(tokio::sync::Mutex::new(None::<Vec<WindowInfo>>));
-        let _windows_task = AbortOnDrop(tokio::spawn(push_windows(
-            Arc::clone(&self.source),
+        let windows_guard = AbortOnDrop(tokio::spawn(push_windows(
+            Arc::clone(&host.source),
             Arc::clone(&session),
             decision.clone(),
             Arc::clone(&listed),
         )));
-        let _host_state_task = AbortOnDrop(tokio::spawn(push_host_state(
-            Arc::clone(&self.source),
+        let host_state_guard = AbortOnDrop(tokio::spawn(push_host_state(
+            Arc::clone(&host.source),
             Arc::clone(&session),
         )));
         // Compatibility mode this client turned on ends with its session.
-        let _compat = CompatSession {
+        let compat_guard = CompatSession {
             compat: Arc::clone(&control.compat),
             serial,
         };
         // A private session this client started ends with its session.
         let private = EndPrivate {
-            source: Arc::clone(&self.source),
+            source: Arc::clone(&host.source),
             started: Arc::new(AtomicBool::new(false)),
         };
         // The windows this session streams, for following the pointer.
         let streamed = Arc::new(std::sync::Mutex::new(Vec::<WindowId>::new()));
-        let _cursor = follow_cursor(
-            Arc::clone(&self.source),
+        let cursor_guard = follow_cursor(
+            Arc::clone(&host.source),
             Arc::clone(&session),
             Arc::clone(&listed),
             Arc::clone(&streamed),
@@ -1183,230 +1195,359 @@ impl Host {
                 .send_control(&ControlMessage::Rendezvous { discovery_id })
                 .await?;
         }
-        loop {
-            match session.recv_control().await? {
-                ControlMessage::Input(_) if decision.input == Some(false) => {}
-                ControlMessage::Input(event) => {
-                    // Only windows this session streams take input; the
-                    // client cannot reach any other window on the host.
-                    match input_window(&event) {
-                        Some(window) if streams.contains_key(&window) => focus = Some(window),
-                        Some(_) => continue,
-                        None if focus.is_none_or(|f| !streams.contains_key(&f)) => continue,
-                        None => {}
-                    }
-                    let _ = input.send((event, focus));
-                }
-                ControlMessage::Clipboard(text) => {
-                    *clipboard.lock().expect("clipboard") = Some(text.clone());
-                    let source = Arc::clone(&self.source);
-                    tokio::task::spawn_blocking(move || source.set_clipboard(&text));
-                }
-                ControlMessage::ListWindowsRequest => {
-                    let windows = allowed_windows(&self.source, &decision).await;
-                    // Held while sending, so a push cannot overtake it.
-                    let mut last = listed.lock().await;
-                    session
-                        .send_control(&ControlMessage::ListWindowsResponse(windows.clone()))
-                        .await?;
-                    *last = Some(windows);
-                }
-                ControlMessage::StreamStartRequest {
-                    target: StreamTarget::Window(window),
-                    options,
-                    generation,
-                } => {
-                    // Input always comes over the session, whatever the
-                    // carrier, under the session's rules.
-                    let kind = selection::serve(options.backend, &self.source.backends());
-                    let running = streams.get(&window).is_some_and(|w| {
-                        w.carriers.contains_key(&generation)
-                            || w.carriers.values().any(|(k, _)| *k == kind)
-                    });
-                    let allowed = self.window_allowed(&decision, window).await;
-                    let started = if !allowed {
-                        Err("not allowed for this account".to_owned())
-                    } else if running {
-                        Err(format!("this window is already carried by {kind:?}"))
-                    } else {
-                        self.start(&session, peer, window, &options, &rtt).await
-                    };
-                    let response = match started {
-                        Ok(started) => {
-                            {
-                                let mut streamed = streamed.lock().expect("streamed");
-                                if !streamed.contains(&window) {
-                                    streamed.push(window);
-                                }
-                            }
-                            let entry = streams.entry(window).or_default();
-                            if entry.audio.is_none() {
-                                entry.audio =
-                                    Some(self.start_audio(&session, window, started.serial).await);
-                            }
-                            entry
-                                .carriers
-                                .insert(generation, (started.backend.kind(), started.stream));
-                            ControlMessage::StreamStartResponse {
-                                target: StreamTarget::Window(window),
-                                generation,
-                                accepted: true,
-                                backend: started.backend,
-                                track_id: started.track_id,
-                                handoff: started.handoff,
-                                reason: None,
-                            }
-                        }
-                        Err(reason) => refusal(StreamTarget::Window(window), generation, reason),
-                    };
-                    session.send_control(&response).await?;
-                }
-                ControlMessage::StreamStartRequest {
-                    target, generation, ..
-                } => {
-                    session
-                        .send_control(&refusal(
-                            target,
-                            generation,
-                            "not supported by this host".into(),
-                        ))
-                        .await?;
-                }
-                ControlMessage::CompatibilityRequest { window, on } => {
-                    let refused = |reason: &str| ControlMessage::Compatibility {
-                        window,
-                        endpoints: Vec::new(),
-                        refused: Some(reason.to_owned()),
-                    };
-                    let answer = if !on {
-                        control
-                            .compat
-                            .turn_off(window, compat::Owner::Session(serial));
-                        ControlMessage::Compatibility {
-                            window,
-                            endpoints: control.compat.endpoints(window).unwrap_or_default(),
-                            refused: None,
-                        }
-                    } else if !streams.contains_key(&window) {
-                        refused(
-                            "only a window this session streams can be put in compatibility mode",
-                        )
-                    } else if decision.input == Some(false) {
-                        refused(
-                            "compatibility mode hands the window's input to other programs, and \
-                             this account may not drive windows",
-                        )
-                    } else {
-                        let title = listed
-                            .lock()
-                            .await
-                            .iter()
-                            .flatten()
-                            .find(|w| w.id == window)
-                            .map_or_else(|| format!("window {}", window.0), |w| w.title.clone());
-                        let compat = Arc::clone(&control.compat);
-                        let opened = tokio::task::spawn_blocking(move || {
-                            compat.turn_on(window, &title, compat::Owner::Session(serial))
-                        })
-                        .await
-                        .unwrap_or_else(|e| Err(e.to_string()));
-                        match opened {
-                            Ok(endpoints) => {
-                                println!("{peer} put window {} in compatibility mode", window.0);
-                                ControlMessage::Compatibility {
-                                    window,
-                                    endpoints,
-                                    refused: None,
-                                }
-                            }
-                            Err(reason) => refused(&reason),
-                        }
-                    };
-                    session.send_control(&answer).await?;
-                }
-                ControlMessage::StreamStopRequest(StreamTarget::Window(window)) => {
-                    control
-                        .compat
-                        .turn_off(window, compat::Owner::Session(serial));
-                    streamed.lock().expect("streamed").retain(|w| *w != window);
-                    if let Some(ended) = streams.remove(&window) {
-                        end_stream(&session, window, ended).await?;
-                    }
-                }
-                ControlMessage::CarrierStop { window, generation } => {
-                    let Some(entry) = streams.get_mut(&window) else {
-                        continue;
-                    };
-                    if let Some((kind, carrier)) = entry.carriers.remove(&generation) {
-                        drop(carrier);
-                        if session_track(kind) {
-                            session.detach_window(window).await?;
-                        }
-                    }
-                    if entry.carriers.is_empty() {
-                        control
-                            .compat
-                            .turn_off(window, compat::Owner::Session(serial));
-                        streamed.lock().expect("streamed").retain(|w| *w != window);
-                        let ended = streams.remove(&window).expect("listed");
-                        end_stream(&session, window, ended).await?;
-                    }
-                }
-                ControlMessage::SshCertificateRequest { public_key } => {
-                    let control = Arc::clone(&self.control);
-                    let issued = tokio::task::spawn_blocking(move || {
-                        control.ssh_certificate(&peer, &public_key)
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()));
-                    session
-                        .send_control(&ControlMessage::SshCertificateResponse(issued))
-                        .await?;
-                }
-                ControlMessage::PrivateSessionRequest { start, password } => {
-                    let source = Arc::clone(&self.source);
-                    let done = tokio::task::spawn_blocking(move || {
-                        source.set_private_session(start, password.as_deref())
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(PrivateRefusal::new(e.to_string())));
-                    match done {
-                        Ok(()) => {
-                            private.started.store(start, Ordering::SeqCst);
-                            println!(
-                                "{peer} {} a private session",
-                                if start { "started" } else { "ended" }
-                            );
-                        }
-                        Err(refusal) => {
-                            session
-                                .send_control(&ControlMessage::PrivateSessionRefused {
-                                    reason: refusal.reason,
-                                    password_needed: refusal.password_needed,
-                                })
-                                .await?
-                        }
-                    }
-                }
-                ControlMessage::Command(message) => channels.handle(message).await?,
-                ControlMessage::Ping => session.send_control(&ControlMessage::Pong).await?,
-                ControlMessage::Pong => rtt.answered(),
-                ControlMessage::Rendezvous { discovery_id } => {
-                    if let Err(e) = control.remote_peers.set(&peer, &discovery_id) {
-                        eprintln!("could not keep {peer}'s discovery ID: {e}");
-                    }
-                }
-                ControlMessage::StreamLimits { window, limits } => {
-                    for (_, carrier) in streams
-                        .get(&window)
-                        .into_iter()
-                        .flat_map(|w| w.carriers.values())
-                    {
-                        *carrier.limits.lock().expect("limits") = limits;
-                    }
-                }
-                other => tracing::debug!("ignoring {other:?}"),
+        Ok(Serving {
+            host,
+            session,
+            peer,
+            serial,
+            decision,
+            channels,
+            streams,
+            focus: None,
+            input,
+            clipboard,
+            listed,
+            streamed,
+            private,
+            rtt,
+            _guards: Guards {
+                _listed: listed_guard,
+                _tasks: [
+                    clipboard_guard,
+                    microphone_guard,
+                    ping_guard,
+                    windows_guard,
+                    host_state_guard,
+                ],
+                _compat: compat_guard,
+                _cursor: cursor_guard,
+            },
+        })
+    }
+
+    async fn handle(&mut self, message: ControlMessage) -> Result<(), TransportError> {
+        match message {
+            ControlMessage::Input(_) if self.decision.input == Some(false) => {}
+            ControlMessage::Input(event) => self.input(event),
+            ControlMessage::Clipboard(text) => {
+                *self.clipboard.lock().expect("clipboard") = Some(text.clone());
+                let source = Arc::clone(&self.host.source);
+                tokio::task::spawn_blocking(move || source.set_clipboard(&text));
             }
+            ControlMessage::ListWindowsRequest => self.list_windows().await?,
+            ControlMessage::StreamStartRequest {
+                target: StreamTarget::Window(window),
+                options,
+                generation,
+            } => self.start_stream(window, options, generation).await?,
+            ControlMessage::StreamStartRequest {
+                target, generation, ..
+            } => {
+                self.session
+                    .send_control(&refusal(
+                        target,
+                        generation,
+                        "not supported by this host".into(),
+                    ))
+                    .await?;
+            }
+            ControlMessage::CompatibilityRequest { window, on } => {
+                self.compatibility(window, on).await?
+            }
+            ControlMessage::StreamStopRequest(StreamTarget::Window(window)) => {
+                self.host
+                    .control
+                    .compat
+                    .turn_off(window, compat::Owner::Session(self.serial));
+                self.streamed
+                    .lock()
+                    .expect("streamed")
+                    .retain(|w| *w != window);
+                if let Some(ended) = self.streams.remove(&window) {
+                    end_stream(&self.session, window, ended).await?;
+                }
+            }
+            ControlMessage::CarrierStop { window, generation } => {
+                self.stop_carrier(window, generation).await?
+            }
+            ControlMessage::SshCertificateRequest { public_key } => {
+                let control = Arc::clone(&self.host.control);
+                let peer = self.peer;
+                let issued = tokio::task::spawn_blocking(move || {
+                    control.ssh_certificate(&peer, &public_key)
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+                self.session
+                    .send_control(&ControlMessage::SshCertificateResponse(issued))
+                    .await?;
+            }
+            ControlMessage::PrivateSessionRequest { start, password } => {
+                self.private_session(start, password).await?
+            }
+            ControlMessage::Command(message) => self.channels.handle(message).await?,
+            ControlMessage::Ping => self.session.send_control(&ControlMessage::Pong).await?,
+            ControlMessage::Pong => self.rtt.answered(),
+            ControlMessage::Rendezvous { discovery_id } => {
+                if let Err(e) = self
+                    .host
+                    .control
+                    .remote_peers
+                    .set(&self.peer, &discovery_id)
+                {
+                    eprintln!("could not keep {}'s discovery ID: {e}", self.peer);
+                }
+            }
+            ControlMessage::StreamLimits { window, limits } => {
+                for (_, carrier) in self
+                    .streams
+                    .get(&window)
+                    .into_iter()
+                    .flat_map(|w| w.carriers.values())
+                {
+                    *carrier.limits.lock().expect("limits") = limits;
+                }
+            }
+            other => tracing::debug!("ignoring {other:?}"),
+        }
+        Ok(())
+    }
+
+    fn input(&mut self, event: InputEvent) {
+        // Only windows this session streams take input; the client cannot
+        // reach any other window on the host.
+        match input_window(&event) {
+            Some(window) if self.streams.contains_key(&window) => self.focus = Some(window),
+            Some(_) => return,
+            None if self.focus.is_none_or(|f| !self.streams.contains_key(&f)) => return,
+            None => {}
+        }
+        let _ = self.input.send((event, self.focus));
+    }
+
+    async fn list_windows(&mut self) -> Result<(), TransportError> {
+        let windows = allowed_windows(&self.host.source, &self.decision).await;
+        // Held while sending, so a push cannot overtake it.
+        let mut last = self.listed.lock().await;
+        self.session
+            .send_control(&ControlMessage::ListWindowsResponse(windows.clone()))
+            .await?;
+        *last = Some(windows);
+        Ok(())
+    }
+
+    async fn start_stream(
+        &mut self,
+        window: WindowId,
+        options: StreamOptions,
+        generation: u32,
+    ) -> Result<(), TransportError> {
+        let host = self.host;
+        // Input always comes over the session, whatever the carrier, under
+        // the session's rules.
+        let kind = selection::serve(options.backend, &host.source.backends());
+        let running = self.streams.get(&window).is_some_and(|w| {
+            w.carriers.contains_key(&generation) || w.carriers.values().any(|(k, _)| *k == kind)
+        });
+        let allowed = host.window_allowed(&self.decision, window).await;
+        let started = if !allowed {
+            Err("not allowed for this account".to_owned())
+        } else if running {
+            Err(format!("this window is already carried by {kind:?}"))
+        } else {
+            host.start(&self.session, self.peer, window, &options, &self.rtt)
+                .await
+        };
+        let response = match started {
+            Ok(started) => {
+                {
+                    let mut streamed = self.streamed.lock().expect("streamed");
+                    if !streamed.contains(&window) {
+                        streamed.push(window);
+                    }
+                }
+                let entry = self.streams.entry(window).or_default();
+                if entry.audio.is_none() {
+                    entry.audio = Some(
+                        host.start_audio(&self.session, window, started.serial)
+                            .await,
+                    );
+                }
+                entry
+                    .carriers
+                    .insert(generation, (started.backend.kind(), started.stream));
+                ControlMessage::StreamStartResponse {
+                    target: StreamTarget::Window(window),
+                    generation,
+                    accepted: true,
+                    backend: started.backend,
+                    track_id: started.track_id,
+                    handoff: started.handoff,
+                    reason: None,
+                }
+            }
+            Err(reason) => refusal(StreamTarget::Window(window), generation, reason),
+        };
+        self.session.send_control(&response).await?;
+        Ok(())
+    }
+
+    async fn compatibility(&mut self, window: WindowId, on: bool) -> Result<(), TransportError> {
+        let control = &self.host.control;
+        let serial = self.serial;
+        let refused = |reason: &str| ControlMessage::Compatibility {
+            window,
+            endpoints: Vec::new(),
+            refused: Some(reason.to_owned()),
+        };
+        let answer = if !on {
+            control
+                .compat
+                .turn_off(window, compat::Owner::Session(serial));
+            ControlMessage::Compatibility {
+                window,
+                endpoints: control.compat.endpoints(window).unwrap_or_default(),
+                refused: None,
+            }
+        } else if !self.streams.contains_key(&window) {
+            refused("only a window this session streams can be put in compatibility mode")
+        } else if self.decision.input == Some(false) {
+            refused(
+                "compatibility mode hands the window's input to other programs, and \
+                 this account may not drive windows",
+            )
+        } else {
+            let title = self
+                .listed
+                .lock()
+                .await
+                .iter()
+                .flatten()
+                .find(|w| w.id == window)
+                .map_or_else(|| format!("window {}", window.0), |w| w.title.clone());
+            let compat = Arc::clone(&control.compat);
+            let opened = tokio::task::spawn_blocking(move || {
+                compat.turn_on(window, &title, compat::Owner::Session(serial))
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            match opened {
+                Ok(endpoints) => {
+                    println!(
+                        "{} put window {} in compatibility mode",
+                        self.peer, window.0
+                    );
+                    ControlMessage::Compatibility {
+                        window,
+                        endpoints,
+                        refused: None,
+                    }
+                }
+                Err(reason) => refused(&reason),
+            }
+        };
+        self.session.send_control(&answer).await?;
+        Ok(())
+    }
+
+    async fn stop_carrier(
+        &mut self,
+        window: WindowId,
+        generation: u32,
+    ) -> Result<(), TransportError> {
+        let Some(entry) = self.streams.get_mut(&window) else {
+            return Ok(());
+        };
+        if let Some((kind, carrier)) = entry.carriers.remove(&generation) {
+            drop(carrier);
+            if session_track(kind) {
+                self.session.detach_window(window).await?;
+            }
+        }
+        if entry.carriers.is_empty() {
+            self.host
+                .control
+                .compat
+                .turn_off(window, compat::Owner::Session(self.serial));
+            self.streamed
+                .lock()
+                .expect("streamed")
+                .retain(|w| *w != window);
+            let ended = self.streams.remove(&window).expect("listed");
+            end_stream(&self.session, window, ended).await?;
+        }
+        Ok(())
+    }
+
+    async fn private_session(
+        &mut self,
+        start: bool,
+        password: Option<String>,
+    ) -> Result<(), TransportError> {
+        let source = Arc::clone(&self.host.source);
+        let done = tokio::task::spawn_blocking(move || {
+            source.set_private_session(start, password.as_deref())
+        })
+        .await
+        .unwrap_or_else(|e| Err(PrivateRefusal::new(e.to_string())));
+        match done {
+            Ok(()) => {
+                self.private.started.store(start, Ordering::SeqCst);
+                println!(
+                    "{} {} a private session",
+                    self.peer,
+                    if start { "started" } else { "ended" }
+                );
+            }
+            Err(refusal) => {
+                self.session
+                    .send_control(&ControlMessage::PrivateSessionRefused {
+                        reason: refusal.reason,
+                        password_needed: refusal.password_needed,
+                    })
+                    .await?
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Host {
+    async fn serve(
+        self: &Arc<Self>,
+        stream: TcpStream,
+        address: String,
+    ) -> Result<(), TransportError> {
+        // A host that only listens on loopback opens nothing else either.
+        let local = stream
+            .local_addr()
+            .is_ok_and(|local| local.ip().is_loopback());
+        let session = if local {
+            Session::local_only().await?
+        } else {
+            Session::new().await?
+        };
+        self.serve_session(stream, address, session, true).await
+    }
+
+    /// Serves one client over a signaling stream (a LAN TCP socket, or a
+    /// punched UDP stream from away), on `session`. Pairing by PIN only
+    /// where `pairing` allows (on the LAN: a host found from away takes
+    /// only clients it already trusts).
+    async fn serve_session<S>(
+        self: &Arc<Self>,
+        stream: S,
+        address: String,
+        session: Session,
+        pairing: bool,
+    ) -> Result<(), TransportError>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let mut serving = Serving::open(self, stream, address, session, pairing).await?;
+        loop {
+            let message = serving.session.recv_control().await?;
+            serving.handle(message).await?;
         }
     }
 
