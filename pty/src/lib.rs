@@ -206,10 +206,19 @@ mod tests {
     fn a_shell_can_be_killed_while_another_thread_waits_for_it() {
         let pty = std::sync::Arc::new(Pty::spawn(&sh()).unwrap());
         let waiting = std::sync::Arc::clone(&pty);
-        let waiter = std::thread::spawn(move || waiting.wait());
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        let (ready, started) = std::sync::mpsc::channel();
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            done.send(waiting.wait()).unwrap();
+        });
+        // Killed whether the waiter is already inside `wait` or about to
+        // be: both must end it, and neither may hold the kill up.
+        started.recv().unwrap();
         pty.kill();
-        waiter.join().unwrap();
+        ended
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the kill did not end the wait");
     }
 
     #[test]
