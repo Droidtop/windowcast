@@ -470,6 +470,30 @@ static jstring take_text(JNIEnv *env) {
     return result;
 }
 
+/* The hosts that announced themselves on the local network, as JSON; null with the reason in lastError. */
+JNIEXPORT jstring JNICALL
+Java_dev_windowcast_Native_discoverHosts(JNIEnv *env, jclass cls, jint window_ms) {
+    answer[0] = 0;
+    int64_t len = windowcast_discover_hosts((uint32_t)window_ms, answer, sizeof answer);
+    if (len < 0) {
+        fail_with(len == WINDOWCAST_BUFFER_TOO_SMALL ? "too many hosts to list" : answer);
+        return NULL;
+    }
+    return take_text(env);
+}
+
+/* Wake-on-LAN; 0, or an error with the reason in lastError. */
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_wakeHost(JNIEnv *env, jclass cls, jstring mac, jstring directed) {
+    const char *m = (*env)->GetStringUTFChars(env, mac, NULL);
+    const char *d = directed ? (*env)->GetStringUTFChars(env, directed, NULL) : NULL;
+    last_error[0] = 0;
+    int64_t result = windowcast_wake_host(m, d, last_error, sizeof last_error);
+    if (d) (*env)->ReleaseStringUTFChars(env, directed, d);
+    (*env)->ReleaseStringUTFChars(env, mac, m);
+    return result;
+}
+
 /* What the host takes, as JSON; null with the reason in lastError. */
 JNIEXPORT jstring JNICALL
 Java_dev_windowcast_Native_signInOptions(JNIEnv *env, jclass cls, jlong client,

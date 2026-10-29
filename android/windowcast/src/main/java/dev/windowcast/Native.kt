@@ -101,6 +101,12 @@ internal object Native {
      */
     @JvmStatic external fun launch(session: Long, argvJson: String, password: String?): Long
 
+    // Local discovery and Wake-on-LAN (windowcast.h). Failures leave the reason in lastError.
+    /** The hosts heard on the local network within [windowMs], as JSON, or null. Blocks. */
+    @JvmStatic external fun discoverHosts(windowMs: Int): String?
+    /** 0, or an error. */
+    @JvmStatic external fun wakeHost(mac: String, directed: String?): Long
+
     // Account sign-in (windowcast.h). Failures leave the reason in lastError.
     /** The host's sign-in options as JSON, or null. */
     @JvmStatic external fun signInOptions(client: Long, address: String): String?

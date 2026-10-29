@@ -24,7 +24,7 @@ punching (`windowcast-rendezvous`). On the LAN, until now, a client needed the h
   been typed: it resumes only with a host whose pinned identity matches, and pairs with the PIN the
   first time. A forged beacon can at worst send a client to the wrong address, where the identity check
   fails. Nothing is sent in reply to a beacon.
-- **Client:** `windowcast_client::discover_hosts(window)` lists `DiscoveredHost { device_id, name,
+- **Clients:** the same call everywhere: Rust `windowcast_client::discover_hosts(window)`, C `windowcast_discover_hosts(window_ms, out, cap)` (JSON), Android `HostDiscovery.find(windowMs)`. `discover_hosts(window)` lists `DiscoveredHost { device_id, name,
   address }` heard within `window`, once per device id (the latest beacon wins). The sender's address
   with the beacon's port is the address to connect to.
 
@@ -33,7 +33,7 @@ or the away path). Only one listener per computer can hold port 47101.
 
 ## Wake-on-LAN
 
-`windowcast_client::wake_host(mac, directed)` broadcasts the standard magic packet (six 0xFF bytes,
+`windowcast_client::wake_host(mac, directed)` (C `windowcast_wake_host`, Android `HostDiscovery.wake`) broadcasts the standard magic packet (six 0xFF bytes,
 then the MAC sixteen times) to the LAN on port 9, and to `directed` (a subnet broadcast address)
 when given. The computer's network card has to be set to wake on it, and it has to be on the same
 network; a packet cannot wake what is off at the wall. Where the client learns a host's MAC is the
@@ -43,4 +43,4 @@ application's to decide (the host can report it in its own listing; not done yet
 
 - A deployable directory and TURN relay (the code is there; running them for people is an operations
   decision for the owner).
-- The Android library and C interface do not expose `discover_hosts` or `wake_host` yet.
+- A host reporting its own MAC address, so a client can offer "wake" for a host it paired with.

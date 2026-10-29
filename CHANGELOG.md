@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   crate; a host broadcasts a small beacon (name, device id, port) every 3 s when its application
   turns it on (`HostControl::set_announce`; setting "Announce this computer on the local network" in
   the reference app, off by default); `discover_hosts` lists the hosts heard and `wake_host` sends the
-  magic packet. A beacon is a hint, never trust.
+  magic packet. A beacon is a hint, never trust. The C interface (`windowcast_discover_hosts`,
+  `windowcast_wake_host`) and the Android library (`HostDiscovery.find`, `HostDiscovery.wake`) expose both.
 - Android library: `EventPump` and `SessionListener` (one way to follow a session's events),
   `WantedWindow` (waiting for a window asked for by title), and `ConnectRequest` and `WatchSet`,
   moved out of the viewer, so the viewer and droidtop make the same calls (Droidtop/tracker#428,

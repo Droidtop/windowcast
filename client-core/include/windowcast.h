@@ -200,6 +200,23 @@ int64_t windowcast_session_next_audio(const WindowcastSession *session, uint64_t
                                       uint32_t timeout_ms, uint8_t *out, size_t cap,
                                       uint32_t *rtp_timestamp);
 
+/* Local discovery and Wake-on-LAN (docs/DISCOVERY.md). */
+
+/* Listens on the local network for window_ms (at most 30000) and writes the
+ * hosts that announced themselves into out as JSON: an array of
+ * {"device_id", "name", "address"}, address being "HOST:PORT" to connect to.
+ * Blocks for the whole window. A heard host is only a hint: connect to it as
+ * if its address were typed. Returns the JSON's length,
+ * WINDOWCAST_BUFFER_TOO_SMALL, or WINDOWCAST_ERROR with the reason in out. */
+int64_t windowcast_discover_hosts(uint32_t window_ms, char *out, size_t cap);
+
+/* Wakes a sleeping computer: broadcasts the Wake-on-LAN magic packet for mac
+ * ("aa:bb:cc:dd:ee:ff") on the local network, and also to directed (the
+ * subnet's broadcast address, may be NULL). Returns 0 or WINDOWCAST_ERROR
+ * with the reason in error. */
+int64_t windowcast_wake_host(const char *mac, const char *directed, char *error,
+                             size_t error_cap);
+
 /* Account sign-in (docs/ACCOUNTS.md). */
 typedef struct WindowcastOidcSignIn WindowcastOidcSignIn;
 

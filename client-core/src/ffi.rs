@@ -760,6 +760,97 @@ pub unsafe extern "C" fn windowcast_session_next_audio(
     packet.data.len() as i64
 }
 
+/// The hosts [`windowcast_discover_hosts`] found, as JSON: an array of
+/// `{"device_id","name","address"}`.
+fn discovered_json(hosts: &[crate::DiscoveredHost]) -> String {
+    let list: Vec<serde_json::Value> = hosts
+        .iter()
+        .map(|host| {
+            serde_json::json!({
+                "device_id": host.device_id,
+                "name": host.name,
+                "address": host.address,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(list).to_string()
+}
+
+/// The longest a discovery call listens, milliseconds.
+const DISCOVER_MAX_MS: u32 = 30_000;
+
+/// Listens on the local network for `window_ms` (at most 30 s) and writes the
+/// hosts that announced themselves into `out` as JSON: an array of
+/// `{"device_id","name","address"}`, `address` being `HOST:PORT` to connect
+/// to. Blocks for the whole window. A heard host is only a hint: connect to
+/// it as if its address were typed. Returns the JSON's length,
+/// [`WINDOWCAST_BUFFER_TOO_SMALL`], or [`WINDOWCAST_ERROR`] with the reason
+/// in `out`.
+///
+/// # Safety
+/// `out` must be valid for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_discover_hosts(
+    window_ms: u32,
+    out: *mut c_char,
+    cap: usize,
+) -> i64 {
+    let window = Duration::from_millis(u64::from(window_ms.min(DISCOVER_MAX_MS)));
+    match crate::discover_hosts(window) {
+        Ok(hosts) => {
+            let json = discovered_json(&hosts);
+            if json.len() >= cap {
+                return WINDOWCAST_BUFFER_TOO_SMALL;
+            }
+            write_text(&json, out, cap);
+            json.len() as i64
+        }
+        Err(e) => {
+            write_text(&e.to_string(), out, cap);
+            WINDOWCAST_ERROR
+        }
+    }
+}
+
+/// Wakes a sleeping computer with Wake-on-LAN: broadcasts the magic packet
+/// for `mac` (`aa:bb:cc:dd:ee:ff`) on the local network, and also to
+/// `directed` (the subnet's broadcast address, may be NULL). Returns 0 or
+/// [`WINDOWCAST_ERROR`] with the reason in `error`.
+///
+/// # Safety
+/// `mac` NUL-terminated; `directed` NUL-terminated or null; `error` valid for
+/// `error_cap` bytes or null.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_wake_host(
+    mac: *const c_char,
+    directed: *const c_char,
+    error: *mut c_char,
+    error_cap: usize,
+) -> i64 {
+    let Some(mac) = str_arg(mac) else {
+        write_text("invalid arguments", error, error_cap);
+        return WINDOWCAST_ERROR;
+    };
+    let directed = if directed.is_null() {
+        None
+    } else {
+        match str_arg(directed) {
+            Some(text) => Some(text),
+            None => {
+                write_text("invalid arguments", error, error_cap);
+                return WINDOWCAST_ERROR;
+            }
+        }
+    };
+    match crate::wake_host(mac, directed) {
+        Ok(()) => 0,
+        Err(reason) => {
+            write_text(&reason, error, error_cap);
+            WINDOWCAST_ERROR
+        }
+    }
+}
+
 /// Asks the host at `address` which account sign-ins it takes, without
 /// signing in, and writes them into `out` as JSON (`host_id`,
 /// `fingerprint`, `trusted`, `methods`, `providers`, `kerberos_service`).
@@ -1129,6 +1220,37 @@ mod tests {
             assert_eq!(codec_from_id(codec_id(codec)), Some(codec));
         }
         assert_eq!(codec_from_id(9), None);
+    }
+
+    #[test]
+    fn discovered_hosts_are_listed_as_json() {
+        let hosts = vec![crate::DiscoveredHost {
+            device_id: "ab".repeat(32),
+            name: "Living room PC".into(),
+            address: "192.168.1.5:47100".into(),
+        }];
+        let json: serde_json::Value = serde_json::from_str(&discovered_json(&hosts)).unwrap();
+        assert_eq!(json[0]["name"], "Living room PC");
+        assert_eq!(json[0]["address"], "192.168.1.5:47100");
+        assert_eq!(json[0]["device_id"].as_str().unwrap().len(), 64);
+        assert_eq!(discovered_json(&[]), "[]");
+    }
+
+    #[test]
+    fn a_bad_mac_is_an_error_with_the_reason() {
+        let mut error = [0 as c_char; 128];
+        let mac = std::ffi::CString::new("not a mac").unwrap();
+        let result = unsafe {
+            windowcast_wake_host(
+                mac.as_ptr(),
+                std::ptr::null(),
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        assert_eq!(result, WINDOWCAST_ERROR);
+        let text = unsafe { std::ffi::CStr::from_ptr(error.as_ptr()) }.to_string_lossy();
+        assert!(text.contains("MAC"), "{text}");
     }
 
     #[test]
