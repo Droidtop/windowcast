@@ -5,13 +5,13 @@
 //! with WINDOWCAST_TEST_FREERDP set.
 
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use windowcast_cli_tools::testpattern::TestPatternSource;
 use windowcast_host::WindowSource;
-use windowcast_rdp::host::{serve_window, HostStats, WindowServer};
+use windowcast_rdp::host::{serve_window, HostStats, Stop, WindowServer};
 use windowcast_rdp::tls::HostIdentity;
 use windowcast_rdp::Credentials;
 
@@ -40,7 +40,7 @@ fn stock_freerdp_logs_in_and_shows_the_window() {
                 },
                 identity: Arc::new(identity),
                 stats,
-                stop: Arc::new(AtomicBool::new(false)),
+                stop: Stop::new(),
                 input: true,
             };
             if let Err(e) = serve_window(listener, server) {

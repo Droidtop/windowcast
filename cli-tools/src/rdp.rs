@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use windowcast_cli_tools::testpattern::TestPatternSource;
 use windowcast_host::WindowSource;
 use windowcast_rdp::client::{connect, ClientConfig};
-use windowcast_rdp::host::{serve_window, HostStats, WindowServer};
+use windowcast_rdp::host::{serve_window, HostStats, Stop, WindowServer};
 use windowcast_rdp::tls::HostIdentity;
 use windowcast_rdp::Credentials;
 
@@ -132,7 +132,7 @@ fn main() {
                 },
                 identity: Arc::new(identity),
                 stats: Arc::new(HostStats::default()),
-                stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                stop: Stop::new(),
                 input: true,
             };
             if let Err(e) = serve_window(listener, server) {

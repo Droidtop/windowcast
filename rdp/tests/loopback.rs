@@ -3,7 +3,6 @@
 //! the host's certificate pinned), sees the pattern move, and its keys and
 //! pointer reach the window. A wrong password is refused.
 
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -11,7 +10,7 @@ use windowcast_cli_tools::testpattern::{frame_number, TestPatternSource, HEIGHT,
 use windowcast_host::{FrameSource, PictureSource, WindowSource};
 use windowcast_protocol::{InputEvent, PointerButton, VideoCodec, WindowId, WindowInfo};
 use windowcast_rdp::client::{connect, ClientConfig};
-use windowcast_rdp::host::{serve_window, HostStats, WindowServer};
+use windowcast_rdp::host::{serve_window, HostStats, Stop, WindowServer};
 use windowcast_rdp::tls::HostIdentity;
 use windowcast_rdp::Credentials;
 
@@ -60,7 +59,7 @@ fn our_client_sees_and_drives_a_window_over_our_rdp_host() {
             },
             identity: Arc::new(identity),
             stats: Arc::new(HostStats::default()),
-            stop: Arc::new(AtomicBool::new(false)),
+            stop: Stop::new(),
             input: true,
         };
         if let Err(e) = serve_window(listener, server) {

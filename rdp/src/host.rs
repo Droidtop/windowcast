@@ -46,8 +46,8 @@ pub struct WindowServer {
     pub credentials: Credentials,
     pub identity: Arc<HostIdentity>,
     pub stats: Arc<HostStats>,
-    /// Set to stop serving; a connected client is dropped.
-    pub stop: Arc<AtomicBool>,
+    /// Stops serving when [`Stop::stop`] is called; a connected client is dropped.
+    pub stop: Stop,
     /// Whether input from the RDP client drives the window: for a
     /// third-party client (compatibility mode, `windowcast-rdp serve`), not
     /// for a carrier of a windowcast session, whose input comes over the
@@ -71,10 +71,30 @@ pub fn serve_window(listener: std::net::TcpListener, server: WindowServer) -> Re
     })
 }
 
-/// Resolves once `stop` is set.
-async fn stopped(stop: &AtomicBool) {
-    while !stop.load(Ordering::SeqCst) {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+/// Stops a [`WindowServer`]: called from any thread, awaited by the server (no flag polled on a timer). Cloning shares it.
+#[derive(Clone)]
+pub struct Stop(Arc<tokio::sync::watch::Sender<bool>>);
+
+impl Stop {
+    pub fn new() -> Stop {
+        Stop(Arc::new(tokio::sync::watch::channel(false).0))
+    }
+
+    /// Stops the server it was given to, now and for good.
+    pub fn stop(&self) {
+        self.0.send_replace(true);
+    }
+
+    /// Resolves once stopped.
+    async fn stopped(&self) {
+        let mut stopped = self.0.subscribe();
+        let _ = stopped.wait_for(|stopped| *stopped).await;
+    }
+}
+
+impl Default for Stop {
+    fn default() -> Stop {
+        Stop::new()
     }
 }
 
@@ -127,7 +147,7 @@ async fn serve(listener: TcpListener, config: WindowServer) -> Result<(), RdpErr
     loop {
         let (stream, peer) = tokio::select! {
             accepted = listener.accept() => accepted?,
-            () = stopped(&stop) => return Ok(()),
+            () = stop.stopped() => return Ok(()),
         };
         let _ = stream.set_nodelay(true);
         eprintln!("rdp: {peer} connected to window {}", window.0);
@@ -136,7 +156,7 @@ async fn serve(listener: TcpListener, config: WindowServer) -> Result<(), RdpErr
                 Ok(()) => eprintln!("rdp: {peer} left"),
                 Err(e) => eprintln!("rdp: {peer}: {e:#}"),
             },
-            () = stopped(&stop) => return Ok(()),
+            () = stop.stopped() => return Ok(()),
         }
     }
 }
@@ -188,7 +208,7 @@ impl WithRdp {
         let mut secret = [0u8; 18];
         rand_core::OsRng.fill_bytes(&mut secret);
         let password: String = secret.iter().map(|b| format!("{b:02x}")).collect();
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Stop::new();
         let server = WindowServer {
             source: Arc::clone(&self.inner),
             window,
@@ -199,7 +219,7 @@ impl WithRdp {
             },
             identity: Arc::clone(&self.identity),
             stats: Arc::new(HostStats::default()),
-            stop: Arc::clone(&stop),
+            stop: stop.clone(),
             input,
         };
         std::thread::spawn(move || {
@@ -221,11 +241,11 @@ impl WithRdp {
 }
 
 /// Stops a handed-off window's RDP server when dropped.
-struct StopOnDrop(Arc<AtomicBool>);
+struct StopOnDrop(Stop);
 
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.0.stop();
     }
 }
 
@@ -511,5 +531,22 @@ mod tests {
         assert_eq!(&padded[..12], &(0..12).collect::<Vec<u8>>()[..]);
         assert_eq!(&padded[12..16], &[0, 0, 0, 0]);
         assert_eq!(&padded[32..48], &[0; 16]);
+    }
+
+    /// Stopping wakes the server at once and for good, from a thread that is not the runtime's; a server started after the stop
+    /// does not wait.
+    #[test]
+    fn stopping_resolves_a_waiting_server_and_stays_stopped() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let stop = Stop::new();
+        let from = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            from.stop();
+        });
+        runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(10), stop.stopped()).await.expect("not woken by the stop");
+            tokio::time::timeout(std::time::Duration::from_secs(1), stop.stopped()).await.expect("a late waiter should not wait");
+        });
     }
 }
