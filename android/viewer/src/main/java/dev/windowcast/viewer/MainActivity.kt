@@ -5,14 +5,8 @@ import android.app.AlertDialog
 import android.app.Dialog
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
-import androidx.browser.customtabs.CustomTabsIntent
-import dev.windowcast.OidcDeviceSignIn
-import dev.windowcast.OidcProvider
 import dev.windowcast.SignIn
-import dev.windowcast.SignInOptions
-import java.util.concurrent.atomic.AtomicBoolean
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
@@ -39,7 +33,6 @@ import dev.windowcast.ConnectRequest
 import dev.windowcast.Event
 import dev.windowcast.EventPump
 import dev.windowcast.SessionListener
-import dev.windowcast.SignInAttempts
 import dev.windowcast.SignInPlan
 import dev.windowcast.WantedWindow
 import dev.windowcast.WatchSet
@@ -151,9 +144,9 @@ class MainActivity : Activity() {
     private lateinit var form: ScrollView
     /** Shown while a browser sign-in waits; gives it up. */
     private lateinit var cancelBrowserSignIn: Button
+    private lateinit var signIns: SignInFlow
     private var clipboardListener: ClipboardManager.OnPrimaryClipChangedListener? = null
     /** Counts browser sign-ins; a finished one acts only if it is still the latest, so Cancel can drop one. */
-    private val attempts = SignInAttempts()
     /** Set once the system has asked for the state to keep across a recreation (onDestroy keeps the session then). */
     private var keepSession = false
     private lateinit var sendMicrophone: CheckBox
@@ -228,15 +221,19 @@ class MainActivity : Activity() {
             text = "Sign in with an account"
             setOnClickListener {
                 prefs.edit().putString("address", address.text.toString()).apply()
-                signIn(address.text.toString().trim())
+                signIns.signIn(address.text.toString().trim())
             }
         }
         cancelBrowserSignIn = Button(this).apply {
             text = "Cancel sign-in"
             visibility = View.GONE
-            setOnClickListener { giveUpBrowserSignIn(SignInPlan.CANCELLED) }
+            setOnClickListener { signIns.giveUpBrowserSignIn(SignInPlan.CANCELLED) }
         }
         status = TextView(this).apply { text = "Not connected" }
+        signIns = SignInFlow(
+            this, main, status, cancelBrowserSignIn, { client }, worker, signInWorker,
+            ::connectAccount,
+        )
         sendMicrophone = CheckBox(this).apply {
             text = "Send my microphone to the host"
             setOnCheckedChangeListener { _, on ->
@@ -453,13 +450,6 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Gives up the browser sign-in that is waiting, if any; its result is ignored when it arrives or times out. */
-    private fun giveUpBrowserSignIn(message: String) {
-        attempts.cancel()
-        cancelBrowserSignIn.visibility = View.GONE
-        status.text = message
-    }
-
     private fun connect(address: String, pin: String?) {
         startSession("Connecting to $address…", "Could not connect") { c ->
             c.connect(address, pin) to { s -> (if (s.paired) "Paired with " else "Connected to ") + s.hostId.take(16) + "…" }
@@ -503,188 +493,6 @@ class MainActivity : Activity() {
                 main.post { status.text = describe?.invoke(e) ?: "$failure: ${e.message}" }
             }
         }
-    }
-
-    /**
-     * Account sign-in (docs/ACCOUNTS.md): ask the host what it takes; a host not trusted yet
-     * shows its fingerprint first, and nothing is sent to it until the user says it matches.
-     */
-    private fun signIn(address: String) {
-        val c = client ?: return
-        if (address.isEmpty()) {
-            status.text = "Type the host's address first"
-            return
-        }
-        status.text = "Asking $address how to sign in…"
-        worker.execute {
-            try {
-                val options = c.signInOptions(address)
-                main.post { confirmHost(address, options) }
-            } catch (e: IOException) {
-                android.util.Log.w(TAG, "ask the host how to sign in failed", e)
-                main.post { status.text = "Could not ask the host: ${e.message}" }
-            }
-        }
-    }
-
-    private fun confirmHost(address: String, options: SignInOptions) {
-        val plan = SignInPlan.of(options)
-        if (!plan.needsConfirmation) {
-            chooseSignIn(address, plan)
-            return
-        }
-        AlertDialog.Builder(this)
-            .setTitle("Is this your host?")
-            .setMessage(plan.confirmationText)
-            .setPositiveButton("It matches") { _, _ -> chooseSignIn(address, plan) }
-            .setNegativeButton("Cancel") { _, _ -> status.text = SignInPlan.CANCELLED }
-            .show()
-    }
-
-    /** The ways this host takes ([SignInPlan.methods]); [SignInPlan.acceptHost] is the identity the person confirmed, if any. */
-    private fun chooseSignIn(address: String, plan: SignInPlan) {
-        if (plan.methods.isEmpty()) {
-            status.text = plan.noMethodsLine
-            return
-        }
-        AlertDialog.Builder(this)
-            .setTitle("Sign in")
-            .setItems(plan.methods.map { it.label }.toTypedArray()) { _, which ->
-                when (val method = plan.methods[which]) {
-                    SignInPlan.Method.Password -> askPassword(address, plan.acceptHost)
-                    is SignInPlan.Method.Browser -> browserSignIn(address, method.provider, plan.acceptHost)
-                    is SignInPlan.Method.DeviceCode -> deviceSignIn(address, method.provider, plan.acceptHost)
-                }
-            }
-            .setNegativeButton("Cancel") { _, _ -> status.text = SignInPlan.CANCELLED }
-            .show()
-    }
-
-    private fun askPassword(address: String, accept: String?) {
-        val user = EditText(this).apply { hint = "User name"; inputType = InputType.TYPE_CLASS_TEXT }
-        val password = EditText(this).apply {
-            hint = "Password"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        }
-        val fields = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(48, 16, 48, 0)
-            addView(user, MATCH_PARENT, WRAP_CONTENT)
-            addView(password, MATCH_PARENT, WRAP_CONTENT)
-        }
-        AlertDialog.Builder(this)
-            .setTitle("Sign in with a password")
-            .setView(fields)
-            .setPositiveButton("Sign in") { _, _ ->
-                connectAccount(address, SignIn.Password(user.text.toString().trim(), password.text.toString()), accept)
-            }
-            .setNegativeButton("Cancel") { _, _ -> status.text = SignInPlan.CANCELLED }
-            .show()
-    }
-
-    /**
-     * The provider's page in a Custom Tab. The provider sends the browser back to the library's
-     * loopback port on this device, which hands over the ID token; then this activity comes back
-     * to the front, closing the tab.
-     */
-    private fun browserSignIn(address: String, provider: OidcProvider, accept: String?) {
-        val c = client ?: return
-        val attempt = attempts.begin()
-        cancelBrowserSignIn.visibility = View.VISIBLE
-        status.text = "Opening ${provider.name}…"
-        signInWorker.execute {
-            try {
-                val signIn = c.oidcBrowser(provider)
-                main.post {
-                    try {
-                        CustomTabsIntent.Builder().build().launchUrl(this, Uri.parse(signIn.url))
-                    } catch (e: android.content.ActivityNotFoundException) {
-                        status.text = "No browser to sign in with: ${e.message}"
-                    }
-                }
-                val token = signIn.finish(SIGN_IN_TIMEOUT_MS)
-                main.post {
-                    // Cancelled meanwhile: the token is dropped.
-                    if (!attempts.isCurrent(attempt)) return@post
-                    attempts.finish()
-                    cancelBrowserSignIn.visibility = View.GONE
-                    backToFront()
-                    connectAccount(address, SignIn.Oidc(provider, token), accept)
-                }
-            } catch (e: IOException) {
-                android.util.Log.w(TAG, "browser sign-in failed", e)
-                main.post {
-                    if (!attempts.isCurrent(attempt)) return@post
-                    giveUpBrowserSignIn(SignInPlan.failedWith(provider.name, e.message))
-                }
-            }
-        }
-    }
-
-    /** The provider's code, entered on another device (or opened here); waits until the user is done. */
-    private fun deviceSignIn(address: String, provider: OidcProvider, accept: String?) {
-        val c = client ?: return
-        status.text = "Asking ${provider.name} for a code…"
-        signInWorker.execute {
-            val signIn = try {
-                c.oidcDevice(provider)
-            } catch (e: IOException) {
-                android.util.Log.w(TAG, "device sign-in failed", e)
-                main.post { status.text = SignInPlan.failedWith(provider.name, e.message) }
-                null
-            }
-            if (signIn != null) awaitDeviceSignIn(address, provider, accept, signIn)
-        }
-    }
-
-    /** Shows the code and waits (on the calling thread) until the user is done or cancels. */
-    private fun awaitDeviceSignIn(address: String, provider: OidcProvider, accept: String?, signIn: OidcDeviceSignIn) {
-        val cancelled = AtomicBoolean(false)
-        val dialog = arrayOfNulls<AlertDialog>(1)
-        main.post {
-            dialog[0] = AlertDialog.Builder(this)
-                .setTitle("Sign in with ${provider.name}")
-                .setMessage("On another device, open\n\n${signIn.verificationUri}\n\nand enter the code\n\n${signIn.userCode}")
-                .setNegativeButton("Cancel") { _, _ -> cancelled.set(true) }
-                .setNeutralButton("Open it here") { _, _ ->
-                    // The dialog closes; the wait goes on until the provider says.
-                    val page = signIn.verificationUriComplete ?: signIn.verificationUri
-                    CustomTabsIntent.Builder().build().launchUrl(this, Uri.parse(page))
-                }
-                .setCancelable(false)
-                .show()
-            status.text = "Waiting for the sign-in with ${provider.name}…"
-        }
-        try {
-            var waited: String? = null
-            while (waited == null && !cancelled.get()) waited = signIn.await(1000)
-            val token = waited
-            main.post {
-                dialog[0]?.dismiss()
-                if (token != null) {
-                    backToFront()
-                    connectAccount(address, SignIn.Oidc(provider, token), accept)
-                } else {
-                    status.text = SignInPlan.CANCELLED
-                }
-            }
-        } catch (e: IOException) {
-            android.util.Log.w(TAG, "device sign-in failed", e)
-            main.post {
-                dialog[0]?.dismiss()
-                status.text = SignInPlan.failedWith(provider.name, e.message)
-            }
-        } finally {
-            signIn.close()
-        }
-    }
-
-    /** Brings this activity back over a Custom Tab opened from it, closing the tab. */
-    private fun backToFront() {
-        startActivity(
-            Intent(this, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-        )
     }
 
     private fun connectAccount(address: String, signIn: SignIn, accept: String?) {
@@ -1802,7 +1610,5 @@ class MainActivity : Activity() {
         private const val MENU_ANOTHER = 7
         /** The activity's label in the manifest: the title when no stream is showing. */
         private const val APP_TITLE = "windowcast viewer"
-        /** How long a browser sign-in may take before it is given up. */
-        private const val SIGN_IN_TIMEOUT_MS = 2 * 60 * 1000
     }
 }
