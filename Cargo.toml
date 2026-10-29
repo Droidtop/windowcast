@@ -14,6 +14,7 @@ members = [
     "gamestream",
     "rdp",
     "rendezvous",
+    "discovery",
     "vnc",
     "transport",
     "bud",

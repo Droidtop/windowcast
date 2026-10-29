@@ -15,6 +15,7 @@ crate-type = ["cdylib", "rlib"]
 windowcast-protocol = { path = "../protocol" }
 windowcast-identity = { path = "../identity" }
 windowcast-transport = { path = "../transport" }
+windowcast-discovery = { path = "../discovery" }
 # The RDP backend's client (IronRDP underneath; see NOTICE).
 windowcast-rdp = { path = "../rdp", default-features = false }
 windowcast-accounts = { path = "../accounts" }

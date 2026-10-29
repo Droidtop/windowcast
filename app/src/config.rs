@@ -88,6 +88,10 @@ pub struct HostSettings {
     /// session"): programs keep running out of sight of this computer's
     /// screen. Off unless the owner turns it on.
     pub private_session: bool,
+    /// Announce this host on the local network so clients there can list it
+    /// (windowcast-discovery). Off unless the owner turns it on; the beacon
+    /// carries this computer's name, device id and port, and nothing else.
+    pub announce: bool,
     /// Launches the client's rules give RDP, as RemoteApps of this
     /// computer's Remote Desktop (docs/BACKENDS.md, "RemoteApp"). Saved
     /// under a name of its own since 0.24.1: 0.24.0 wrote its default
@@ -118,6 +122,7 @@ impl Default for HostSettings {
             away_port: windowcast_transport::remote::DEFAULT_PORT,
             rdp: true,
             private_session: false,
+            announce: false,
             remote_apps: RemoteAppSettings::default(),
             accounts: None,
         }

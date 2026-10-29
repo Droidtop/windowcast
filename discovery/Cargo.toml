@@ -1,0 +1,9 @@
+[package]
+name = "windowcast-discovery"
+description = "Finding a host on the local network (a broadcast beacon) and waking a sleeping one (Wake-on-LAN); addresses only, never trust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true

@@ -53,6 +53,49 @@ use windowcast_transport::{
 /// for), so a slow decoder skips ahead instead of falling further behind.
 const FRAME_QUEUE: usize = 8;
 
+/// A host heard on the local network (Droidtop/tracker#113). Only a hint of where to connect: it
+/// is not trusted until the connection proves the identity `device_id` names, and a host is
+/// paired or resumed exactly as if its address had been typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredHost {
+    /// The host's device id (64 hex digits), to expect when connecting.
+    pub device_id: String,
+    /// The name its owner gave it.
+    pub name: String,
+    /// `HOST:PORT` to connect to.
+    pub address: String,
+}
+
+/// Listens on the local network for `window` and lists the hosts that announced themselves
+/// (hosts announce only when their application turns it on). Blocks for the whole window.
+pub fn discover_hosts(window: Duration) -> std::io::Result<Vec<DiscoveredHost>> {
+    let seen = windowcast_discovery::Listener::bind()?.collect(window)?;
+    Ok(seen
+        .into_iter()
+        .map(|host| DiscoveredHost {
+            device_id: PeerId(host.beacon.device_id).to_hex(),
+            name: host.beacon.name,
+            address: host.address.to_string(),
+        })
+        .collect())
+}
+
+/// Wakes a sleeping computer with Wake-on-LAN: the magic packet for `mac` (`aa:bb:cc:dd:ee:ff`)
+/// is broadcast on the local network, and also to `directed` (the subnet's broadcast address,
+/// e.g. `192.168.1.255`) when given. The computer's network card has to be set to wake on it.
+pub fn wake_host(mac: &str, directed: Option<&str>) -> Result<(), String> {
+    let mac = windowcast_discovery::wake::parse_mac(mac).map_err(|e| e.to_string())?;
+    let directed = match directed {
+        Some(text) => Some(
+            text.trim()
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|_| format!("{text:?} is not an IPv4 address"))?,
+        ),
+        None => None,
+    };
+    windowcast_discovery::wake::send(mac, directed).map_err(|e| e.to_string())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("{0}")]

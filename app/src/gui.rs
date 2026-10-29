@@ -496,6 +496,10 @@ impl App {
                 );
                 ui.checkbox(&mut settings.rdp, "Offer windows over RDP");
             });
+            ui.checkbox(
+                &mut settings.announce,
+                "Announce this computer on the local network",
+            );
             remote_apps_ui(ui, &snapshot, &mut settings.remote_apps);
             private_session_ui(ui, &snapshot, &mut settings.private_session);
             ui.horizontal(|ui| {

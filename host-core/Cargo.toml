@@ -10,6 +10,7 @@ windowcast-identity = { path = "../identity" }
 windowcast-pairing = { path = "../pairing" }
 windowcast-transport = { path = "../transport" }
 windowcast-rendezvous = { path = "../rendezvous" }
+windowcast-discovery = { path = "../discovery" }
 windowcast-accounts = { path = "../accounts" }
 async-trait = "0.1"
 windowcast-pty = { path = "../pty" }

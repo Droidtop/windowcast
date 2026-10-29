@@ -424,6 +424,9 @@ pub struct HostControl {
     file_shares: std::sync::RwLock<Arc<files::Shares>>,
     /// Chat and notices; none until the application sets a hub.
     chat: std::sync::RwLock<Option<Arc<chat::ChatHub>>>,
+    /// The name this host announces itself with on the local network; `None` (the
+    /// default) announces nothing.
+    announce: std::sync::RwLock<Option<String>>,
     /// Windows in compatibility mode and the endpoints the host has.
     compat: Arc<compat::Compatibility>,
     serial: AtomicU64,
@@ -542,6 +545,7 @@ impl HostControl {
             remote_apps: std::sync::RwLock::new(None),
             file_shares: std::sync::RwLock::new(Arc::new(files::Shares::default())),
             chat: std::sync::RwLock::new(None),
+            announce: std::sync::RwLock::new(None),
             compat: Arc::default(),
             serial: AtomicU64::new(1),
             command_serial: Arc::new(AtomicU64::new(1)),
@@ -795,6 +799,25 @@ impl HostControl {
         *self.chat.write().expect("chat") = hub;
     }
 
+    /// Starts (`Some(name)`) or stops (`None`) announcing this host on the local network, so a
+    /// client on the same network can list it (windowcast-discovery, Droidtop/tracker#113). Off
+    /// until the application turns it on: a host that is not asked says nothing. The beacon
+    /// carries the name, the device id and the port, and is only a hint; clients still pair and
+    /// resume by identity.
+    pub fn set_announce(&self, name: Option<String>) {
+        *self.announce.write().expect("announce") = name;
+    }
+
+    /// The beacon to send now for a host listening on `port`, or `None` while announcing is off.
+    fn beacon(&self, port: u16) -> Option<windowcast_discovery::Beacon> {
+        let name = self.announce.read().expect("announce").clone()?;
+        Some(windowcast_discovery::Beacon::new(
+            self.identity.peer_id().0,
+            port,
+            &name,
+        ))
+    }
+
     pub fn set_remote_apps(&self, remote_apps: Option<Arc<dyn command::RemoteApps>>) {
         *self.remote_apps.write().expect("remote apps") = remote_apps;
     }
@@ -861,7 +884,14 @@ pub async fn serve_with(
     control: Arc<HostControl>,
     source: Arc<dyn WindowSource>,
 ) -> std::io::Result<()> {
+    let announcer = listener.local_addr().ok().map(|local| {
+        AbortOnDrop(tokio::spawn(announce_loop(
+            Arc::clone(&control),
+            local.port(),
+        )))
+    });
     let host = Arc::new(Host { control, source });
+    let _announcer = announcer;
     loop {
         let (stream, address) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -881,6 +911,23 @@ pub async fn serve_with(
                 Err(e) => eprintln!("{address}: {e}"),
             }
         });
+    }
+}
+
+/// How often a host that announces itself broadcasts its beacon.
+const ANNOUNCE_EVERY: Duration = Duration::from_secs(3);
+
+/// Broadcasts the host's beacon every [`ANNOUNCE_EVERY`] while the application has announcing on
+/// ([`HostControl::set_announce`]); reads the setting each time, so it can be turned on and off
+/// while the host runs. A network that will not take a broadcast is not an error worth more than
+/// a skipped beat.
+async fn announce_loop(control: Arc<HostControl>, port: u16) {
+    loop {
+        if let Some(beacon) = control.beacon(port) {
+            let _ =
+                tokio::task::spawn_blocking(move || windowcast_discovery::announce(&beacon)).await;
+        }
+        tokio::time::sleep(ANNOUNCE_EVERY).await;
     }
 }
 
@@ -2447,5 +2494,37 @@ mod deliver_input_tests {
             re_released_other_key, 1,
             "a key already released before the drop must not be released again: {events:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod announce_tests {
+    use super::*;
+
+    fn control(name: &str) -> (Arc<HostControl>, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("windowcast-announce-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let control = HostControl::open(&HostConfig {
+            listen: "127.0.0.1:0".into(),
+            pairing: false,
+            data_dir: dir.clone(),
+        })
+        .unwrap();
+        (control, dir)
+    }
+
+    #[test]
+    fn a_host_says_nothing_until_the_application_turns_announcing_on() {
+        let (control, dir) = control("off");
+        assert!(control.beacon(47100).is_none());
+        control.set_announce(Some("Living room PC".into()));
+        let beacon = control.beacon(47100).expect("announcing is on");
+        assert_eq!(beacon.name, "Living room PC");
+        assert_eq!(beacon.port, 47100);
+        assert_eq!(beacon.device_id, control.identity.peer_id().0);
+        control.set_announce(None);
+        assert!(control.beacon(47100).is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

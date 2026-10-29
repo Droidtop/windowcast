@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Local discovery and Wake-on-LAN (Droidtop/tracker#113, docs/DISCOVERY.md): the `windowcast-discovery`
+  crate; a host broadcasts a small beacon (name, device id, port) every 3 s when its application
+  turns it on (`HostControl::set_announce`; setting "Announce this computer on the local network" in
+  the reference app, off by default); `discover_hosts` lists the hosts heard and `wake_host` sends the
+  magic packet. A beacon is a hint, never trust.
 - Android library: `EventPump` and `SessionListener` (one way to follow a session's events),
   `WantedWindow` (waiting for a window asked for by title), and `ConnectRequest` and `WatchSet`,
   moved out of the viewer, so the viewer and droidtop make the same calls (Droidtop/tracker#428,

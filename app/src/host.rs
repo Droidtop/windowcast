@@ -340,6 +340,7 @@ impl HostRole {
                 .map_err(|e| e.to_string())?,
         );
         served.set_enabled(settings.rdp);
+        control.set_announce(settings.announce.then(computer_name));
         let remote_apps = Arc::new(windowcast_rdp::remoteapp_host::WindowsRemoteApps::new(
             config.data_dir.clone(),
             settings.remote_apps.setting(),
@@ -626,6 +627,8 @@ impl HostRole {
             .microphone
             .store(settings.microphone, Ordering::SeqCst);
         self.served.set_enabled(settings.rdp);
+        self.control
+            .set_announce(settings.announce.then(computer_name));
         self.remote_apps.set(settings.remote_apps.setting());
         self.set_away(settings.away, settings.away_port);
         self.store.update(|config| config.host = settings);
@@ -708,4 +711,17 @@ fn describe(account: &windowcast_accounts::Account) -> String {
         account.method.name(),
         account.provider
     )
+}
+
+/// The name this computer announces itself by on the local network: its own name for itself, or
+/// a plain one when the system will not say.
+fn computer_name() -> String {
+    ["COMPUTERNAME", "HOSTNAME"]
+        .iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .filter(|name| !name.trim().is_empty())
+        })
+        .unwrap_or_else(|| "windowcast host".to_string())
 }
