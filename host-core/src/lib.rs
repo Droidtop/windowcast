@@ -1611,8 +1611,19 @@ impl Host {
 pub fn deliver_input(
     source: Arc<dyn WindowSource>,
 ) -> std::sync::mpsc::Sender<(InputEvent, Option<WindowId>)> {
+    deliver_input_joinable(source).0
+}
+
+/// [`deliver_input`] with the delivering thread, which ends once the sender
+/// is dropped and everything still held has been released.
+fn deliver_input_joinable(
+    source: Arc<dyn WindowSource>,
+) -> (
+    std::sync::mpsc::Sender<(InputEvent, Option<WindowId>)>,
+    std::thread::JoinHandle<()>,
+) {
     let (tx, rx) = std::sync::mpsc::channel::<(InputEvent, Option<WindowId>)>();
-    std::thread::spawn(move || {
+    let thread = std::thread::spawn(move || {
         // The session's pads; dropped, and so unplugged, when the
         // session ends and its sender goes.
         let mut pads: Option<Box<dyn gamepad::GamepadSink>> = None;
@@ -1651,7 +1662,7 @@ pub fn deliver_input(
             source.input(&event, focus);
         }
     });
-    tx
+    (tx, thread)
 }
 
 /// What the session's client currently has pressed: tracked so that if it disconnects
@@ -2381,7 +2392,7 @@ mod deliver_input_tests {
         let recorded = Arc::new(StdMutex::new(Vec::new()));
         let source: Arc<dyn WindowSource> = Arc::new(Recording(Arc::clone(&recorded)));
         let window = WindowId(1);
-        let tx = deliver_input(source);
+        let (tx, thread) = deliver_input_joinable(source);
 
         tx.send((
             InputEvent::Key {
@@ -2431,9 +2442,8 @@ mod deliver_input_tests {
         .unwrap();
 
         drop(tx);
-        // The input thread processes the channel and releases held state after it
-        // closes; give it a moment rather than racing it.
-        std::thread::sleep(Duration::from_millis(100));
+        // The input thread releases held state once the channel closes.
+        thread.join().expect("input thread");
 
         let events = recorded.lock().expect("recorded events");
         let released_key = events.iter().any(|(e, focus)| {

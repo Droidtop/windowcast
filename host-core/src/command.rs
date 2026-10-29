@@ -6,12 +6,13 @@
 //! decides alone while account sign-in is off; while it is on, the
 //! account policy ([`AccountPolicy`]) is asked first.
 
+use shared_child::SharedChild;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub use windowcast_accounts::Account;
 use windowcast_accounts::Accounts;
@@ -166,7 +167,7 @@ fn pty_size(size: TerminalSize) -> windowcast_pty::Size {
 }
 
 struct PipedProcess {
-    child: Mutex<Child>,
+    child: SharedChild,
     stdin: Mutex<Option<std::process::ChildStdin>>,
 }
 
@@ -181,15 +182,10 @@ impl RunningProcess for PipedProcess {
         self.stdin.lock().expect("stdin").take();
     }
     fn kill(&self) {
-        let _ = self.child.lock().expect("child").kill();
+        let _ = self.child.kill();
     }
     fn wait(&self) -> Option<i32> {
-        loop {
-            if let Ok(Some(status)) = self.child.lock().expect("child").try_wait() {
-                return status.code();
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        self.child.wait().ok().and_then(|status| status.code())
     }
 }
 
@@ -628,7 +624,8 @@ impl ProcessStarter for HostProcesses {
             Box::new(child.stderr.take().ok_or("no stderr")?),
         ];
         let process = PipedProcess {
-            child: Mutex::new(child),
+            child: SharedChild::new(child)
+                .map_err(|e| format!("could not watch {program}: {e}"))?,
             stdin: Mutex::new(stdin),
         };
         Ok(Started {

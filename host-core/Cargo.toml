@@ -25,6 +25,7 @@ openh264-sys2 = { version = "0.9", default-features = false }
 # Opus for window audio (BSD-3-Clause), libopus built from source.
 opus = "0.3"
 audiopus_sys = { version = "0.2", features = ["static"] }
+shared_child = "1.1.2"
 
 [features]
 default = ["ldap", "pam"]
