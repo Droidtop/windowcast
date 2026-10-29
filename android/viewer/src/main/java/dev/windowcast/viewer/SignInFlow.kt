@@ -225,9 +225,16 @@ class SignInFlow(
         }
     }
 
+    /** Back from the browser: if the sign-in there did not finish, say what is happening and how to stop it. */
+    fun resumed() {
+        if (attempts.waiting) {
+            status.text = "Still waiting for the sign-in in the browser. Finish it there, or press Cancel sign-in."
+        }
+    }
+
     /** Brings this activity back over a Custom Tab opened from it, closing the tab. */
     private fun backToFront() {
-        startActivity(
+        activity.startActivity(
             Intent(activity, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
         )

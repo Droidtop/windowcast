@@ -445,9 +445,7 @@ class MainActivity : Activity() {
     /** Back from the browser: if the sign-in there did not finish, say what is happening and how to stop it. */
     override fun onResume() {
         super.onResume()
-        if (attempts.waiting) {
-            status.text = "Still waiting for the sign-in in the browser. Finish it there, or press Cancel sign-in."
-        }
+        signIns.resumed()
     }
 
     private fun connect(address: String, pin: String?) {
