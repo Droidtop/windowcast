@@ -179,7 +179,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so two programs sharing one list keep each other's changes. `save` now
   writes beside the file and renames it over.
 - `windowcast-app --open-pairing [--data-dir DIR]` asks the host running on that data
-  folder for a new PIN, window or not (pairing closes once a client pairs); the host
+  folder (over a loopback port and token it keeps in `host-ipc`, answered at once, no
+  file polled) for a new PIN, window or not (pairing closes once a client pairs); the host
   window's button reads "Open pairing" while pairing is closed.
 - `windowcast-testhost --pattern still`: the window stands still (lines of "text" sent
   once a second), for trying a client's selector moving still content to RDP pictures

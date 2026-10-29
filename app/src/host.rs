@@ -282,13 +282,82 @@ pub struct HostRole {
     away_status: Arc<Mutex<windowcast_host::remote::RemoteStatus>>,
 }
 
-/// The file in a host's data directory that asks it to open pairing
-/// ([`request_open_pairing`]); the host takes it within a second.
-pub const OPEN_PAIRING_REQUEST: &str = "open-pairing";
+/// The file in a host's data directory that says where it takes requests
+/// from `windowcast-app --open-pairing`: its loopback port and a random
+/// token, so only a process that can read the data directory can ask.
+const IPC_FILE: &str = "host-ipc";
 
-/// Asks the host running on `data_dir` to open pairing with a new PIN.
+/// Asks the host running on `data_dir` to open pairing with a new PIN; the
+/// host answers once it has.
 pub fn request_open_pairing(data_dir: &std::path::Path) -> std::io::Result<()> {
-    std::fs::write(data_dir.join(OPEN_PAIRING_REQUEST), b"")
+    use std::io::{BufRead, Write};
+    let invalid =
+        |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, what.to_owned());
+    let file = std::fs::read_to_string(data_dir.join(IPC_FILE)).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("no host is running on this data directory ({e})"),
+        )
+    })?;
+    let (port, token) = file
+        .trim()
+        .split_once(' ')
+        .ok_or_else(|| invalid("host-ipc is damaged"))?;
+    let port: u16 = port.parse().map_err(|_| invalid("host-ipc is damaged"))?;
+    let mut stream = std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_secs(3),
+    )
+    .map_err(|e| std::io::Error::new(e.kind(), format!("the host does not answer ({e})")))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    writeln!(stream, "open-pairing {token}")?;
+    let mut answer = String::new();
+    std::io::BufReader::new(stream).read_line(&mut answer)?;
+    if answer.trim() == "ok" {
+        Ok(())
+    } else {
+        Err(invalid("the host refused the request"))
+    }
+}
+
+/// Takes `--open-pairing` requests for as long as the host runs. Blocks in
+/// `accept`, so a request is served the moment it arrives.
+fn serve_requests(role: Arc<HostRole>, data_dir: &std::path::Path) -> std::io::Result<()> {
+    use rand_core::{OsRng, RngCore};
+    use std::io::{BufRead, Write};
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    let mut raw = [0u8; 16];
+    OsRng.fill_bytes(&mut raw);
+    let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    let path = data_dir.join(IPC_FILE);
+    std::fs::write(&path, format!("{} {token}", listener.local_addr()?.port()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut line = String::new();
+            let Ok(reader) = stream.try_clone() else {
+                continue;
+            };
+            // A request longer than a token and a verb is not ours.
+            if std::io::BufReader::new(std::io::Read::take(reader, 128))
+                .read_line(&mut line)
+                .is_err()
+            {
+                continue;
+            }
+            let mut stream = stream;
+            if line.trim() == format!("open-pairing {token}") {
+                role.pairing(true);
+                let _ = writeln!(stream, "ok");
+            }
+        }
+    });
+    Ok(())
 }
 
 impl HostRole {
@@ -385,13 +454,9 @@ impl HostRole {
         });
         role.set_away(settings.away, settings.away_port);
         let refresher = Arc::clone(&role);
-        let request = data_dir.join(OPEN_PAIRING_REQUEST);
+        serve_requests(Arc::clone(&role), data_dir)
+            .map_err(|e| format!("cannot take --open-pairing requests: {e}"))?;
         std::thread::spawn(move || loop {
-            // `windowcast-app --open-pairing` asks a running host for a
-            // new PIN, with or without its window.
-            if std::fs::remove_file(&request).is_ok() {
-                refresher.pairing(true);
-            }
             let snapshot = refresher.take_snapshot();
             *refresher.snapshot.lock().expect("snapshot") = snapshot;
             std::thread::sleep(Duration::from_secs(1));
@@ -724,4 +789,50 @@ fn computer_name() -> String {
                 .filter(|name| !name.trim().is_empty())
         })
         .unwrap_or_else(|| "windowcast host".to_string())
+}
+
+#[cfg(test)]
+mod ipc_tests {
+    use super::*;
+    use std::io::{BufRead, Write};
+
+    /// A stand-in host: answers `ok` to the right token and nothing otherwise.
+    fn fake_host(dir: &std::path::Path, token: &'static str) -> std::thread::JoinHandle<String> {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        std::fs::write(
+            dir.join(IPC_FILE),
+            format!("{} {token}", listener.local_addr().unwrap().port()),
+        )
+        .unwrap();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            if line.trim() == format!("open-pairing {token}") {
+                writeln!(&stream, "ok").unwrap();
+            }
+            line
+        })
+    }
+
+    #[test]
+    fn the_request_carries_the_token_and_waits_for_the_answer() {
+        let dir = std::env::temp_dir().join(format!("wc-ipc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = fake_host(&dir, "abc123");
+        request_open_pairing(&dir).unwrap();
+        assert_eq!(host.join().unwrap().trim(), "open-pairing abc123");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn no_host_is_said_plainly() {
+        let dir = std::env::temp_dir().join(format!("wc-ipc-none-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = request_open_pairing(&dir).unwrap_err();
+        assert!(e.to_string().contains("no host is running"), "{e}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

@@ -7442,6 +7442,7 @@ name = "windowcast-app"
 version = "0.35.0"
 dependencies = [
  "eframe",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "tokio",
