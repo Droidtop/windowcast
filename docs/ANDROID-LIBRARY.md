@@ -13,7 +13,8 @@ belongs in the library, not in `MainActivity`.
 |---|---|
 | Identity and trust store | `WindowcastClient(dataDir)` |
 | Pair / reconnect | `connect(address, pin)` (no PIN resumes only a host already paired), `signInOptions` + `connectAccount` for account hosts |
-| Follow a session | `EventPump(session, SessionListener)`: one thread, every `Event` delivered to the matching method, in order |
+| Start, replace and end the one current session | `SessionHolder.start`: stops and joins the old reader, closes the old session, opens the new one, follows it, asks for its windows; `adopt` and `release` hand a live session across an activity's recreation; `end` closes it |
+| Follow a session | `EventPump(session, SessionListener)`: one thread, every `Event` delivered to the matching method, in order (`SessionHolder` runs one) |
 | List windows | `session.requestWindows()` → `onWindows` |
 | Decide primary / extra / already showing | `WatchSet` |
 | Switch a window's carrier (video / RDP pictures) | `CarrierSwitcher`: the switch under way, the first-picture handover, the host's refusals so a refused switch is not offered again |
@@ -31,7 +32,6 @@ already know their addresses, and the directory and LAN discovery are Droidtop/t
 `MainActivity` (about 1,700 lines) still decides, with no library call to share:
 - popups and extra windows: which events open which floating window, placement against the owner;
 - the pointer overlay and its shape cache; letterboxing (`Letterbox.kt`);
-- starting a session (stop the reader, close the old session, connect, ask for windows);
 - the host-state messages (locked, private session) as text.
 
 Each moves behind a library type with the same shape as `WatchSet` and `WantedWindow`: plain Kotlin
@@ -42,7 +42,7 @@ where it can be, the Android pieces (surfaces, decoders) behind interfaces the c
 3. (done, as a plan rather than a threaded flow) The account sign-in rules as `SignInPlan` (confirm an
    untrusted host by fingerprint, then the methods offered, in order, and the words) and
    `SignInAttempts` (a cancelled or replaced browser/device sign-in is ignored when it answers). The
-   dialogs stay the client's. The PIN connect and the starting of a session (stop the reader, close
-   the old session, open, ask for windows) are still in the viewer's `startSession`.
+   dialogs stay the client's. The PIN connect is one call, `connect(address, pin)`.
+3b. (done) Starting a session as `SessionHolder` (plain Kotlin over `HostedSession`, tested with a fake).
 4. Popups and extras as a `WindowLayout` the client draws.
 Then droidtop's `ComputerLaunch` calls the same types instead of opening the viewer.

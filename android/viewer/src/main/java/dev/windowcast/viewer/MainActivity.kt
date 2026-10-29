@@ -32,6 +32,7 @@ import dev.windowcast.Codec
 import dev.windowcast.ConnectRequest
 import dev.windowcast.Event
 import dev.windowcast.EventPump
+import dev.windowcast.SessionHolder
 import dev.windowcast.SessionListener
 import dev.windowcast.SignInPlan
 import dev.windowcast.WantedWindow
@@ -153,7 +154,9 @@ class MainActivity : Activity() {
     @Volatile private var microphone: Microphone? = null
 
     private var client: WindowcastClient? = null
-    @Volatile private var session: WindowcastSession? = null
+    /** The one current session and the reader following it (the library's, shared with droidtop). */
+    private val sessions = SessionHolder<WindowcastSession>()
+    private val session: WindowcastSession? get() = sessions.session
     private var decoder: WindowRenderer? = null
 
     /** A shown window's dialog, popup or menu, in a floating window of its own. */
@@ -195,7 +198,6 @@ class MainActivity : Activity() {
      */
     private var wanted: WantedWindow? = null
     /** Reads the current session's events; replacing or clearing it stops the old one. */
-    @Volatile private var listener: EventPump? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -346,11 +348,10 @@ class MainActivity : Activity() {
             // A recreation (a configuration change the manifest does not absorb): the
             // connection and the shell carry on, only the screens are rebuilt.
             client = kept.client
-            session = kept.session
             val s = kept.session
             if (s != null && s.isOpen) {
                 status.text = "Reconnected to the open session."
-                listen(s)
+                sessions.adopt(s, sessionListener())
                 worker.execute { s.requestWindows() }
                 kept.terminal?.let { showTerminal(it) }
             } else {
@@ -472,20 +473,21 @@ class MainActivity : Activity() {
         closeStreamWindows(notifyHost = false)
         worker.execute {
             try {
-                stopMicrophone()
-                stopListening()
-                session?.close()
-                session = null
-                val (s, done) = open(c)
-                // Windows the rules send to RDP (text) come as pictures.
-                s.acceptPictures(true)
-                session = s
-                main.post {
-                    status.text = done(s)
-                    if (sendMicrophone.isChecked) startMicrophone()
+                lateinit var done: (WindowcastSession) -> String
+                sessions.start(
+                    sessionListener(),
+                    beforeClose = { stopMicrophone() },
+                    opened = { s ->
+                        main.post {
+                            status.text = done(s)
+                            if (sendMicrophone.isChecked) startMicrophone()
+                        }
+                    },
+                ) {
+                    val (opened, said) = open(c)
+                    done = said
+                    opened
                 }
-                listen(s)
-                s.requestWindows()
             } catch (e: IOException) {
                 android.util.Log.w(TAG, "connect failed", e)
                 main.post { status.text = describe?.invoke(e) ?: "$failure: ${e.message}" }
@@ -522,17 +524,9 @@ class MainActivity : Activity() {
         m.stop()
     }
 
-    /** Tells the reader to stop and, off the main thread, waits for it (it polls every 500 ms). */
-    private fun stopListening(wait: Boolean = true) {
-        val pump = listener ?: return
-        listener = null
-        pump.stop()
-        if (wait && Looper.myLooper() != Looper.getMainLooper()) pump.join(2000)
-    }
-
-    /** Follows [s]'s events through the library's [EventPump], the way every client of the library does; each is handled on the main thread. */
-    private fun listen(s: WindowcastSession) {
-        val pump = EventPump(s, object : SessionListener {
+    /** What this client does with each event, on the main thread; the library's [SessionHolder] delivers them through its [EventPump]. */
+    private fun sessionListener(): SessionListener {
+        return object : SessionListener {
             override fun onWindows(windows: List<WindowInfo>) {
                 main.post { showWindows(windows) }
             }
@@ -663,9 +657,7 @@ class MainActivity : Activity() {
                     stopDecoding()
                 }
             }
-        })
-        listener = pump
-        pump.start()
+        }
     }
 
     /**
@@ -1568,12 +1560,9 @@ class MainActivity : Activity() {
         closeStreamWindows(notifyHost = false)
         clipboardListener?.let { clipboard.removePrimaryClipChangedListener(it) }
         inputWorker.shutdown()
-        // Work still queued or waiting on the network ends with the activity, and nothing it posted runs after.
-        worker.shutdownNow()
+        // Sign-in waits end with the activity, and nothing it posted runs after.
         signInWorker.shutdownNow()
         main.removeCallbacksAndMessages(null)
-        val reader = listener
-        stopListening(wait = false)
         terminalView.detach()
         decoder?.stop()
         audio?.stop()
@@ -1581,18 +1570,20 @@ class MainActivity : Activity() {
         if (keepSession && isChangingConfigurations) {
             // Recreated, not finished: the next instance takes the session and the shell over.
             // The stream does not survive its surface, so the host is told to stop it.
-            val s = session
+            val s = sessions.release(wait = false)
             val w = watching
             if (decoder != null && s != null && w != null) worker.execute { s.stopWindow(w.id) }
             // Nor do the windows watched beside it.
             if (s != null) for (id in extraIds) worker.execute { s.stopWindow(id) }
-            reader?.join(1000)
+            // What is queued still runs, then the worker ends.
+            worker.shutdown()
         } else {
+            // Work still queued or waiting on the network ends with the activity.
+            worker.shutdownNow()
             terminalSession?.close()
-            session?.close()
+            sessions.end()
             client?.close()
         }
-        worker.shutdown()
         super.onDestroy()
     }
 

@@ -295,7 +295,7 @@ interface WindowRenderer {
 }
 
 /** A connected session. Every call blocks; none may run on the main thread. */
-class WindowcastSession internal constructor(handle: Long) : Closeable, EventSource {
+class WindowcastSession internal constructor(handle: Long) : Closeable, HostedSession {
     // Calls run outside any lock and [close] frees the session when the last one has left, so a
     // reader inside [nextEvent] never meets a freed session (it returns null from then on).
     private val native = NativeHandle(handle, Native::sessionFree)
@@ -309,7 +309,7 @@ class WindowcastSession internal constructor(handle: Long) : Closeable, EventSou
     /** Runs [block] with the session's native handle, or returns [default] once closed. */
     internal fun <T> withHandle(default: T, block: (Long) -> T): T = native.use(default, block)
 
-    fun requestWindows() {
+    override fun requestWindows() {
         withHandle(Unit) { Native.requestWindows(it) }
     }
 
@@ -318,7 +318,7 @@ class WindowcastSession internal constructor(handle: Long) : Closeable, EventSou
      * windows the rules send to RDP come over RDP (a stream_started with
      * backend "Rdp").
      */
-    fun acceptPictures(on: Boolean) {
+    override fun acceptPictures(on: Boolean) {
         withHandle(Unit) { Native.acceptPictures(it, on) }
     }
 

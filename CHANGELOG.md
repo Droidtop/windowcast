@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Android library: `SessionHolder` is the one way a client starts, replaces and ends its session
+  (stop and join the old reader, close the old session, open the new one, follow it, ask for its
+  windows), with `adopt`/`release` for an activity's recreation. The viewer uses it, so droidtop can make
+  the same calls (Droidtop/tracker#428).
 - Local discovery and Wake-on-LAN (Droidtop/tracker#113, docs/DISCOVERY.md): the `windowcast-discovery`
   crate; a host broadcasts a small beacon (name, device id, port) every 3 s when its application
   turns it on (`HostControl::set_announce`; setting "Announce this computer on the local network" in
