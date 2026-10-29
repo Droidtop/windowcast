@@ -34,6 +34,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import dev.windowcast.AudioPlayer
+import dev.windowcast.CarrierSwitcher
 import dev.windowcast.Codec
 import dev.windowcast.ConnectRequest
 import dev.windowcast.Event
@@ -95,20 +96,10 @@ class MainActivity : Activity() {
      */
     private lateinit var spare: SurfaceView
 
-    /** A switch under way: the new carrier's generation and renderer. */
-    private class Switch(val generation: Int, val backend: String, var renderer: WindowRenderer? = null)
+    /** The state of a carrier switch and the switches this host refused (Droidtop/tracker#471), kept by the library. */
+    private val switcher = CarrierSwitcher<WindowRenderer> { session?.hostId }
 
-    private var switching: Switch? = null
-
-    /**
-     * Switches a host has refused, as host:window:backend, so the menu stops offering one it
-     * has already said it cannot serve (Droidtop/tracker#471). Per window, since a host can
-     * refuse one window's switch and serve another's.
-     */
-    private val refusedSwitches = mutableSetOf<String>()
-
-    private fun refusedKey(window: Long, backend: String): String =
-        "${session?.hostId}:$window:$backend"
+    private val switching get() = switcher.pending
 
     /**
      * The host's pointer, drawn over the watched window where the host says it is (the host
@@ -751,8 +742,8 @@ class MainActivity : Activity() {
 
             override fun onCarrierRefused(event: Event.CarrierRefused) {
                 main.post {
-                    if (event.window == watching?.id && switching?.generation == event.generation) {
-                        switching?.let { refusedSwitches += refusedKey(event.window, it.backend) }
+                    if (event.window == watching?.id && switcher.isPending(event.generation)) {
+                        switching?.let { switcher.refuse(event.window, it.backend) }
                         cancelSwitch()
                         tell("No switch: ${event.reason}")
                     }
@@ -937,8 +928,7 @@ class MainActivity : Activity() {
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
         val on = streaming() && switching == null
         val window = watching?.id
-        fun offered(backend: String) =
-            window == null || refusedKey(window, backend) !in refusedSwitches
+        fun offered(backend: String) = switcher.offered(window, backend)
         menu.findItem(MENU_VIDEO)?.isVisible = on && carrier != "Native" && offered("Native")
         menu.findItem(MENU_PICTURES)?.isVisible = on && carrier != "Rdp" && offered("Rdp")
         menu.findItem(MENU_COMPATIBILITY)?.let {
@@ -1526,8 +1516,7 @@ class MainActivity : Activity() {
         val s = session ?: return
         val window = watching ?: return
         cancelSwitch()
-        val pending = Switch(event.generation, event.backend)
-        switching = pending
+        val pending = switcher.begin(event.generation, event.backend)
         invalidateOptionsMenu()
         val view = spare
         view.visibility = View.VISIBLE
@@ -1581,11 +1570,10 @@ class MainActivity : Activity() {
     }
 
     /** The new carrier showed its first picture: it takes the screen, the old one stops. */
-    private fun finishSwitch(pending: Switch, view: SurfaceView) {
-        if (switching !== pending) return
+    private fun finishSwitch(pending: CarrierSwitcher.Pending<WindowRenderer>, view: SurfaceView) {
         val s = session ?: return
         val window = watching ?: return
-        switching = null
+        if (!switcher.finish(pending)) return
         carrier = pending.backend
         invalidateOptionsMenu()
         decoder = pending.renderer
@@ -1599,8 +1587,7 @@ class MainActivity : Activity() {
 
     /** A switch that will not happen: its renderer stops and its surface goes. */
     private fun cancelSwitch() {
-        val pending = switching ?: return
-        switching = null
+        val pending = switcher.cancel() ?: return
         spare.visibility = View.GONE
         // A renderer that never got its surface on screen stops here.
         pending.renderer?.let { r ->
