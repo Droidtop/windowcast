@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use windowcast_client::{Client, ClientError, ClientSession, Event, SignIn, SignInOptions};
@@ -552,84 +552,18 @@ impl ClientRole {
                     window,
                     backend,
                     codec,
-                } => {
-                    let title = state
-                        .windows
-                        .iter()
-                        .find(|info| info.id.0 == window)
-                        .map_or_else(|| format!("window {window}"), |info| info.title.clone());
-                    let against = against_owner(&state, window);
-                    let stream = state
-                        .streams
-                        .entry(window)
-                        .or_insert_with(|| Stream::new(None));
-                    stream.backend = Some(backend);
-                    stream.codec = codec;
-                    stream.refused = None;
-                    let line = format!(
-                        "{title}: streaming over {backend:?}{}",
-                        codec.map(|c| format!(" in {c:?}")).unwrap_or_default()
-                    );
-                    if backend == BackendKind::Rdp {
-                        self.open_window(
-                            &session,
-                            stream,
-                            window,
-                            StreamSource::Pictures,
-                            (title, against),
-                        );
-                    } else if let Some(codec) = codec {
-                        self.open_window(
-                            &session,
-                            stream,
-                            window,
-                            StreamSource::Video(codec),
-                            (title, against),
-                        );
-                    }
-                    drop(state);
-                    self.log(line);
-                }
+                } => self.on_stream_started(state, &session, window, backend, codec),
                 Event::CarrierStarted {
                     window,
                     generation,
                     backend,
                     codec,
-                } => {
-                    // The stream window shows it beside the current carrier
-                    // and swaps on its first picture.
-                    let source = match (backend, codec) {
-                        (BackendKind::Rdp, _) => Some(StreamSource::Pictures),
-                        (_, Some(codec)) => Some(StreamSource::Video(codec)),
-                        _ => None,
-                    };
-                    if let (Some(stream), Some(source)) = (state.streams.get_mut(&window), source) {
-                        #[cfg(windows)]
-                        if let Some(view) = &stream.window {
-                            view.switch_to(source, generation);
-                        }
-                        #[cfg(not(windows))]
-                        let _ = (source, generation);
-                        stream.backend = Some(backend);
-                        stream.codec = codec;
-                    }
-                    drop(state);
-                    self.log(format!("window {window}: switching to {backend:?}"));
-                }
+                } => self.on_carrier_started(state, window, generation, backend, codec),
                 Event::CarrierRefused {
                     window,
                     generation,
                     reason,
-                } => {
-                    #[cfg(windows)]
-                    if let Some(view) = state.streams.get(&window).and_then(|s| s.window.as_ref()) {
-                        view.cancel_switch(generation);
-                    }
-                    #[cfg(not(windows))]
-                    let _ = generation;
-                    drop(state);
-                    self.log(format!("window {window}: no switch: {reason}"));
-                }
+                } => self.on_carrier_refused(state, window, generation, &reason),
                 Event::StreamRefused { window, reason } => {
                     if let Some(stream) = state.streams.get_mut(&window) {
                         stream.refused = Some(reason.clone());
@@ -654,29 +588,7 @@ impl ClientRole {
                     locked,
                     private_session,
                     private_session_reason,
-                } => {
-                    let lock_changed = state.host_locked != locked;
-                    state.host_locked = locked;
-                    if private_session == "active" {
-                        state.private_refused = None;
-                    }
-                    let private_changed = state.private_session.0 != private_session;
-                    state.private_session = (private_session.clone(), private_session_reason);
-                    drop(state);
-                    if lock_changed {
-                        self.log(
-                            if locked {
-                                "the host is locked; its windows keep streaming"
-                            } else {
-                                "the host is unlocked"
-                            }
-                            .into(),
-                        );
-                    }
-                    if private_changed {
-                        self.log(format!("the host's private session: {private_session}"));
-                    }
-                }
+                } => self.on_host_state(state, locked, private_session, private_session_reason),
                 Event::PrivateSessionRefused {
                     reason,
                     password_needed,
@@ -691,23 +603,7 @@ impl ClientRole {
                     described,
                     refused,
                     ..
-                } => {
-                    let on = !described.is_empty() || refused.is_some();
-                    if let Some(stream) = state.streams.get_mut(&window) {
-                        stream.compatibility = on.then(|| (described.clone(), refused.clone()));
-                    }
-                    drop(state);
-                    self.log(match (&refused, described.is_empty()) {
-                        (Some(reason), _) => {
-                            format!("window {window}: no compatibility mode: {reason}")
-                        }
-                        (None, true) => format!("window {window}: compatibility mode off"),
-                        (None, false) => format!(
-                            "window {window}: compatibility mode on: {}",
-                            described.join("; ")
-                        ),
-                    });
-                }
+                } => self.on_compatibility(state, window, described, refused),
                 // This app asks for no SSH certificates.
                 Event::SshCertificate { .. } => {}
                 Event::StreamQuality { window, quality } => {
@@ -729,6 +625,152 @@ impl ClientRole {
                 }
             }
         }
+    }
+
+    fn on_stream_started(
+        &self,
+        mut state: MutexGuard<'_, State>,
+        session: &Arc<ClientSession>,
+        window: u64,
+        backend: BackendKind,
+        codec: Option<VideoCodec>,
+    ) {
+        let title = state
+            .windows
+            .iter()
+            .find(|info| info.id.0 == window)
+            .map_or_else(|| format!("window {window}"), |info| info.title.clone());
+        let against = against_owner(&state, window);
+        let stream = state
+            .streams
+            .entry(window)
+            .or_insert_with(|| Stream::new(None));
+        stream.backend = Some(backend);
+        stream.codec = codec;
+        stream.refused = None;
+        let line = format!(
+            "{title}: streaming over {backend:?}{}",
+            codec.map(|c| format!(" in {c:?}")).unwrap_or_default()
+        );
+        if backend == BackendKind::Rdp {
+            self.open_window(
+                session,
+                stream,
+                window,
+                StreamSource::Pictures,
+                (title, against),
+            );
+        } else if let Some(codec) = codec {
+            self.open_window(
+                session,
+                stream,
+                window,
+                StreamSource::Video(codec),
+                (title, against),
+            );
+        }
+        drop(state);
+        self.log(line);
+    }
+
+    fn on_carrier_started(
+        &self,
+        mut state: MutexGuard<'_, State>,
+        window: u64,
+        generation: u32,
+        backend: BackendKind,
+        codec: Option<VideoCodec>,
+    ) {
+        // The stream window shows it beside the current carrier
+        // and swaps on its first picture.
+        let source = match (backend, codec) {
+            (BackendKind::Rdp, _) => Some(StreamSource::Pictures),
+            (_, Some(codec)) => Some(StreamSource::Video(codec)),
+            _ => None,
+        };
+        if let (Some(stream), Some(source)) = (state.streams.get_mut(&window), source) {
+            #[cfg(windows)]
+            if let Some(view) = &stream.window {
+                view.switch_to(source, generation);
+            }
+            #[cfg(not(windows))]
+            let _ = (source, generation);
+            stream.backend = Some(backend);
+            stream.codec = codec;
+        }
+        drop(state);
+        self.log(format!("window {window}: switching to {backend:?}"));
+    }
+
+    fn on_carrier_refused(
+        &self,
+        state: MutexGuard<'_, State>,
+        window: u64,
+        generation: u32,
+        reason: &str,
+    ) {
+        #[cfg(windows)]
+        if let Some(view) = state.streams.get(&window).and_then(|s| s.window.as_ref()) {
+            view.cancel_switch(generation);
+        }
+        #[cfg(not(windows))]
+        let _ = generation;
+        drop(state);
+        self.log(format!("window {window}: no switch: {reason}"));
+    }
+
+    fn on_host_state(
+        &self,
+        mut state: MutexGuard<'_, State>,
+        locked: bool,
+        private_session: String,
+        private_session_reason: Option<String>,
+    ) {
+        let lock_changed = state.host_locked != locked;
+        state.host_locked = locked;
+        if private_session == "active" {
+            state.private_refused = None;
+        }
+        let private_changed = state.private_session.0 != private_session;
+        state.private_session = (private_session.clone(), private_session_reason);
+        drop(state);
+        if lock_changed {
+            self.log(
+                if locked {
+                    "the host is locked; its windows keep streaming"
+                } else {
+                    "the host is unlocked"
+                }
+                .into(),
+            );
+        }
+        if private_changed {
+            self.log(format!("the host's private session: {private_session}"));
+        }
+    }
+
+    fn on_compatibility(
+        &self,
+        mut state: MutexGuard<'_, State>,
+        window: u64,
+        described: Vec<String>,
+        refused: Option<String>,
+    ) {
+        let on = !described.is_empty() || refused.is_some();
+        if let Some(stream) = state.streams.get_mut(&window) {
+            stream.compatibility = on.then(|| (described.clone(), refused.clone()));
+        }
+        drop(state);
+        self.log(match (&refused, described.is_empty()) {
+            (Some(reason), _) => {
+                format!("window {window}: no compatibility mode: {reason}")
+            }
+            (None, true) => format!("window {window}: compatibility mode off"),
+            (None, false) => format!(
+                "window {window}: compatibility mode on: {}",
+                described.join("; ")
+            ),
+        });
     }
 
     #[cfg(windows)]
