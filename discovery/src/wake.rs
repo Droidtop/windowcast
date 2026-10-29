@@ -30,8 +30,8 @@ pub fn parse_mac(text: &str) -> Result<[u8; 6], BadMac> {
 /// Six 0xFF bytes, then `mac` sixteen times: 102 bytes.
 pub fn magic_packet(mac: [u8; 6]) -> [u8; 102] {
     let mut packet = [0xFFu8; 102];
-    for chunk in packet[6..].chunks_exact_mut(6) {
-        chunk.copy_from_slice(&mac);
+    for copy in 0..16 {
+        packet[6 + copy * 6..12 + copy * 6].copy_from_slice(&mac);
     }
     packet
 }
