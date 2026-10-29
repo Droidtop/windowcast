@@ -7,9 +7,11 @@
 //! (gpu_convert.rs); a device without a video processor reads back BGRA
 //! for the processor to convert.
 
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use windows::core::{factory, Interface};
+use windows::core::{factory, IInspectable, Interface};
+use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
@@ -68,6 +70,9 @@ pub struct Capture {
     context: ID3D11DeviceContext,
     winrt_device: IDirect3DDevice,
     pool: Direct3D11CaptureFramePool,
+    /// Set by the pool's FrameArrived handler, waited on by `poll`.
+    arrived: Arc<(Mutex<bool>, Condvar)>,
+    arrived_token: i64,
     session: GraphicsCaptureSession,
     pool_size: SizeInt32,
     staging: Option<(ID3D11Texture2D, u32, u32)>,
@@ -168,6 +173,19 @@ impl Capture {
             BUFFERS,
             pool_size,
         )?;
+        // A new picture wakes `poll`, which waits instead of looking again
+        // every few milliseconds. The pool is free-threaded, so the handler
+        // runs on the system's own thread.
+        let arrived = Arc::new((Mutex::new(false), Condvar::new()));
+        let signal = Arc::clone(&arrived);
+        let arrived_token = pool.FrameArrived(&TypedEventHandler::<
+            Direct3D11CaptureFramePool,
+            IInspectable,
+        >::new(move |_, _| {
+            *signal.0.lock().unwrap_or_else(PoisonError::into_inner) = true;
+            signal.1.notify_all();
+            Ok(())
+        }))?;
         let session = pool.CreateCaptureSession(&item)?;
         // Windows 11 can drop the yellow capture border; older Windows
         // has no such call and keeps it.
@@ -182,6 +200,8 @@ impl Capture {
             context,
             winrt_device,
             pool,
+            arrived,
+            arrived_token,
             session,
             pool_size,
             staging: None,
@@ -227,10 +247,21 @@ impl Capture {
                 result?;
                 return Ok(true);
             }
-            if Instant::now() >= deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 return Ok(false);
             }
-            std::thread::sleep(Duration::from_millis(2));
+            // The flag stays set if a picture arrived since the last look,
+            // so one arriving just now is not slept through.
+            let (flag, arrival) = &*self.arrived;
+            let mut flag = flag.lock().unwrap_or_else(PoisonError::into_inner);
+            if !*flag {
+                flag = arrival
+                    .wait_timeout(flag, remaining)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+            *flag = false;
         }
     }
 
@@ -433,6 +464,7 @@ fn cut_rect(
 
 impl Drop for Capture {
     fn drop(&mut self) {
+        let _ = self.pool.RemoveFrameArrived(self.arrived_token);
         let _ = self.session.Close();
         let _ = self.pool.Close();
     }
