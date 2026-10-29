@@ -537,7 +537,10 @@ mod tests {
     /// does not wait.
     #[test]
     fn stopping_resolves_a_waiting_server_and_stays_stopped() {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let stop = Stop::new();
         let from = stop.clone();
         std::thread::spawn(move || {
@@ -545,8 +548,12 @@ mod tests {
             from.stop();
         });
         runtime.block_on(async {
-            tokio::time::timeout(std::time::Duration::from_secs(10), stop.stopped()).await.expect("not woken by the stop");
-            tokio::time::timeout(std::time::Duration::from_secs(1), stop.stopped()).await.expect("a late waiter should not wait");
+            tokio::time::timeout(std::time::Duration::from_secs(10), stop.stopped())
+                .await
+                .expect("not woken by the stop");
+            tokio::time::timeout(std::time::Duration::from_secs(1), stop.stopped())
+                .await
+                .expect("a late waiter should not wait");
         });
     }
 }
