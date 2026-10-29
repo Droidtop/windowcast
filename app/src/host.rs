@@ -229,6 +229,8 @@ pub struct HostRegistration {
 pub struct HostSnapshot {
     pub pin: Option<String>,
     pub identity: String,
+    /// Hardware addresses to wake this computer with (`aa:bb:cc:dd:ee:ff`).
+    pub wake_addresses: Vec<String>,
     pub offered: Vec<VideoCodec>,
     pub windows: Vec<HostWindow>,
     pub streams: Vec<HostStream>,
@@ -273,6 +275,9 @@ pub struct HostRole {
     gamestream: Arc<windowcast_gamestream::compat::GameStreamCompat>,
     store: Arc<Store>,
     pub listen: String,
+    /// This computer's hardware addresses, read once at start, for a person to wake it with
+    /// (Wake-on-LAN); empty where the system does not say.
+    wake_addresses: Vec<String>,
     /// Each encoder option and the codecs it has on this machine.
     pub encoders: Vec<(&'static str, Vec<VideoCodec>)>,
     samples: Mutex<HashMap<(String, u64, Instant), Sample>>,
@@ -446,6 +451,10 @@ impl HostRole {
             gamestream,
             store,
             listen,
+            wake_addresses: windowcast_discovery::macs::local()
+                .into_iter()
+                .map(windowcast_discovery::macs::format)
+                .collect(),
             encoders,
             samples: Mutex::new(HashMap::new()),
             snapshot: Mutex::new(HostSnapshot::default()),
@@ -564,6 +573,7 @@ impl HostRole {
             gamestream_pairing,
             pin,
             identity: self.control.peer_id().to_hex(),
+            wake_addresses: self.wake_addresses.clone(),
             offered: self.source.encoders(),
             windows,
             streams: self.streams(&titles),

@@ -480,6 +480,15 @@ impl App {
                 ))
                 .weak(),
             );
+            if !snapshot.wake_addresses.is_empty() {
+                ui.label(
+                    RichText::new(format!(
+                        "To wake this computer from another on the network: {}",
+                        snapshot.wake_addresses.join(", ")
+                    ))
+                    .weak(),
+                );
+            }
             ui.separator();
 
             ui.heading("Encoding");

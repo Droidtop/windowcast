@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 windowcast-protocol = { path = "../protocol" }
 windowcast-host = { path = "../host-core" }
+windowcast-discovery = { path = "../discovery" }
 windowcast-client-core = { path = "../client-core" }
 windowcast-terminal = { path = "../terminal" }
 windowcast-identity = { path = "../identity" }

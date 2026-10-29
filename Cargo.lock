@@ -7503,6 +7503,7 @@ dependencies = [
  "windowcast-agent-windows",
  "windowcast-client-core",
  "windowcast-client-windows",
+ "windowcast-discovery",
  "windowcast-gamestream",
  "windowcast-host",
  "windowcast-identity",

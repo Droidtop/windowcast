@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `windowcast_discovery::macs::local()`: this computer's hardware addresses for Wake-on-LAN (Linux sysfs, Windows
+  `getmac`), shown in the reference app's host window (Droidtop/tracker#113). Not sent over the wire.
+
 ## [0.37.0] - 2026-10-30
 
 ### Added

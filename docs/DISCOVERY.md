@@ -37,10 +37,17 @@ or the away path). Only one listener per computer can hold port 47101.
 then the MAC sixteen times) to the LAN on port 9, and to `directed` (a subnet broadcast address)
 when given. The computer's network card has to be set to wake on it, and it has to be on the same
 network; a packet cannot wake what is off at the wall. Where the client learns a host's MAC is the
-application's to decide (the host can report it in its own listing; not done yet).
+application's to decide. `windowcast_discovery::macs::local()` lists this computer's own hardware addresses
+(Linux: the Ethernet cards under `/sys/class/net` that have a device behind them; Windows: `getmac`, connected
+adapters only), and the reference app's host window shows them ("To wake this computer from another on the
+network: aa:bb:...") so the owner can enter one where the waking is done. They are deliberately not sent over
+windowcast's wire: that wire is version-locked (`PROTOCOL_VERSION`), a new message would break every older peer for the
+sake of an address only the waker needs, and droidtop already pairs with a computer through the agent, which can report
+its addresses in its own reply (`macs::local()` is there for it to call).
 
 ## Not done
 
 - A deployable directory and TURN relay (the code is there; running them for people is an operations
   decision for the owner).
-- A host reporting its own MAC address, so a client can offer "wake" for a host it paired with.
+- A client offering "wake" for a host it paired with: it needs the host's address from the agent's pairing reply
+  (droidtop-agent, Droidtop/tracker#113); windowcast's own wire does not carry it.

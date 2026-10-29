@@ -21,6 +21,7 @@
 //! not mDNS: a mDNS responder is not needed to find another windowcast.
 
 pub mod beacon;
+pub mod macs;
 pub mod wake;
 
 pub use beacon::{announce, Beacon, BeaconError, Listener, Seen, PORT};
