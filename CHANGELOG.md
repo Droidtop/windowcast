@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Android library: `EventPump` and `SessionListener` (one way to follow a session's events),
+  `WantedWindow` (waiting for a window asked for by title), and `ConnectRequest` and `WatchSet`,
+  moved out of the viewer, so the viewer and droidtop make the same calls (Droidtop/tracker#428,
+  #115; docs/ANDROID-LIBRARY.md). The viewer's behaviour is unchanged.
 - File transfer on shared folders (Droidtop/tracker#613, docs/COMMAND-STREAM.md, "Files"):
   a new `Files` channel kind. The host application sets what is shared
   (`HostControl::set_file_shares`; nothing is shared by default) and whether each share is

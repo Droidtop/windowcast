@@ -48,8 +48,8 @@ with the host's PIN, and later requests open it directly.
 If the viewer is already connected to that host it keeps the session and only
 looks for the window. A request with a missing or malformed device id or
 address is refused with a message and changes nothing. Parsing is
-`android/viewer/src/main/java/dev/windowcast/viewer/ConnectRequest.kt`, tested
-in `ConnectRequestTest.kt` (CI's `:viewer:testDebugUnitTest`).
+`android/windowcast/src/main/java/dev/windowcast/ConnectRequest.kt` (in the library, so any client can use it), tested
+in `ConnectRequestTest.kt` (CI's `:windowcast:testDebugUnitTest`).
 
 ## Several windows at once, and typing
 

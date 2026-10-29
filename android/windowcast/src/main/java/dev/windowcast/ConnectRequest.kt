@@ -1,4 +1,4 @@
-package dev.windowcast.viewer
+package dev.windowcast
 
 import java.net.URI
 import java.net.URLDecoder

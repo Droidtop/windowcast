@@ -35,7 +35,12 @@ import android.widget.ScrollView
 import android.widget.TextView
 import dev.windowcast.AudioPlayer
 import dev.windowcast.Codec
+import dev.windowcast.ConnectRequest
 import dev.windowcast.Event
+import dev.windowcast.EventPump
+import dev.windowcast.SessionListener
+import dev.windowcast.WantedWindow
+import dev.windowcast.WatchSet
 import dev.windowcast.WindowDecoder
 import dev.windowcast.WindowPictures
 import dev.windowcast.WindowRenderer
@@ -191,12 +196,11 @@ class MainActivity : Activity() {
 
     /**
      * The window another app asked for ([ConnectRequest.window], part of its title), watched as
-     * soon as the host lists it; asked again every [WANTED_REFRESH_MS] until [WANTED_WITHIN_MS].
+     * soon as the host lists it (see [WantedWindow]).
      */
-    private var wanted: String? = null
-    private var wantedSince = 0L
-    /** The thread reading the current session's events; replacing or clearing it stops the old one. */
-    @Volatile private var listener: Thread? = null
+    private var wanted: WantedWindow? = null
+    /** Reads the current session's events; replacing or clearing it stops the old one. */
+    @Volatile private var listener: EventPump? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -389,8 +393,7 @@ class MainActivity : Activity() {
         }
         val current = session
         if (current != null && current.isOpen && current.hostId == request.hostId) {
-            wanted = request.window
-            wantedSince = System.currentTimeMillis()
+            wanted = request.window?.let { WantedWindow(it, System.currentTimeMillis()) }
             worker.execute { current.requestWindows() }
             return
         }
@@ -414,8 +417,7 @@ class MainActivity : Activity() {
      *  from. */
     private fun openRequest(request: ConnectRequest) {
         address.setText(request.address)
-        wanted = request.window
-        wantedSince = System.currentTimeMillis()
+        wanted = request.window?.let { WantedWindow(it, System.currentTimeMillis()) }
         startSession(
             "Opening ${request.address}…",
             "Could not open ${request.address}",
@@ -714,110 +716,138 @@ class MainActivity : Activity() {
 
     /** Tells the reader to stop and, off the main thread, waits for it (it polls every 500 ms). */
     private fun stopListening(wait: Boolean = true) {
-        val t = listener ?: return
+        val pump = listener ?: return
         listener = null
-        if (wait && t !== Thread.currentThread() && Looper.myLooper() != Looper.getMainLooper()) t.join(2000)
+        pump.stop()
+        if (wait && Looper.myLooper() != Looper.getMainLooper()) pump.join(2000)
     }
 
-    /** Reads session events on their own thread; it ends when it is no longer [listener] or [s] closes. */
+    /** Follows [s]'s events through the library's [EventPump], the way every client of the library does; each is handled on the main thread. */
     private fun listen(s: WindowcastSession) {
-        val reader = Thread({
-            val me = Thread.currentThread()
-            while (listener === me && s.isOpen) {
-                when (val event = s.nextEvent(500) ?: continue) {
-                    is Event.Windows -> main.post { showWindows(event.windows) }
-                    is Event.StreamStarted -> main.post {
-                        // The window being watched, or one it owns that the
-                        // library opened as it appeared.
-                        if (event.window == watching?.id) {
-                            startDecoding(event)
-                        } else if (watchSet.isExtra(event.window)) {
-                            openStreamWindow(event)
-                        } else {
-                            openPopup(event)
-                        }
+        val pump = EventPump(s, object : SessionListener {
+            override fun onWindows(windows: List<WindowInfo>) {
+                main.post { showWindows(windows) }
+            }
+
+            override fun onStreamStarted(event: Event.StreamStarted) {
+                main.post {
+                    // The window being watched, or one it owns that the
+                    // library opened as it appeared.
+                    if (event.window == watching?.id) {
+                        startDecoding(event)
+                    } else if (watchSet.isExtra(event.window)) {
+                        openStreamWindow(event)
+                    } else {
+                        openPopup(event)
                     }
-                    is Event.CarrierStarted -> main.post {
-                        if (event.window == watching?.id) switchCarrier(event)
-                    }
-                    is Event.CarrierRefused -> main.post {
-                        if (event.window == watching?.id && switching?.generation == event.generation) {
-                            switching?.let { refusedSwitches += refusedKey(event.window, it.backend) }
-                            cancelSwitch()
-                            tell("No switch: ${event.reason}")
-                        }
-                    }
-                    is Event.StreamRefused -> main.post {
-                        android.util.Log.i(TAG, "window ${event.window} refused: ${event.reason}")
-                        if (event.window == watching?.id) {
-                            status.text = "Refused: ${event.reason}"
-                            showForm()
-                        } else if (watchSet.isExtra(event.window)) {
-                            watchSet.extraEnded(event.window)
-                            tell("Refused: ${event.reason}")
-                        } else {
-                            // A window the host opened as it appeared (a
-                            // dialog such as Save As) that could not be shown.
-                            tell("A new window could not be shown: ${event.reason}")
-                        }
-                    }
-                    is Event.StreamStopped -> main.post {
-                        if (popups.containsKey(event.window)) closePopup(event.window)
-                        else if (extras.containsKey(event.window)) closeStreamWindow(event.window, notifyHost = false)
-                        else if (event.window == watching?.id) stopDecoding()
-                    }
-                    is Event.Cursor -> main.post { if (event.window == watching?.id) showPointer(event) }
-                    is Event.WindowResized -> main.post { onResized(event) }
-                    is Event.HostState -> main.post {
-                        val wasLocked = hostLocked
-                        hostLocked = event.locked
-                        if (wasLocked != event.locked) {
-                            tell(
-                                if (event.locked) {
-                                    "This PC is locked; its windows keep streaming. Input reaches them as window " +
-                                        "messages, which some programs, most games among them, ignore."
-                                } else {
-                                    "This PC is unlocked."
-                                },
-                            )
-                        }
-                        if (hostPrivate != event.privateSession) {
-                            hostPrivate = event.privateSession
-                            invalidateOptionsMenu()
-                            when (event.privateSession) {
-                                "active" -> tell("Private session: the PC's programs run out of sight of its screen.")
-                                "available" -> android.util.Log.i(TAG, "the host offers a private session")
-                                "unavailable" -> android.util.Log.i(TAG, "no private session: ${event.privateSessionReason}")
-                            }
-                        }
-                    }
-                    is Event.Compatibility -> main.post {
-                        if (event.window == watching?.id) showCompatibility(event)
-                    }
-                    is Event.PrivateSessionRefused -> main.post {
-                        if (event.passwordNeeded) askPrivatePassword(event.reason) else tell("No private session: ${event.reason}")
-                    }
-                    is Event.Clipboard -> main.post {
-                        fromHost = event.text
-                        clipboard.setPrimaryClip(ClipData.newPlainText("windowcast", event.text))
-                    }
-                    is Event.Closed -> {
-                        if (listener === me) {
-                            main.post {
-                                status.text = "Disconnected"
-                                stopMicrophone()
-                                closeStreamWindows(notifyHost = false)
-                                stopDecoding()
-                            }
-                        }
-                        break
-                    }
-                    else -> {}
                 }
             }
-        }, "windowcast-events")
-        listener = reader
-        reader.start()
+
+            override fun onCarrierStarted(event: Event.CarrierStarted) {
+                main.post {
+                    if (event.window == watching?.id) switchCarrier(event)
+                }
+            }
+
+            override fun onCarrierRefused(event: Event.CarrierRefused) {
+                main.post {
+                    if (event.window == watching?.id && switching?.generation == event.generation) {
+                        switching?.let { refusedSwitches += refusedKey(event.window, it.backend) }
+                        cancelSwitch()
+                        tell("No switch: ${event.reason}")
+                    }
+                }
+            }
+
+            override fun onStreamRefused(event: Event.StreamRefused) {
+                main.post {
+                    android.util.Log.i(TAG, "window ${event.window} refused: ${event.reason}")
+                    if (event.window == watching?.id) {
+                        status.text = "Refused: ${event.reason}"
+                        showForm()
+                    } else if (watchSet.isExtra(event.window)) {
+                        watchSet.extraEnded(event.window)
+                        tell("Refused: ${event.reason}")
+                    } else {
+                        // A window the host opened as it appeared (a
+                        // dialog such as Save As) that could not be shown.
+                        tell("A new window could not be shown: ${event.reason}")
+                    }
+                }
+            }
+
+            override fun onStreamStopped(event: Event.StreamStopped) {
+                main.post {
+                    if (popups.containsKey(event.window)) closePopup(event.window)
+                    else if (extras.containsKey(event.window)) closeStreamWindow(event.window, notifyHost = false)
+                    else if (event.window == watching?.id) stopDecoding()
+                }
+            }
+
+            override fun onCursor(event: Event.Cursor) {
+                main.post { if (event.window == watching?.id) showPointer(event) }
+            }
+
+            override fun onWindowResized(event: Event.WindowResized) {
+                main.post { onResized(event) }
+            }
+
+            override fun onHostState(event: Event.HostState) {
+                main.post {
+                    val wasLocked = hostLocked
+                    hostLocked = event.locked
+                    if (wasLocked != event.locked) {
+                        tell(
+                            if (event.locked) {
+                                "This PC is locked; its windows keep streaming. Input reaches them as window " +
+                                    "messages, which some programs, most games among them, ignore."
+                            } else {
+                                "This PC is unlocked."
+                            },
+                        )
+                    }
+                    if (hostPrivate != event.privateSession) {
+                        hostPrivate = event.privateSession
+                        invalidateOptionsMenu()
+                        when (event.privateSession) {
+                            "active" -> tell("Private session: the PC's programs run out of sight of its screen.")
+                            "available" -> android.util.Log.i(TAG, "the host offers a private session")
+                            "unavailable" -> android.util.Log.i(TAG, "no private session: ${event.privateSessionReason}")
+                        }
+                    }
+                }
+            }
+
+            override fun onCompatibility(event: Event.Compatibility) {
+                main.post {
+                    if (event.window == watching?.id) showCompatibility(event)
+                }
+            }
+
+            override fun onPrivateSessionRefused(event: Event.PrivateSessionRefused) {
+                main.post {
+                    if (event.passwordNeeded) askPrivatePassword(event.reason) else tell("No private session: ${event.reason}")
+                }
+            }
+
+            override fun onClipboard(text: String) {
+                main.post {
+                    fromHost = text
+                    clipboard.setPrimaryClip(ClipData.newPlainText("windowcast", text))
+                }
+            }
+
+            override fun onClosed() {
+                main.post {
+                    status.text = "Disconnected"
+                    stopMicrophone()
+                    closeStreamWindows(notifyHost = false)
+                    stopDecoding()
+                }
+            }
+        })
+        listener = pump
+        pump.start()
     }
 
     /**
@@ -851,27 +881,26 @@ class MainActivity : Activity() {
         watchWanted(list)
     }
 
-    /** Watches the window another app asked for once it is listed; asks again while it is not. */
+    /** Watches the window another app asked for once it is listed; asks again while it is not ([WantedWindow] decides). */
     private fun watchWanted(list: List<WindowInfo>) {
-        val title = wanted ?: return
-        val found = list.firstOrNull {
-            it.width > 0 && it.height > 0 && it.title.contains(title, ignoreCase = true)
+        val want = wanted ?: return
+        when (val step = want.next(list, System.currentTimeMillis())) {
+            is WantedWindow.Step.Found -> {
+                wanted = null
+                watch(step.window)
+            }
+            WantedWindow.Step.GiveUp -> {
+                wanted = null
+                status.text = "No window titled \u201c${want.title}\u201d appeared. Tap one to watch it."
+            }
+            is WantedWindow.Step.Wait -> {
+                status.text = "Waiting for a window titled \u201c${want.title}\u201d…"
+                main.postDelayed({
+                    val s = session
+                    if (wanted === want && s != null && s.isOpen) worker.execute { s.requestWindows() }
+                }, step.retryInMs)
+            }
         }
-        if (found != null) {
-            wanted = null
-            watch(found)
-            return
-        }
-        if (System.currentTimeMillis() - wantedSince > WANTED_WITHIN_MS) {
-            wanted = null
-            status.text = "No window titled \u201c$title\u201d appeared. Tap one to watch it."
-            return
-        }
-        status.text = "Waiting for a window titled \u201c$title\u201d…"
-        main.postDelayed({
-            val s = session
-            if (wanted == title && s != null && s.isOpen) worker.execute { s.requestWindows() }
-        }, WANTED_REFRESH_MS)
     }
 
     private fun watch(window: WindowInfo) {
@@ -1753,9 +1782,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val TAG = "windowcast"
-        private const val WANTED_REFRESH_MS = 2_000L
-        /** A game asked to start just now may take a while to open its window. */
-        private const val WANTED_WITHIN_MS = 90_000L
         private const val RECORD_REQUEST = 1
         private const val MENU_VIDEO = 1
         private const val MENU_PICTURES = 2

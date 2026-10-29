@@ -1,4 +1,4 @@
-package dev.windowcast.viewer
+package dev.windowcast
 
 /**
  * Which windows the viewer is showing, and what a request to watch one should do

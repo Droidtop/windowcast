@@ -246,7 +246,7 @@ interface WindowRenderer {
 }
 
 /** A connected session. Every call blocks; none may run on the main thread. */
-class WindowcastSession internal constructor(handle: Long) : Closeable {
+class WindowcastSession internal constructor(handle: Long) : Closeable, EventSource {
     // Calls run outside any lock and [close] frees the session when the last one has left, so a
     // reader inside [nextEvent] never meets a freed session (it returns null from then on).
     private val native = NativeHandle(handle, Native::sessionFree)
@@ -255,7 +255,7 @@ class WindowcastSession internal constructor(handle: Long) : Closeable {
     val paired: Boolean = Native.sessionPaired(handle)
 
     /** True until [close]. */
-    val isOpen: Boolean get() = native.isOpen
+    override val isOpen: Boolean get() = native.isOpen
 
     /** Runs [block] with the session's native handle, or returns [default] once closed. */
     internal fun <T> withHandle(default: T, block: (Long) -> T): T = native.use(default, block)
@@ -389,7 +389,7 @@ class WindowcastSession internal constructor(handle: Long) : Closeable {
     }
 
     /** The next event, or null after [timeoutMs] without one, and for good once the session is closed. */
-    fun nextEvent(timeoutMs: Int): Event? =
+    override fun nextEvent(timeoutMs: Int): Event? =
         withHandle<String?>(null) { Native.nextEvent(it, timeoutMs) }?.let { Event.parse(it) }
 
     /** Never waits: the session is freed by the last call still running on it. */

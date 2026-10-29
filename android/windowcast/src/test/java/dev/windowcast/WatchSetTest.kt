@@ -1,6 +1,6 @@
-package dev.windowcast.viewer
+package dev.windowcast
 
-import dev.windowcast.viewer.WatchSet.Plan
+import dev.windowcast.WatchSet.Plan
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
