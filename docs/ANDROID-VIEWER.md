@@ -95,3 +95,13 @@ is `24cfa96c7426467cf1ca4228916acf9cd15c30e87c0eca92e8d1f102d51b3323`, and the
 public certificate is `coordination/signing/windowcast/viewer-apk.pem` in
 Droidtop/tracker. Check an APK against that fingerprint before trusting a
 copy that did not come from a release.
+
+## Stream statistics
+
+While a window is watched, the action-bar title reads `<window>: <frames or pictures>` and, once the
+host reports it, ` | held to 4.0 Mbit/s, 1280x720 at 60 fps, sending 3.2 Mbit/s; loss 0.4%, round trip
+12 ms` (Droidtop/tracker#114). The second part is adaptive quality as the host sees it: what the
+encoder is held to (`as set` while only the settings hold it), the size and rate, what actually went
+out, the packets the client lost and the round trip. The host reports it on every change and every few
+seconds (`stream_quality`), the library delivers it as `Event.StreamQuality` (`SessionListener.
+onStreamQuality`) with `Quality.describe()` for the words, so any client can show the same line.

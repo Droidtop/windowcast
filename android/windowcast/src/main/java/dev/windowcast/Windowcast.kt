@@ -40,6 +40,34 @@ data class WindowInfo(
     val position: Pair<Int, Int>? = null,
 )
 
+/** What a stream is being sent at and the network, as the host sees it (client-core's `StreamQuality`). */
+data class Quality(
+    /** The rate the host holds the encoder to, kilobits a second; null while only the settings hold it. */
+    val targetKbps: Int?,
+    /** What actually went out over the last second or so. */
+    val sentKbps: Int,
+    val fps: Int,
+    val width: Int,
+    val height: Int,
+    /** Packets the client lost, percent. */
+    val lossPercent: Float,
+    /** Round trip over the session, milliseconds. */
+    val rttMs: Int?,
+) {
+    /**
+     * In a few words, as the reference app shows it: what the stream is held to, its size and rate,
+     * what is sent, and the network. For a person to read, e.g.
+     * "held to 4.0 Mbit/s, 1280x720 at 60 fps, sending 3.2 Mbit/s; loss 0.4%, round trip 12 ms".
+     */
+    fun describe(): String {
+        val held = targetKbps?.let { "held to ${mbit(it)} Mbit/s" } ?: "as set"
+        val rtt = rttMs?.let { ", round trip $it ms" } ?: ""
+        return "$held, ${width}x$height at $fps fps, sending ${mbit(sentKbps)} Mbit/s; loss ${"%.1f".format(java.util.Locale.US, lossPercent)}%$rtt"
+    }
+
+    private fun mbit(kbps: Int): String = "%.1f".format(java.util.Locale.US, kbps / 1000.0)
+}
+
 /** Session events, as client-core reports them. */
 sealed interface Event {
     data class Windows(val windows: List<WindowInfo>) : Event
@@ -71,6 +99,13 @@ sealed interface Event {
      */
     data class Cursor(val window: Long, val x: Float, val y: Float, val visible: Boolean, val shape: Long) : Event
     data class Clipboard(val text: String) : Event
+
+    /**
+     * What a window's stream is sent at now and the network the host sees (adaptive quality,
+     * Droidtop/tracker#114): on every change and every few seconds.
+     */
+    data class StreamQuality(val window: Long, val quality: Quality) : Event
+
     data object Closed : Event
 
     companion object {
@@ -133,6 +168,20 @@ sealed interface Event {
                     o.getLong("shape"),
                 )
                 "clipboard" -> Clipboard(o.getString("text"))
+                "stream_quality" -> o.getJSONObject("quality").let { q ->
+                    StreamQuality(
+                        o.getLong("window"),
+                        Quality(
+                            targetKbps = if (q.isNull("target_kbps")) null else q.getInt("target_kbps"),
+                            sentKbps = q.getInt("sent_kbps"),
+                            fps = q.getInt("fps"),
+                            width = q.getInt("width"),
+                            height = q.getInt("height"),
+                            lossPercent = q.getDouble("loss_percent").toFloat(),
+                            rttMs = if (q.isNull("rtt_ms")) null else q.getInt("rtt_ms"),
+                        ),
+                    )
+                }
                 "closed" -> Closed
                 else -> null
             }

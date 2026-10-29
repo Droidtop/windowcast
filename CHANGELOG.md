@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the reference app, off by default); `discover_hosts` lists the hosts heard and `wake_host` sends the
   magic packet. A beacon is a hint, never trust. The C interface (`windowcast_discover_hosts`,
   `windowcast_wake_host`) and the Android library (`HostDiscovery.find`, `HostDiscovery.wake`) expose both.
+- Android library: `Event.StreamQuality` and `Quality` (adaptive quality as the host sees it), which
+  the viewer shows beside the frame count in its title while a window is watched
+  (Droidtop/tracker#114; docs/ANDROID-VIEWER.md, "Stream statistics").
 - Android library: `EventPump` and `SessionListener` (one way to follow a session's events),
   `WantedWindow` (waiting for a window asked for by title), and `ConnectRequest` and `WatchSet`,
   moved out of the viewer, so the viewer and droidtop make the same calls (Droidtop/tracker#428,

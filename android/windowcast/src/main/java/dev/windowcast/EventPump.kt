@@ -29,6 +29,7 @@ interface SessionListener {
     fun onCompatibility(event: Event.Compatibility) {}
     fun onCursor(event: Event.Cursor) {}
     fun onClipboard(text: String) {}
+    fun onStreamQuality(event: Event.StreamQuality) {}
 
     /** The session ended. Not called when the pump was closed first. */
     fun onClosed() {}
@@ -50,6 +51,7 @@ fun deliver(event: Event, listener: SessionListener) {
         is Event.Compatibility -> listener.onCompatibility(event)
         is Event.Cursor -> listener.onCursor(event)
         is Event.Clipboard -> listener.onClipboard(event.text)
+        is Event.StreamQuality -> listener.onStreamQuality(event)
         Event.Closed -> listener.onClosed()
     }
 }

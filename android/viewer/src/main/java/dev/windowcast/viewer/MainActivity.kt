@@ -185,6 +185,14 @@ class MainActivity : Activity() {
     private val launchNote = LaunchNote()
     private var watching: WindowInfo? = null
 
+    /** The decoder's line (frames or pictures) and the host's quality line, which together are the action-bar title while watching. */
+    private var decoderLine = ""
+    private var qualityLine: String? = null
+
+    private fun showStreamTitle(window: WindowInfo) {
+        title = "${window.title}: $decoderLine" + (qualityLine?.let { " | $it" } ?: "")
+    }
+
     /**
      * The window another app asked for ([ConnectRequest.window], part of its title), watched as
      * soon as the host lists it (see [WantedWindow]).
@@ -821,6 +829,16 @@ class MainActivity : Activity() {
                 }
             }
 
+            override fun onStreamQuality(event: Event.StreamQuality) {
+                main.post {
+                    val watched = watching ?: return@post
+                    if (event.window == watched.id) {
+                        qualityLine = event.quality.describe()
+                        if (surface.visibility == View.VISIBLE) showStreamTitle(watched)
+                    }
+                }
+            }
+
             override fun onClipboard(text: String) {
                 main.post {
                     fromHost = text
@@ -1015,7 +1033,7 @@ class MainActivity : Activity() {
             val report = { line: String, ended: Boolean, count: Long, error: String? ->
                 main.post {
                     if (decoder === mine) {
-                        if (surface.visibility == View.VISIBLE) title = "${window.title}: $line"
+                        if (surface.visibility == View.VISIBLE) { decoderLine = line; showStreamTitle(window) }
                         if (ended) {
                             status.text = "Stream ended after $count pictures" + (error?.let { ": $it" } ?: "")
                             stopDecoding()
@@ -1532,7 +1550,7 @@ class MainActivity : Activity() {
             val report = { line: String, ended: Boolean, error: String? ->
                 main.post {
                     if (decoder === pending.renderer) {
-                        if (surface.visibility == View.VISIBLE) title = "${window.title}: $line"
+                        if (surface.visibility == View.VISIBLE) { decoderLine = line; showStreamTitle(window) }
                         if (ended) {
                             status.text = "Stream ended" + (error?.let { ": $it" } ?: "")
                             stopDecoding()
@@ -1717,6 +1735,8 @@ class MainActivity : Activity() {
         stage.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         form.visibility = View.VISIBLE
         // The stream's title (window name and counters) goes with the stream.
+        decoderLine = ""
+        qualityLine = null
         title = APP_TITLE
         invalidateOptionsMenu()
     }
