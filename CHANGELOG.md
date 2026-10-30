@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Android library: `WindowLayout` (the size of a floating window on a screen, and where a popup sits against
   its owner) and `Letterbox` (fitting a picture without changing its shape) are in the library, so
   droidtop lays windows out the way the viewer does (Droidtop/tracker#428).
+- Android library: `WindowRenderers` (which renderer shows a started stream, and its progress) and
+  `InputAdapter` (touches and keys as the host's input) are in the library, so droidtop shows a stream and
+  sends input the way the viewer does; the viewer's four renderer choices and its touch and key code now
+  call them (Droidtop/tracker#428).
 
 ## [0.36.0] - 2026-10-30
 

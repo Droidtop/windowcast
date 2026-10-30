@@ -23,6 +23,8 @@ belongs in the library, not in `MainActivity`.
 | Open a host from another app | `ConnectRequest` (parses the link / intent contract of docs/ANDROID-VIEWER.md) |
 | Stream a window | `startWindow`, `switchWindow`, `stopWindow`; `WindowDecoder`, `WindowPictures` render |
 | Fit a picture, size and place a floating window or popup | `Letterbox.fit`, `WindowLayout.floatingSize`, `WindowLayout.againstOwner` (plain Kotlin; the client draws the result) |
+| Show a started stream | `WindowRenderers.create(session, event, window, holder)`: RDP pictures or decoded video by the stream's backend, one progress shape |
+| Touch and keys as input | `InputAdapter.touches(window, view, event)` and `InputAdapter.key(event)` (the rules are plain Kotlin and tested) |
 | Input, clipboard, audio, gamepads, terminal | `send`, `setClipboard`, `AudioPlayer`, `Microphone`, `Gamepads`, `openTerminal` |
 
 Discovery of hosts (finding a computer to connect to) is not here yet: droidtop's paired computers

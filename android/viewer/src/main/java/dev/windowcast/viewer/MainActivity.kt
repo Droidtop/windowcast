@@ -39,15 +39,15 @@ import dev.windowcast.SignInPlan
 import dev.windowcast.WantedWindow
 import dev.windowcast.WatchSet
 import dev.windowcast.WindowDecoder
-import dev.windowcast.WindowPictures
 import dev.windowcast.WindowRenderer
 import dev.windowcast.WindowInfo
 import dev.windowcast.WindowLayout
+import dev.windowcast.WindowRenderers
+import dev.windowcast.InputAdapter
 import dev.windowcast.WindowcastClient
 import dev.windowcast.WindowcastSession
 import dev.windowcast.Gamepads
 import dev.windowcast.Input
-import dev.windowcast.Keys
 import dev.windowcast.HostKeyPolicy
 import dev.windowcast.Microphone
 import dev.windowcast.TerminalSession
@@ -845,20 +845,8 @@ class MainActivity : Activity() {
                     }
                 }
             }
-            mine = if (event.backend == "Rdp") {
-                WindowPictures(s, event.window, view.holder) { stats ->
-                    report(
-                        "${stats.pictures} pictures over RDP, ${stats.width}x${stats.height}",
-                        stats.ended, stats.pictures, stats.error,
-                    )
-                }
-            } else {
-                WindowDecoder(s, event.window, view.holder.surface, window.width, window.height) { stats ->
-                    report(
-                        "${stats.frames} frames (${stats.codec ?: event.codec}), sound $soundPackets packets",
-                        stats.ended, stats.frames, stats.error,
-                    )
-                }
+            mine = WindowRenderers.create(s, event, window, view.holder) { p ->
+                report(if (p.pictures) p.line else p.line + ", sound $soundPackets packets", p.ended, p.count, p.error)
             }.also {
                 drawing[view] = it
                 it.start()
@@ -1064,17 +1052,7 @@ class MainActivity : Activity() {
 
     /** Every finger on [view], as touches on [window]. */
     private fun touchWindow(window: Long, view: View, event: MotionEvent): Boolean {
-        fun put(index: Int, phase: Input.Touch) {
-            val x = event.getX(index) / view.width.coerceAtLeast(1)
-            val y = event.getY(index) / view.height.coerceAtLeast(1)
-            send(Input.touch(window, event.getPointerId(index), x, y, phase))
-        }
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> put(event.actionIndex, Input.Touch.Start)
-            MotionEvent.ACTION_MOVE -> for (i in 0 until event.pointerCount) put(i, Input.Touch.Move)
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> put(event.actionIndex, Input.Touch.End)
-            MotionEvent.ACTION_CANCEL -> for (i in 0 until event.pointerCount) put(i, Input.Touch.Cancel)
-        }
+        for (input in InputAdapter.touches(window, view, event)) send(input)
         return true
     }
 
@@ -1092,19 +1070,9 @@ class MainActivity : Activity() {
      */
     private fun streamKey(event: KeyEvent): Boolean {
         if (gamepads.onKey(event)) return true
-        val down = event.action == KeyEvent.ACTION_DOWN
-        val evdev = Keys.evdev(event.keyCode)
-        return when {
-            evdev != null -> {
-                if (event.repeatCount == 0) send(Input.key(evdev, down))
-                true
-            }
-            down && event.unicodeChar != 0 -> {
-                send(Input.text(String(Character.toChars(event.unicodeChar))))
-                true
-            }
-            else -> false
-        }
+        val (input, handled) = InputAdapter.key(event)
+        input?.let { send(it) }
+        return handled
     }
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
@@ -1138,11 +1106,7 @@ class MainActivity : Activity() {
         }
         view.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
-                popup.renderer = (if (event.backend == "Rdp") {
-                    WindowPictures(s, event.window, holder)
-                } else {
-                    WindowDecoder(s, event.window, holder.surface, info.width, info.height)
-                }).also { it.start() }
+                popup.renderer = WindowRenderers.create(s, event, info, holder).also { it.start() }
             }
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
             override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -1249,11 +1213,7 @@ class MainActivity : Activity() {
         }
         view.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
-                shown.renderer = (if (event.backend == "Rdp") {
-                    WindowPictures(s, event.window, holder)
-                } else {
-                    WindowDecoder(s, event.window, holder.surface, info.width, info.height)
-                }).also { it.start() }
+                shown.renderer = WindowRenderers.create(s, event, info, holder).also { it.start() }
             }
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
             override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -1345,17 +1305,10 @@ class MainActivity : Activity() {
                     }
                 }
             }
-            pending.renderer = (if (event.backend == "Rdp") {
-                WindowPictures(s, event.window, holder) { stats ->
-                    if (stats.pictures > 0) onShown()
-                    report("${stats.pictures} pictures over RDP, ${stats.width}x${stats.height}", stats.ended, stats.error)
-                }
-            } else {
-                WindowDecoder(s, event.window, holder.surface, window.width, window.height) { stats ->
-                    if (stats.frames > 0) onShown()
-                    report("${stats.frames} frames (${stats.codec ?: event.codec})", stats.ended, stats.error)
-                }
-            }).also {
+            pending.renderer = WindowRenderers.create(s, event, window, holder) { p ->
+                if (p.count > 0) onShown()
+                report(p.line, p.ended, p.error)
+            }.also {
                 drawing[view] = it
                 it.start()
             }
