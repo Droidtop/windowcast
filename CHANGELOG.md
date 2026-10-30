@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-10-30
+
 ### Added
 - Android library: `SessionHolder` is the one way a client starts, replaces and ends its session
   (stop and join the old reader, close the old session, open the new one, follow it, ask for its
@@ -75,6 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hardware keyboard's would, and text a keyboard can only commit as characters goes as text
   input. "Watch another window" in the menu lists the host's windows not yet showing.
 
+- Releases carry the Android library: the "Viewer release" workflow also attaches
+  `windowcast-android-<version>.aar` (both ABIs inside) with its own `SHA256SUMS-android-library`, so
+  droidtop can pin and embed it (Droidtop/tracker#428).
+
 ### Changed
 - The Reed-Solomon code moved out of `windowcast-gamestream` into a new
   `windowcast-fec` crate, split into the general code (the field, encoding, recovery from
@@ -87,7 +93,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new user. A saved configuration that sets it to `false` keeps that choice, and the
   switch stays in the host window.
 
+- `windowcast-app --open-pairing` reaches the running host over a loopback port and a random token it keeps
+  in `host-ipc` (0600 on Unix) and waits for the host's answer; the host no longer deletes a marker file
+  once a second to find out.
+- Waits instead of sleeps: Windows capture waits on the frame pool's `FrameArrived` instead of looking
+  every 2 ms; a piped command's exit is waited for, not polled every 20 ms; the RDP server's stop is
+  awaited, not a flag polled every 100 ms; a carrier switch gives up on a timer task, not a thread that
+  sleeps five seconds; one video `Pacer` holds the catch-up policy every source shares.
+- Viewer: account sign-in is `SignInFlow` and starting a session goes through the library's
+  `SessionHolder`; sign-in waits end with the activity.
+- Internal: the host's per-client session is `Serving` with one method per message, and the client's and
+  the app's event loops hand their long arms to functions of their own.
+
 ### Fixed
+- Viewer: every library failure is an `IOException`, so the viewer catches that and logs it instead of
+  turning any exception into a status line; the timed window-list refreshes after a launch are gone
+  (the host already pushes the list when it changes).
 - The viewer's "Started <program>" line is no longer wiped by the window list arriving a moment
   later; it stays in front of the window count (Droidtop/tracker#466).
 - Viewer: a picture keeps its shape. It used to be stretched to fill the screen whatever the
