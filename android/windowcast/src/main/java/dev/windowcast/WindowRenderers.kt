@@ -24,23 +24,25 @@ object WindowRenderers {
     }
 
     /**
-     * The renderer for [event]'s stream of [window] onto [holder]; call `start()` on it once the
+     * The renderer for the stream of [window] carried by [backend] (a stream's or a carrier's start
+     * says which, with the video [codec] if it has one) onto [holder]; call `start()` on it once the
      * surface is valid. [onProgress] is called on the renderer's own thread.
      */
     fun create(
         session: WindowcastSession,
-        event: Event.StreamStarted,
         window: WindowInfo,
+        backend: String,
+        codec: Codec?,
         holder: SurfaceHolder,
         onProgress: (Progress) -> Unit = {},
     ): WindowRenderer =
-        if (event.backend == "Rdp") {
-            WindowPictures(session, event.window, holder) { s ->
+        if (backend == "Rdp") {
+            WindowPictures(session, window.id, holder) { s ->
                 onProgress(Progress(true, s.pictures, "pictures over RDP, ${s.width}x${s.height}", s.ended, s.error))
             }
         } else {
-            WindowDecoder(session, event.window, holder.surface, window.width, window.height) { s ->
-                onProgress(Progress(false, s.frames, "frames (${s.codec ?: event.codec})", s.ended, s.error))
+            WindowDecoder(session, window.id, holder.surface, window.width, window.height) { s ->
+                onProgress(Progress(false, s.frames, "frames (${s.codec ?: codec})", s.ended, s.error))
             }
         }
 }

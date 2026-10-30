@@ -845,7 +845,7 @@ class MainActivity : Activity() {
                     }
                 }
             }
-            mine = WindowRenderers.create(s, event, window, view.holder) { p ->
+            mine = WindowRenderers.create(s, window, event.backend, event.codec, view.holder) { p ->
                 report(if (p.pictures) p.line else p.line + ", sound $soundPackets packets", p.ended, p.count, p.error)
             }.also {
                 drawing[view] = it
@@ -1106,7 +1106,7 @@ class MainActivity : Activity() {
         }
         view.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
-                popup.renderer = WindowRenderers.create(s, event, info, holder).also { it.start() }
+                popup.renderer = WindowRenderers.create(s, info, event.backend, event.codec, holder).also { it.start() }
             }
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
             override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -1213,7 +1213,7 @@ class MainActivity : Activity() {
         }
         view.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
-                shown.renderer = WindowRenderers.create(s, event, info, holder).also { it.start() }
+                shown.renderer = WindowRenderers.create(s, info, event.backend, event.codec, holder).also { it.start() }
             }
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
             override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -1305,7 +1305,7 @@ class MainActivity : Activity() {
                     }
                 }
             }
-            pending.renderer = WindowRenderers.create(s, event, window, holder) { p ->
+            pending.renderer = WindowRenderers.create(s, window, event.backend, event.codec, holder) { p ->
                 if (p.count > 0) onShown()
                 report(p.line, p.ended, p.error)
             }.also {
