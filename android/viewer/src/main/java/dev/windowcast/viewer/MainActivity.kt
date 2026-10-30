@@ -1,5 +1,6 @@
 package dev.windowcast.viewer
 
+import dev.windowcast.Letterbox
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.Dialog
@@ -41,6 +42,7 @@ import dev.windowcast.WindowDecoder
 import dev.windowcast.WindowPictures
 import dev.windowcast.WindowRenderer
 import dev.windowcast.WindowInfo
+import dev.windowcast.WindowLayout
 import dev.windowcast.WindowcastClient
 import dev.windowcast.WindowcastSession
 import dev.windowcast.Gamepads
@@ -1124,16 +1126,7 @@ class MainActivity : Activity() {
         popups[event.window] = popup
         dialog.setTitle("${info.title} (${info.kind})")
         dialog.setContentView(view)
-        val screen = resources.displayMetrics
-        val scale = minOf(
-            1f,
-            screen.widthPixels * 0.9f / info.width.coerceAtLeast(1),
-            screen.heightPixels * 0.8f / info.height.coerceAtLeast(1),
-        )
-        dialog.window?.setLayout(
-            (info.width * scale).toInt().coerceAtLeast(64),
-            (info.height * scale).toInt().coerceAtLeast(64),
-        )
+        sizeStreamWindow(dialog, info.width, info.height)
         placeAgainstOwner(dialog, info)
         view.setOnTouchListener { v, e -> touchWindow(event.window, v, e) }
         dialog.setOnDismissListener {
@@ -1167,18 +1160,15 @@ class MainActivity : Activity() {
     private fun placeAgainstOwner(dialog: Dialog, info: WindowInfo) {
         val owner = windows.firstOrNull { it.id == info.owner } ?: return
         if (owner.id != watching?.id || surface.visibility != View.VISIBLE) return
-        val (px, py) = info.position ?: return
-        val (ox, oy) = owner.position ?: return
         val origin = IntArray(2)
         surface.getLocationOnScreen(origin)
-        val sx = surface.width.toFloat() / owner.width.coerceAtLeast(1)
-        val sy = surface.height.toFloat() / owner.height.coerceAtLeast(1)
+        val box = WindowLayout.againstOwner(info, owner, origin[0], origin[1], surface.width, surface.height) ?: return
         val attributes = dialog.window?.attributes ?: return
         attributes.gravity = android.view.Gravity.TOP or android.view.Gravity.START
-        attributes.x = origin[0] + ((px - ox) * sx).toInt()
-        attributes.y = origin[1] + ((py - oy) * sy).toInt()
-        attributes.width = (info.width * sx).toInt().coerceAtLeast(32)
-        attributes.height = (info.height * sy).toInt().coerceAtLeast(32)
+        attributes.x = box.x
+        attributes.y = box.y
+        attributes.width = box.width
+        attributes.height = box.height
         dialog.window?.attributes = attributes
     }
 
@@ -1461,15 +1451,8 @@ class MainActivity : Activity() {
     /** Sizes a floating stream window to a [width] by [height] picture, shrunk to fit the screen. */
     private fun sizeStreamWindow(dialog: Dialog, width: Int, height: Int) {
         val screen = resources.displayMetrics
-        val scale = minOf(
-            1f,
-            screen.widthPixels * 0.9f / width.coerceAtLeast(1),
-            screen.heightPixels * 0.8f / height.coerceAtLeast(1),
-        )
-        dialog.window?.setLayout(
-            (width * scale).toInt().coerceAtLeast(64),
-            (height * scale).toInt().coerceAtLeast(64),
-        )
+        val (w, h) = WindowLayout.floatingSize(width, height, screen.widthPixels, screen.heightPixels)
+        dialog.window?.setLayout(w, h)
     }
 
     /** What the status line says when nothing is going on, so no old message outlives its screen. */

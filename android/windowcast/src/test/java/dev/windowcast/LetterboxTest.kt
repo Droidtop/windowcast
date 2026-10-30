@@ -1,4 +1,4 @@
-package dev.windowcast.viewer
+package dev.windowcast
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull

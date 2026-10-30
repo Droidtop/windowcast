@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Android library: `WindowLayout` (the size of a floating window on a screen, and where a popup sits against
+  its owner) and `Letterbox` (fitting a picture without changing its shape) are in the library, so
+  droidtop lays windows out the way the viewer does (Droidtop/tracker#428).
+
 ## [0.36.0] - 2026-10-30
 
 ### Added

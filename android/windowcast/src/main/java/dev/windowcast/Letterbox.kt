@@ -1,4 +1,4 @@
-package dev.windowcast.viewer
+package dev.windowcast
 
 /**
  * Fitting a window's picture on the screen without changing its shape.

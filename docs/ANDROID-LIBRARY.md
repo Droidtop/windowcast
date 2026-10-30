@@ -22,6 +22,7 @@ belongs in the library, not in `MainActivity`.
 | Sign in with an account | `signInOptions` → `SignInPlan.of(options)` (confirmation, methods, words) → `connectAccount`; `SignInAttempts` for waiting sign-ins |
 | Open a host from another app | `ConnectRequest` (parses the link / intent contract of docs/ANDROID-VIEWER.md) |
 | Stream a window | `startWindow`, `switchWindow`, `stopWindow`; `WindowDecoder`, `WindowPictures` render |
+| Fit a picture, size and place a floating window or popup | `Letterbox.fit`, `WindowLayout.floatingSize`, `WindowLayout.againstOwner` (plain Kotlin; the client draws the result) |
 | Input, clipboard, audio, gamepads, terminal | `send`, `setClipboard`, `AudioPlayer`, `Microphone`, `Gamepads`, `openTerminal` |
 
 Discovery of hosts (finding a computer to connect to) is not here yet: droidtop's paired computers
@@ -30,8 +31,8 @@ already know their addresses, and the directory and LAN discovery are Droidtop/t
 ## What is still in the viewer and must move
 
 `MainActivity` (about 1,700 lines) still decides, with no library call to share:
-- popups and extra windows: which events open which floating window, placement against the owner;
-- the pointer overlay and its shape cache; letterboxing (`Letterbox.kt`);
+- popups and extra windows: which events open which floating window (the sizes and the placement against the owner are `WindowLayout`; the dialogs and surfaces are the client's);
+- the pointer overlay and its shape cache;
 - the host-state messages (locked, private session) as text.
 
 Each moves behind a library type with the same shape as `WatchSet` and `WantedWindow`: plain Kotlin
@@ -44,5 +45,5 @@ where it can be, the Android pieces (surfaces, decoders) behind interfaces the c
    `SignInAttempts` (a cancelled or replaced browser/device sign-in is ignored when it answers). The
    dialogs stay the client's. The PIN connect is one call, `connect(address, pin)`.
 3b. (done) Starting a session as `SessionHolder` (plain Kotlin over `HostedSession`, tested with a fake).
-4. Popups and extras as a `WindowLayout` the client draws.
+4. (done for the geometry) Floating-window sizing and popup placement as `WindowLayout`, and `Letterbox`, in the library; the surfaces and dialogs stay the client's.
 Then droidtop's `ComputerLaunch` calls the same types instead of opening the viewer.
