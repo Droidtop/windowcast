@@ -27,15 +27,15 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"], optional = true }
 # IronRDP (Devolutions; MIT or Apache-2.0, see NOTICE): the RDP protocol
 # layer. windowcast's own code is the window, input and stream handling.
-ironrdp-server = { version = "0.13", default-features = false, optional = true }
-ironrdp-connector = "0.10"
-ironrdp-session = "0.11"
-ironrdp-blocking = "0.10"
-ironrdp-input = "0.7"
-ironrdp-pdu = "0.9"
-ironrdp-graphics = "0.9"
-ironrdp-svc = "0.8"
-ironrdp-core = "0.2"
+ironrdp-server = { git = "https://github.com/Devolutions/IronRDP", rev = "f96f664abf0bdfe547f222bcd37e09899f00f310", default-features = false, optional = true }
+ironrdp-connector = { git = "https://github.com/Devolutions/IronRDP", rev = "f96f664abf0bdfe547f222bcd37e09899f00f310" }
+ironrdp-session = { git = "https://github.com/Devolutions/IronRDP", rev = "f96f664abf0bdfe547f222bcd37e09899f00f310" }
+ironrdp-blocking = { git = "https://github.com/Devolutions/IronRDP", rev = "f96f664abf0bdfe547f222bcd37e09899f00f310" }
+ironrdp-input = { git = "https://github.com/Devolutions/IronRDP", rev = "f96f664abf0bdfe547f222bcd37e09899f00f310" }
+ironrdp-pdu = { git = "https://github.com/Devolutions/IronRDP", rev = "f96f664abf0bdfe547f222bcd37e09899f00f310" }
+ironrdp-graphics = { git = "https://github.com/Devolutions/IronRDP", rev = "f96f664abf0bdfe547f222bcd37e09899f00f310" }
+ironrdp-svc = { git = "https://github.com/Devolutions/IronRDP", rev = "f96f664abf0bdfe547f222bcd37e09899f00f310" }
+ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", rev = "f96f664abf0bdfe547f222bcd37e09899f00f310" }
 anyhow = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

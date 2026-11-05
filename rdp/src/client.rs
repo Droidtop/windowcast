@@ -209,7 +209,7 @@ fn connector_config(config: &ClientConfig) -> ironrdp_connector::Config {
         domain: config.domain.clone(),
         enable_tls: false,
         enable_credssp: true,
-        keyboard_type: KeyboardType::IbmEnhanced,
+        keyboard_type: KeyboardType::IBM_ENHANCED,
         keyboard_subtype: 0,
         keyboard_layout: 0,
         keyboard_functional_keys_count: 12,
@@ -220,6 +220,21 @@ fn connector_config(config: &ClientConfig) -> ironrdp_connector::Config {
             height: config.size.1,
         },
         desktop_scale_factor: 0,
+        // One window's desktop: no monitor layout, orientation or physical size to tell.
+        monitor_layout: None,
+        desktop_physical_size: None,
+        desktop_orientation: None,
+        device_scale_factor: None,
+        monitor_extended_layout: None,
+        relative_mouse_input: false,
+        enable_standard_rdp_security: false,
+        connection_type: ironrdp_pdu::gcc::ConnectionType::Lan,
+        // RemoteApp stays windowcast's own (crate::remoteapp's RailTap), as before.
+        remote_application_mode: false,
+        rail_support_level: ironrdp_pdu::rdp::capability_sets::RailSupportLevel::empty(),
+        enable_audio_capture: false,
+        support_dyn_vc_gfx_protocol: false,
+        rdp_version: ironrdp_pdu::gcc::RdpVersion::V5_PLUS,
         bitmap: None,
         client_build: 0,
         client_name: "windowcast".to_owned(),
@@ -325,6 +340,9 @@ pub fn connect(config: &ClientConfig) -> Result<RdpStream, RdpError> {
         public_key,
         None,
     )
+    .map_err(connect_err)?
+    // A server redirection is refused with its reason: windowcast connects to the host it was given.
+    .into_connected()
     .map_err(connect_err)?;
 
     let size = (result.desktop_size.width, result.desktop_size.height);
@@ -469,7 +487,7 @@ fn run(
         let mut outputs = if slow_orders.is_some() {
             Vec::new()
         } else {
-            match stage.process(&mut image, action, &payload) {
+            match stage.process(&mut image, action, &payload, None) {
                 Ok(outputs) => outputs,
                 // A RemoteApp server sends slow-path PDUs IronRDP does not
                 // know; one it cannot read is skipped rather than ending the

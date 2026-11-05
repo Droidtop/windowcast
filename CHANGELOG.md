@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- IronRDP comes from its repository at master (`f96f664abf0b`), on `sspi` 0.23.1 and `winscard` 0.4.1 as published, instead
+  of patched copies of `ironrdp-connector` 0.10, `sspi` 0.21.3 and `winscard` 0.3.4 under `vendor/`, which are gone.
+  sspi 0.21.3 pinned `ed25519-dalek = "=3.0.0-rc.1"`, and a `[patch]` does not reach programs that depend on
+  windowcast, so droidtop-agent and droidtop could not also take russh 0.65 for SFTP (Droidtop/tracker#573). The RDP
+  host and client are moved to that IronRDP (mouse buttons carry their position, the display trait takes a context,
+  RAIL capability sets are typed, the connector says if the server redirects); RDP itself is unchanged.
+
 ### Added
 - `serve_over` (host) and `WindowcastClient::connect_over` (client): one session over a signaling stream and a
   conduit another program carries (Droidtop/tracker#113), as droidtop-agent's WireGuard tunnel carries them (its side

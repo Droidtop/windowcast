@@ -24,7 +24,9 @@ use windowcast_protocol::WindowKind;
 
 use ironrdp_pdu::gcc::{ChannelName, ChannelOptions, ConferenceCreateRequest};
 use ironrdp_pdu::mcs::{ConnectInitial, SendDataRequest};
-use ironrdp_pdu::rdp::capability_sets::CapabilitySet;
+use ironrdp_pdu::rdp::capability_sets::{
+    CapabilitySet, Rail, RailSupportLevel, WindowList, WindowSupportLevel,
+};
 use ironrdp_pdu::rdp::headers::{ShareControlHeader, ShareControlPdu};
 use ironrdp_pdu::x224::{X224Data, X224};
 use ironrdp_svc::{SvcClientProcessor, SvcMessage, SvcProcessor};
@@ -41,10 +43,6 @@ pub struct RemoteApp {
 // MS-RDPBCGR TS_INFO_PACKET flags.
 const INFO_PKT: u16 = 0x0040;
 const INFO_RAIL: u32 = 0x0000_8000;
-// MS-RDPERP 2.2.1.1.1 and 2.2.1.1.2.
-const TS_RAIL_LEVEL_SUPPORTED: u32 = 0x1;
-const TS_RAIL_LEVEL_HANDSHAKE_EX_SUPPORTED: u32 = 0x80;
-const TS_WINDOW_LEVEL_SUPPORTED: u32 = 0x1;
 
 /// A stream that edits the Client Info and Confirm Active PDUs on their
 /// way out, when the session is a RemoteApp one.
@@ -112,15 +110,15 @@ impl<S> RailTap<S> {
                 caps.retain(|c| {
                     !matches!(c, CapabilitySet::Rail(_) | CapabilitySet::WindowList(_))
                 });
-                caps.push(CapabilitySet::Rail(
-                    (TS_RAIL_LEVEL_SUPPORTED | TS_RAIL_LEVEL_HANDSHAKE_EX_SUPPORTED)
-                        .to_le_bytes()
-                        .to_vec(),
-                ));
-                let mut window = TS_WINDOW_LEVEL_SUPPORTED.to_le_bytes().to_vec();
-                window.push(3); // NumIconCaches
-                window.extend_from_slice(&12u16.to_le_bytes()); // NumIconCacheEntries
-                caps.push(CapabilitySet::WindowList(window));
+                caps.push(CapabilitySet::Rail(Rail {
+                    support_level: RailSupportLevel::SUPPORTED
+                        | RailSupportLevel::HANDSHAKE_EX_SUPPORTED,
+                }));
+                caps.push(CapabilitySet::WindowList(WindowList {
+                    support_level: WindowSupportLevel::Supported,
+                    num_icon_caches: 3,
+                    num_icon_cache_entries: 12,
+                }));
                 self.caps_done = true;
                 tracing::debug!(
                     sets = caps.len(),

@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use ironrdp_server::{
     BitmapUpdate, Credentials, DesktopSize, DisplayUpdate, KeyboardEvent, MouseEvent, PixelFormat,
-    RdpServer, RdpServerDisplay, RdpServerDisplayUpdates, RdpServerInputHandler,
+    RdpServer, RdpServerDisplay, RdpServerDisplayUpdates, RdpServerInputHandler, ServerError,
+    ServerErrorExt, ServerResult,
 };
 use rand_core::RngCore;
 use tokio::net::TcpListener;
@@ -340,11 +341,24 @@ impl RdpServerDisplay for WindowDisplay {
         self.size
     }
 
-    async fn updates(&mut self) -> anyhow::Result<Box<dyn RdpServerDisplayUpdates>> {
+    async fn updates(
+        &mut self,
+        _ctx: ironrdp_server::DisplayContext,
+    ) -> ServerResult<Box<dyn RdpServerDisplayUpdates>> {
         let mut capture = match self.source.open_pictures(self.window) {
             Some(Ok(capture)) => capture,
-            Some(Err(e)) => anyhow::bail!("window {}: {e}", self.window.0),
-            None => anyhow::bail!("this host cannot hand out raw pictures"),
+            Some(Err(e)) => {
+                return Err(ServerError::reason(
+                    "window pictures",
+                    format!("window {}: {e}", self.window.0),
+                ))
+            }
+            None => {
+                return Err(ServerError::reason(
+                    "window pictures",
+                    "this host cannot hand out raw pictures",
+                ))
+            }
         };
         // Capture blocks; a thread feeds the async side, dropping pictures
         // the connection is not ready for.
@@ -375,7 +389,7 @@ struct WindowUpdates {
 
 #[async_trait::async_trait]
 impl RdpServerDisplayUpdates for WindowUpdates {
-    async fn next_update(&mut self) -> anyhow::Result<Option<DisplayUpdate>> {
+    async fn next_update(&mut self) -> ServerResult<Option<DisplayUpdate>> {
         let Some(picture) = self.pictures.recv().await else {
             return Ok(None);
         };
@@ -467,16 +481,30 @@ impl RdpServerInputHandler for WindowInput {
                     y: (f32::from(y) / h).clamp(0.0, 1.0),
                 });
             }
-            MouseEvent::LeftPressed => self.button(PointerButton::Left, true),
-            MouseEvent::LeftReleased => self.button(PointerButton::Left, false),
-            MouseEvent::RightPressed => self.button(PointerButton::Right, true),
-            MouseEvent::RightReleased => self.button(PointerButton::Right, false),
-            MouseEvent::MiddlePressed => self.button(PointerButton::Middle, true),
-            MouseEvent::MiddleReleased => self.button(PointerButton::Middle, false),
-            MouseEvent::Button4Pressed => self.button(PointerButton::Back, true),
-            MouseEvent::Button4Released => self.button(PointerButton::Back, false),
-            MouseEvent::Button5Pressed => self.button(PointerButton::Forward, true),
-            MouseEvent::Button5Released => self.button(PointerButton::Forward, false),
+            // A press or release carries where it happened: the pointer goes there first.
+            MouseEvent::Button {
+                x,
+                y,
+                button,
+                pressed,
+            } => {
+                self.mouse(MouseEvent::Move { x, y });
+                if let Some(button) = pointer_button(button) {
+                    self.button(button, pressed);
+                }
+            }
+            MouseEvent::ButtonRel {
+                button, pressed, ..
+            } => {
+                if let Some(button) = pointer_button(button) {
+                    self.button(button, pressed);
+                }
+            }
+            MouseEvent::HorizontalScroll { value } => self.send(InputEvent::PointerScroll {
+                window,
+                dx: f32::from(value) / 120.0,
+                dy: 0.0,
+            }),
             // RDP wheel units are 120 to a notch, positive away from the
             // user, as windowcast's are in notches.
             MouseEvent::VerticalScroll { value } => self.send(InputEvent::PointerScroll {
@@ -489,8 +517,23 @@ impl RdpServerInputHandler for WindowInput {
                 dx: x as f32 / 120.0,
                 dy: y as f32 / 120.0,
             }),
+            // Relative motion, and kinds IronRDP adds later: a window has no use for them.
             MouseEvent::RelMove { .. } => {}
+            _ => {}
         }
+    }
+}
+
+/// windowcast's button for an RDP one; `None` for one it has no name for.
+fn pointer_button(button: ironrdp_server::MouseButton) -> Option<PointerButton> {
+    use ironrdp_server::MouseButton;
+    match button {
+        MouseButton::Left => Some(PointerButton::Left),
+        MouseButton::Right => Some(PointerButton::Right),
+        MouseButton::Middle => Some(PointerButton::Middle),
+        MouseButton::X1 => Some(PointerButton::Back),
+        MouseButton::X2 => Some(PointerButton::Forward),
+        _ => None,
     }
 }
 
