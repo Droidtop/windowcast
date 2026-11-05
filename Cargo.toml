@@ -17,6 +17,7 @@ members = [
     "discovery",
     "vnc",
     "transport",
+    "record",
     "bud",
     "host-core",
     "client-core",

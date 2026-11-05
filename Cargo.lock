@@ -7717,6 +7717,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "windowcast-record"
+version = "0.37.0"
+dependencies = [
+ "opus",
+ "thiserror 1.0.69",
+ "windowcast-protocol",
+]
+
+[[package]]
 name = "windowcast-rendezvous"
 version = "0.37.0"
 dependencies = [
