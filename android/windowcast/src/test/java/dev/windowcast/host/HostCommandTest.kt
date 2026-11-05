@@ -11,6 +11,10 @@ class HostCommandTest {
         assertEquals(HostCommand.Keyframe(7), HostCommand.parse("""{"command":"keyframe","window":7}"""))
         assertEquals(HostCommand.Bitrate(7, 2000000), HostCommand.parse("""{"command":"bitrate","window":7,"bitrate":2000000}"""))
         assertNull(HostCommand.parse("""{"command":"dance","window":7}"""))
+        assertEquals(
+            HostCommand.Input(4, """{"PointerMove":{"window":4,"x":0.5,"y":0.25}}"""),
+            HostCommand.parse("""{"command":"input","window":4,"event":{"PointerMove":{"window":4,"x":0.5,"y":0.25}}}"""),
+        )
         assertNull(HostCommand.parse("""{"command":"open","window":4}"""))
     }
 

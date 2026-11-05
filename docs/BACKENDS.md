@@ -37,8 +37,10 @@ asks for what it needs (open, close, keyframe, bitrate) as commands the
 Android side takes in turn, so nothing calls up into Java. It listens on
 loopback (port 47110) unless the person shares the device's apps.
 
-Built: the displays, the encoders, the frames and the commands. Next:
-input injected into each display, each app's sound (AudioPlaybackCapture
+Built: the displays, the encoders, the frames, the commands, and input
+injected into each app's display (pointer, wheel, touch with several
+fingers, keys through the evdev map, text through the virtual keyboard's
+key map; `InputInjector`). Next: each app's sound (AudioPlaybackCapture
 by UID), raw pictures over shared memory for the client in the device's
 own Linux container, that client, and the Shizuku `UserService` call that
 starts the host.
