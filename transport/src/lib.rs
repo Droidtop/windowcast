@@ -23,6 +23,7 @@
 //! up; across machines the loopback pair simply never succeeds.
 
 mod audio;
+pub mod conduit;
 mod keyframes;
 mod media;
 pub mod punched;
@@ -178,6 +179,9 @@ pub struct Session {
     /// Client side: the address the client reached the host's signaling
     /// at ([`Session::set_dialed_address`]).
     dialed: std::sync::Mutex<Option<std::net::IpAddr>>,
+    /// A session over a tunnel ([`Session::over_conduit`]): the loopback
+    /// socket that stands in for the peer.
+    bridge: Option<conduit::Bridge>,
 }
 
 /// A track the host attached: a window's video or its audio.
@@ -203,7 +207,7 @@ impl Session {
     /// nothing beyond host candidates. A session away from the LAN uses
     /// [`Session::away`].
     pub async fn new() -> Result<Self, TransportError> {
-        Self::build(vec![], &UDP_BIND_ADDRS).await
+        Self::build(vec![], &UDP_BIND_ADDRS, None).await
     }
 
     /// A session for two peers on this device only: it binds loopback and
@@ -211,7 +215,7 @@ impl Session {
     /// is opened. Hosts listening on a loopback address, and clients
     /// connecting to one, use this.
     pub async fn local_only() -> Result<Self, TransportError> {
-        Self::build(vec![], &LOCAL_UDP_BIND_ADDRS).await
+        Self::build(vec![], &LOCAL_UDP_BIND_ADDRS, None).await
     }
 
     /// A session that crosses NATs: ICE also gathers the addresses the
@@ -228,12 +232,32 @@ impl Session {
                 ..Default::default()
             }]
         };
-        Self::build(servers, &UDP_BIND_ADDRS).await
+        Self::build(servers, &UDP_BIND_ADDRS, None).await
+    }
+
+    /// A session carried by a tunnel someone else owns, such as
+    /// droidtop-agent's WireGuard tunnel (Droidtop/tracker#113): it binds
+    /// loopback only, and its one way to the peer is `conduit`, through a
+    /// [`conduit::Bridge`]. Signaling still goes over whatever byte stream
+    /// the caller has (the tunnel's own channel).
+    pub async fn over_conduit(conduit: conduit::Conduit) -> Result<Self, TransportError> {
+        let bridge = conduit::Bridge::start(conduit).await?;
+        let mut session =
+            Self::build(vec![], &LOCAL_UDP_BIND_ADDRS, Some(bridge.address())).await?;
+        session.bridge = Some(bridge);
+        Ok(session)
+    }
+
+    /// Datagrams this session put into its conduit and took out of it;
+    /// `None` for a session that has none.
+    pub fn conduit_counts(&self) -> Option<(u64, u64)> {
+        self.bridge.as_ref().map(conduit::Bridge::counts)
     }
 
     async fn build(
         ice_servers: Vec<RTCIceServer>,
         udp_addrs: &[&'static str],
+        bridge: Option<std::net::SocketAddr>,
     ) -> Result<Self, TransportError> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
@@ -292,8 +316,11 @@ impl Session {
             open_tx,
             events,
             inbound_tx,
-            Arc::clone(&pending_answer),
-            Arc::clone(&ended_windows),
+            Renegotiation {
+                pending_answer: Arc::clone(&pending_answer),
+                ended_windows: Arc::clone(&ended_windows),
+                bridge,
+            },
         ));
 
         Ok(Session {
@@ -310,6 +337,7 @@ impl Session {
             windows: Mutex::new(HashMap::new()),
             audio: Mutex::new(HashMap::new()),
             dialed: std::sync::Mutex::new(None),
+            bridge: None,
         })
     }
 
@@ -495,6 +523,10 @@ impl Session {
 
     /// Adds the host's UDP host candidates again at the dialled address.
     pub(crate) async fn add_dialed_candidates(&self, answer: &str) -> Result<(), TransportError> {
+        // Over a conduit the peer is reached through the bridge only.
+        if self.bridge.is_some() {
+            return Ok(());
+        }
         let Some(ip) = *self.dialed.lock().expect("dialed") else {
             return Ok(());
         };
@@ -555,6 +587,10 @@ impl Session {
         kind: SdpKind,
         sdp: String,
     ) -> Result<(), TransportError> {
+        let sdp = match &self.bridge {
+            Some(bridge) => conduit::rewrite_candidates(&sdp, bridge.address()),
+            None => sdp,
+        };
         let description = match kind {
             SdpKind::Offer => RTCSessionDescription::offer(sdp)?,
             SdpKind::Answer => RTCSessionDescription::answer(sdp)?,
@@ -604,6 +640,15 @@ async fn send_on(
     Ok(())
 }
 
+/// What the control loop shares with the session about renegotiations: the
+/// answer [`Session::renegotiate`] waits for, the windows whose end it
+/// signals, and the bridge a session over a conduit names as the peer.
+struct Renegotiation {
+    pending_answer: PendingAnswer,
+    ended_windows: EndedWindows,
+    bridge: Option<std::net::SocketAddr>,
+}
+
 /// Drives the control channel: reports it open, answers renegotiation
 /// offers, hands renegotiation answers to the waiting
 /// [`Session::renegotiate`], forwards everything else to
@@ -616,9 +661,13 @@ async fn run_control_channel(
     open: watch::Sender<bool>,
     events: Arc<Events>,
     inbound: mpsc::UnboundedSender<ControlMessage>,
-    pending_answer: PendingAnswer,
-    ended_windows: EndedWindows,
+    renegotiation: Renegotiation,
 ) {
+    let Renegotiation {
+        pending_answer,
+        ended_windows,
+        bridge,
+    } = renegotiation;
     while let Some(event) = channel.poll().await {
         let data = match event {
             DataChannelEvent::OnOpen => {
@@ -643,6 +692,10 @@ async fn run_control_channel(
             } => {
                 let Some(pc) = peer_connection.upgrade() else {
                     break;
+                };
+                let sdp = match bridge {
+                    Some(bridge) => conduit::rewrite_candidates(&sdp, bridge),
+                    None => sdp,
                 };
                 if let Err(e) = answer_renegotiation(&*pc, &*channel, sdp).await {
                     tracing::warn!("renegotiation answer failed: {e}");
