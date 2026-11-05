@@ -40,8 +40,9 @@ loopback (port 47110) unless the person shares the device's apps.
 Built: the displays, the encoders, the frames, the commands, and input
 injected into each app's display (pointer, wheel, touch with several
 fingers, keys through the evdev map, text through the virtual keyboard's
-key map; `InputInjector`). Next: each app's sound (AudioPlaybackCapture
-by UID), raw pictures over shared memory for the client in the device's
+key map; `InputInjector`), and each app's sound (`AppSound`: an AudioMix
+matching the app's UID, looped back into an AudioRecord, encoded with Opus
+by the host; an app that opts out of capture stays silent). Next: raw pictures over shared memory for the client in the device's
 own Linux container, that client, and the Shizuku `UserService` call that
 starts the host.
 

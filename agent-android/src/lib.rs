@@ -18,12 +18,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use windowcast_host::{quality::Quality, EncodedFrame, FrameSource, WindowSource};
+use windowcast_host::{
+    audio::AudioSource, quality::Quality, EncodedFrame, FrameSource, WindowSource,
+};
 use windowcast_protocol::{ContentHint, InputEvent, VideoCodec, WindowId, WindowInfo, WindowKind};
 
 /// Frames waiting for the host to send them; a stream that falls behind
 /// drops the newest rather than the host growing a queue.
 const FRAMES_QUEUED: usize = 8;
+/// Sound waiting to be encoded: a few hundred milliseconds of buffers.
+const SOUND_QUEUED: usize = 32;
 
 /// What the host asks of the Android side.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +48,10 @@ pub enum Command {
         window: u64,
         event: serde_json::Value,
     },
+    /// Start capturing `window`'s app's sound.
+    OpenAudio { window: u64 },
+    /// Stop capturing it.
+    CloseAudio { window: u64 },
 }
 
 /// One app's window, as the Android side lists it.
@@ -64,6 +72,7 @@ pub struct Bridge {
     windows: Mutex<Vec<WindowInfo>>,
     encoders: Mutex<Vec<VideoCodec>>,
     streams: Mutex<HashMap<u64, SyncSender<EncodedFrame>>>,
+    sounds: Mutex<HashMap<u64, SyncSender<Vec<i16>>>>,
     commands: Mutex<Option<Sender<Command>>>,
     pending: Mutex<Option<Receiver<Command>>>,
 }
@@ -119,6 +128,23 @@ impl Bridge {
     /// `window`'s app went away: its stream ends.
     pub fn ended(&self, window: u64) {
         self.streams.lock().expect("streams").remove(&window);
+        self.sounds.lock().expect("sounds").remove(&window);
+    }
+
+    /// Interleaved stereo 16-bit samples at 48 kHz of `window`'s app. False
+    /// when nobody listens (stop capturing).
+    pub fn sound(&self, window: u64, samples: Vec<i16>) -> bool {
+        let sender = self.sounds.lock().expect("sounds").get(&window).cloned();
+        match sender.map(|s| s.try_send(samples)) {
+            Some(Ok(())) | Some(Err(TrySendError::Full(_))) => true,
+            Some(Err(TrySendError::Disconnected(_))) | None => false,
+        }
+    }
+
+    /// `window`'s sound cannot be captured (the app opted out, or the
+    /// device refused): its audio ends; the picture goes on.
+    pub fn sound_ended(&self, window: u64) {
+        self.sounds.lock().expect("sounds").remove(&window);
     }
 
     /// The next thing the host asks, waiting up to `timeout`.
@@ -152,6 +178,22 @@ impl WindowSource for AndroidSource {
 
     fn encoders(&self) -> Vec<VideoCodec> {
         self.0.encoders.lock().expect("encoders").clone()
+    }
+
+    fn open_audio(&self, window: WindowId) -> Option<Result<Box<dyn AudioSource>, String>> {
+        if !self.list_windows().iter().any(|w| w.id == window) {
+            return Some(Err(
+                "that app is not on a display of this device's any more".into(),
+            ));
+        }
+        let (tx, samples) = mpsc::sync_channel(SOUND_QUEUED);
+        self.0.sounds.lock().expect("sounds").insert(window.0, tx);
+        self.0.ask(Command::OpenAudio { window: window.0 });
+        Some(Ok(Box::new(AndroidSound {
+            bridge: Arc::clone(&self.0),
+            window: window.0,
+            samples,
+        })))
     }
 
     fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
@@ -239,6 +281,37 @@ impl Drop for AndroidStream {
             .expect("streams")
             .remove(&self.window);
         self.bridge.ask(Command::Close {
+            window: self.window,
+        });
+    }
+}
+
+/// One app's sound, captured on the Android side.
+struct AndroidSound {
+    bridge: Arc<Bridge>,
+    window: u64,
+    samples: Receiver<Vec<i16>>,
+}
+
+impl AudioSource for AndroidSound {
+    fn next_samples(&mut self) -> Option<Vec<i16>> {
+        match self.samples.recv_timeout(Duration::from_millis(100)) {
+            Ok(samples) => Some(samples),
+            // Quiet: no samples this time.
+            Err(mpsc::RecvTimeoutError::Timeout) => Some(Vec::new()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => None,
+        }
+    }
+}
+
+impl Drop for AndroidSound {
+    fn drop(&mut self) {
+        self.bridge
+            .sounds
+            .lock()
+            .expect("sounds")
+            .remove(&self.window);
+        self.bridge.ask(Command::CloseAudio {
             window: self.window,
         });
     }
@@ -436,6 +509,40 @@ pub unsafe extern "C" fn windowcast_android_host_ended(host: *const AndroidHost,
     }
 }
 
+/// `count` interleaved stereo 16-bit samples at 48 kHz of `window`'s app.
+/// 1 taken, 0 nobody listens (stop capturing).
+///
+/// # Safety
+/// `host` must be valid and `samples` valid for `count` values.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_android_host_sound(
+    host: *const AndroidHost,
+    window: u64,
+    samples: *const i16,
+    count: usize,
+) -> i64 {
+    let Some(host) = host.as_ref() else { return 0 };
+    if samples.is_null() {
+        return 0;
+    }
+    let samples = std::slice::from_raw_parts(samples, count).to_vec();
+    i64::from(host.bridge.sound(window, samples))
+}
+
+/// `window`'s sound cannot be captured: its audio ends, its picture goes on.
+///
+/// # Safety
+/// `host` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_android_host_sound_ended(
+    host: *const AndroidHost,
+    window: u64,
+) {
+    if let Some(host) = host.as_ref() {
+        host.bridge.sound_ended(window);
+    }
+}
+
 /// The next command as JSON in `out` (see [`Command`]), waiting up to
 /// `timeout_ms`: its length, or 0 when none came.
 ///
@@ -592,6 +699,33 @@ mod tests {
             None,
         );
         assert_eq!(bridge.next_command(Duration::from_millis(50)), None);
+    }
+
+    #[test]
+    fn an_apps_sound_is_asked_for_carried_and_let_go() {
+        let bridge = Bridge::new();
+        bridge.set_windows(&listed());
+        let source = AndroidSource(Arc::clone(&bridge));
+        let wait = Duration::from_secs(1);
+        let mut sound = source.open_audio(WindowId(4)).unwrap().unwrap();
+        assert_eq!(
+            bridge.next_command(wait),
+            Some(Command::OpenAudio { window: 4 })
+        );
+        assert!(bridge.sound(4, vec![1, -1, 2, -2]));
+        assert_eq!(sound.next_samples(), Some(vec![1, -1, 2, -2]));
+        // Quiet is no samples, not the end.
+        assert_eq!(sound.next_samples(), Some(Vec::new()));
+        drop(sound);
+        assert_eq!(
+            bridge.next_command(wait),
+            Some(Command::CloseAudio { window: 4 })
+        );
+        assert!(!bridge.sound(4, vec![0, 0]));
+        // An app whose sound cannot be captured ends its audio only.
+        let mut again = source.open_audio(WindowId(4)).unwrap().unwrap();
+        bridge.sound_ended(4);
+        assert_eq!(again.next_samples(), None);
     }
 
     #[test]
