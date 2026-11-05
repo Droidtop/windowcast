@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-11-05
+
 ### Changed
 - GameStream's control thread waits on its socket instead of waking every millisecond: traffic and a queued
   message (a loopback datagram from the sender) wake it at once, and ENet's timers get a look every 10 ms at most
