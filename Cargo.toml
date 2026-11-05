@@ -21,6 +21,7 @@ members = [
     "host-core",
     "client-core",
     "agent-linux",
+    "agent-android",
     "agent-windows",
     "cli-tools",
     "client-windows",

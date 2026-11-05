@@ -2,7 +2,7 @@
 
 windowcast is **one library** we write: the protocol, pairing and
 identity, the backends, codecs and input. The ends are thin
-implementations of it: host agents (Linux, Windows, macOS) on one side,
+implementations of it: host agents (Linux, Windows, macOS, Android) on one side,
 clients (droidtop's Desktop mode, the reference CLI, anything else) on the
 other. A client embeds `client-core` and talks to it only through its C
 interface, which is the single surface every end implements against.
@@ -22,6 +22,26 @@ crates (Devolutions, MIT or Apache-2.0) carry the RDP protocol itself
 dynamic channels), and windowcast keeps its own window handling on top:
 which window an RDP connection shows, RemoteApp, input mapping, the
 streaming into windowcast's sessions and the backend seam.
+
+## The Android host (Droidtop/tracker#615)
+
+Android has no windows another app may capture, so the Android host makes
+them: each app runs on a virtual display of its own, created as the shell
+user (through Shizuku or Sui), whose surface is a MediaCodec encoder's
+input surface. The GPU draws the app straight into the hardware encoder.
+`dev.windowcast.host.AndroidHost` (the Android library) owns the displays
+and the encoders. `agent-android` (`libwindowcast_host_android.so`) is the
+host's half: a `WindowSource` the Android side hands windows and encoded
+frames into through `agent-android/include/windowcast_host.h`, and which
+asks for what it needs (open, close, keyframe, bitrate) as commands the
+Android side takes in turn, so nothing calls up into Java. It listens on
+loopback (port 47110) unless the person shares the device's apps.
+
+Built: the displays, the encoders, the frames and the commands. Next:
+input injected into each display, each app's sound (AudioPlaybackCapture
+by UID), raw pictures over shared memory for the client in the device's
+own Linux container, that client, and the Shizuku `UserService` call that
+starts the host.
 
 ## The window abstraction
 

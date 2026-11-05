@@ -13,6 +13,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments += "-DWINDOWCAST_INCLUDE=${rootDir.parentFile.resolve("client-core/include")}"
+                arguments += "-DWINDOWCAST_HOST_INCLUDE=${rootDir.parentFile.resolve("agent-android/include")}"
             }
         }
         ndk {
