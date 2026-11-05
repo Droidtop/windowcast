@@ -256,7 +256,12 @@ impl Drop for Shown {
 
 /// RGBA (OpenH264's) to the little-endian XRGB8888 Wayland wants: B, G, R, X in memory.
 fn rgba_to_xrgb(from: &[u8], to: &mut [u8]) {
-    for (to, from) in to.chunks_exact_mut(4).zip(from.chunks_exact(4)) {
+    for (to, from) in to
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(from.as_chunks::<4>().0)
+    {
         to[0] = from[2];
         to[1] = from[1];
         to[2] = from[0];
