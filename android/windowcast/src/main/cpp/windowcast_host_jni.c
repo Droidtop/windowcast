@@ -6,7 +6,7 @@
 
 #define HOST(h) ((const WindowcastAndroidHost *)(intptr_t)(h))
 #define ERROR_CAP 512
-#define COMMAND_CAP 1024
+#define COMMAND_CAP 16384
 
 static __thread char last_error[ERROR_CAP];
 

@@ -27,8 +27,8 @@ import java.util.concurrent.atomic.AtomicLong
  * The host listens on [listen], loopback by default: what the client inside the device's own
  * Linux container needs. Pairing is the windowcast identity in [dataDir].
  *
- * Built so far: the displays, the encoders, the frames and the host's commands. Input injection,
- * per-app sound and raw pictures for loopback are the next steps on the issue.
+ * Built so far: the displays, the encoders, the frames, the host's commands, and input into each
+ * display ([InputInjector]). Per-app sound and raw pictures for loopback are the next steps.
  */
 class AndroidHost(
     private val context: Context,
@@ -46,7 +46,7 @@ class AndroidHost(
     @Volatile private var closed = false
 
     /** One app's display, and its encoder while someone watches it. */
-    private class Shown(val app: HostApp, val display: VirtualDisplay) {
+    private class Shown(val app: HostApp, val display: VirtualDisplay, val input: InputInjector) {
         @Volatile var encoder: Encoder? = null
     }
 
@@ -72,7 +72,8 @@ class AndroidHost(
         // No surface until someone watches: the app runs, and nothing is drawn for nobody.
         val display = displays.createVirtualDisplay("windowcast-$window", width, height, dpi, null, DISPLAY_FLAGS)
             ?: throw IOException("no display could be made for $packageName")
-        apps[window] = Shown(HostApp(window, packageName, title, width, height), display)
+        val input = InputInjector(context, display.display.displayId, width, height)
+        apps[window] = Shown(HostApp(window, packageName, title, width, height), display, input)
         publish()
         val options = ActivityOptions.makeBasic().setLaunchDisplayId(display.display.displayId)
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
@@ -106,6 +107,15 @@ class AndroidHost(
             val json = HostNative.nextCommand(handle, COMMAND_WAIT_MS) ?: continue
             val command = HostCommand.parse(json) ?: continue
             val shown = apps[command.window] ?: continue
+            if (command is HostCommand.Input) {
+                // A malformed event is dropped and said in the log; the stream goes on.
+                try {
+                    shown.input.inject(command.event)
+                } catch (e: org.json.JSONException) {
+                    Log.w(TAG, "window ${command.window}: input not understood", e)
+                }
+                continue
+            }
             try {
                 when (command) {
                     is HostCommand.Open -> {
@@ -120,6 +130,7 @@ class AndroidHost(
                     }
                     is HostCommand.Keyframe -> shown.encoder?.keyframe()
                     is HostCommand.Bitrate -> shown.encoder?.bitrate(command.bitrate)
+                    is HostCommand.Input -> Unit
                 }
             } catch (e: Exception) {
                 // MediaCodec reports a failed configure or start as IllegalStateException or

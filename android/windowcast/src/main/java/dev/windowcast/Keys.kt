@@ -56,6 +56,11 @@ object Keys {
         put(KeyEvent.KEYCODE_MENU, 127)
     }
 
+    private val reverse: Map<Int, Int> by lazy { map.entries.associate { (android, evdev) -> evdev to android } }
+
     /** The evdev code for an Android key code, or null for keys windowcast does not map. */
     fun evdev(androidKeyCode: Int): Int? = map[androidKeyCode]
+
+    /** The Android key code for an evdev code (the Android host injects keys), or null. */
+    fun android(evdevCode: Int): Int? = reverse[evdevCode]
 }

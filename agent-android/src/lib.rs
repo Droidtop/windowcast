@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use windowcast_host::{quality::Quality, EncodedFrame, FrameSource, WindowSource};
-use windowcast_protocol::{ContentHint, VideoCodec, WindowId, WindowInfo, WindowKind};
+use windowcast_protocol::{ContentHint, InputEvent, VideoCodec, WindowId, WindowInfo, WindowKind};
 
 /// Frames waiting for the host to send them; a stream that falls behind
 /// drops the newest rather than the host growing a queue.
@@ -37,6 +37,13 @@ pub enum Command {
     Keyframe { window: u64 },
     /// Hold `window`'s encoder to `bitrate` bits a second.
     Bitrate { window: u64, bitrate: u32 },
+    /// Inject `event` (an `InputEvent` in serde's form) into `window`'s
+    /// display: the window it names, or the session's focus for keys and
+    /// text.
+    Input {
+        window: u64,
+        event: serde_json::Value,
+    },
 }
 
 /// One app's window, as the Android side lists it.
@@ -145,6 +152,25 @@ impl WindowSource for AndroidSource {
 
     fn encoders(&self) -> Vec<VideoCodec> {
         self.0.encoders.lock().expect("encoders").clone()
+    }
+
+    fn input(&self, event: &InputEvent, focus: Option<WindowId>) {
+        let named = match event {
+            InputEvent::PointerMove { window, .. }
+            | InputEvent::PointerButton { window, .. }
+            | InputEvent::PointerScroll { window, .. }
+            | InputEvent::Touch { window, .. } => Some(*window),
+            InputEvent::Key { .. } | InputEvent::Text { .. } => focus,
+            // Gamepads go to WindowSource::gamepads, which this host does not have yet.
+            _ => None,
+        };
+        let (Some(window), Ok(event)) = (named, serde_json::to_value(event)) else {
+            return;
+        };
+        self.0.ask(Command::Input {
+            window: window.0,
+            event,
+        });
     }
 
     fn open(&self, window: WindowId, codec: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
@@ -523,6 +549,49 @@ mod tests {
             .unwrap();
         bridge.ended(4);
         assert!(stream.next_frame(false).is_none());
+    }
+
+    #[test]
+    fn input_goes_to_the_window_it_names_or_the_focus() {
+        let bridge = Bridge::new();
+        let source = AndroidSource(Arc::clone(&bridge));
+        let wait = Duration::from_secs(1);
+        source.input(
+            &InputEvent::PointerMove {
+                window: WindowId(4),
+                x: 0.5,
+                y: 0.25,
+            },
+            Some(WindowId(9)),
+        );
+        let Some(Command::Input { window, event }) = bridge.next_command(wait) else {
+            panic!("no input")
+        };
+        assert_eq!(window, 4);
+        assert_eq!(
+            event.to_string(),
+            r#"{"PointerMove":{"window":4,"x":0.5,"y":0.25}}"#
+        );
+        source.input(
+            &InputEvent::Key {
+                keycode: 30,
+                pressed: true,
+            },
+            Some(WindowId(9)),
+        );
+        assert!(matches!(
+            bridge.next_command(wait),
+            Some(Command::Input { window: 9, .. })
+        ));
+        // A key with no focus has nowhere to go.
+        source.input(
+            &InputEvent::Key {
+                keycode: 30,
+                pressed: true,
+            },
+            None,
+        );
+        assert_eq!(bridge.next_command(Duration::from_millis(50)), None);
     }
 
     #[test]
