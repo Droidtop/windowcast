@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `HostControl::limit_device`: a host application can limit one paired device to the windows a few globs match (app
+  id or title), on top of the host's policy (Droidtop/tracker#116). droidtop-agent uses it so a handheld that
+  started a game sees only that game's windows. It is the policy's own window filter (`Decision::limited_to`),
+  not a second one.
+
+### Added
 - `windowcast_discovery::macs::local()`: this computer's hardware addresses for Wake-on-LAN (Linux sysfs, Windows
   `getmac`), shown in the reference app's host window (Droidtop/tracker#113). Not sent over the wire.
 

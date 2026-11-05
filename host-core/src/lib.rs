@@ -438,6 +438,8 @@ pub struct HostControl {
     /// Account sign-in; `None` while it is off.
     accounts: std::sync::RwLock<Option<Arc<Accounts>>>,
     registrations: std::sync::Mutex<Registrations>,
+    /// The application's window limits per device ([`Self::limit_device`]).
+    device_limits: std::sync::Mutex<HashMap<PeerId, Vec<String>>>,
     data_dir: PathBuf,
     sign_ins: Arc<SignInThrottle>,
 }
@@ -557,6 +559,7 @@ impl HostControl {
             )),
             data_dir: config.data_dir.clone(),
             sign_ins: Arc::default(),
+            device_limits: std::sync::Mutex::default(),
         }))
     }
 
@@ -614,11 +617,35 @@ impl HostControl {
         (account.provider != "local" || accounts.local().active(&account.name)).then_some(account)
     }
 
-    /// What policy lets the device `peer` do on this host.
+    /// What policy lets the device `peer` do on this host, with the
+    /// application's own limit for that device ([`Self::limit_device`]).
     pub fn decision(&self, peer: &PeerId) -> Decision {
-        match self.accounts() {
+        let decided = match self.accounts() {
             Some(accounts) => accounts.decide(self.account_of(peer).as_ref()),
             None => windowcast_accounts::Policy::default().decide(None, ""),
+        };
+        let limit = self
+            .device_limits
+            .lock()
+            .expect("device limits")
+            .get(peer)
+            .cloned();
+        match limit {
+            Some(globs) => decided.limited_to(&globs),
+            None => decided,
+        }
+    }
+
+    /// Limits the device `peer` to the windows `globs` match (app id or
+    /// title), on top of the policy (Droidtop/tracker#116): a host
+    /// application lets a handheld see only the game it started. Empty
+    /// takes the limit away. Sessions that start after it use it.
+    pub fn limit_device(&self, peer: PeerId, globs: Vec<String>) {
+        let mut limits = self.device_limits.lock().expect("device limits");
+        if globs.is_empty() {
+            limits.remove(&peer);
+        } else {
+            limits.insert(peer, globs);
         }
     }
 
@@ -2663,6 +2690,32 @@ mod announce_tests {
         })
         .unwrap();
         (control, dir)
+    }
+
+    #[test]
+    fn the_application_limits_one_device_to_its_games_windows() {
+        let (control, dir) = control("limit");
+        let viewer = Identity::generate().peer_id();
+        let other = Identity::generate().peer_id();
+        assert!(control
+            .decision(&viewer)
+            .window_allowed("notepad.exe", "Untitled"));
+        control.limit_device(viewer, vec!["Sandustry*".into()]);
+        assert!(control
+            .decision(&viewer)
+            .window_allowed("Sandustry.exe", "Sandustry"));
+        assert!(!control
+            .decision(&viewer)
+            .window_allowed("notepad.exe", "Untitled"));
+        // Another device is not limited by it.
+        assert!(control
+            .decision(&other)
+            .window_allowed("notepad.exe", "Untitled"));
+        control.limit_device(viewer, Vec::new());
+        assert!(control
+            .decision(&viewer)
+            .window_allowed("notepad.exe", "Untitled"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
