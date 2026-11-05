@@ -13,8 +13,9 @@
 //! (0x0302) and sends input (0x0206), loss reports and a periodic ping; the
 //! host ends the stream with a termination message (0x0109).
 
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aes_gcm::aead::{AeadInPlace, KeyInit};
@@ -122,20 +123,91 @@ pub struct Control {
     pub sender: ControlSender,
 }
 
+/// How long the control thread waits on its socket when nothing arrives and
+/// nothing is queued: the bound on ENet's own timers (resends, pings,
+/// timeouts), which C ENet's `enet_host_service` also leaves to the caller.
+/// Traffic and queued messages wake it at once.
+const IDLE_WAIT: Duration = Duration::from_millis(10);
+
 /// Sends on a control stream; clones share it.
 #[derive(Clone)]
-pub struct ControlSender(Sender<Outgoing>);
+pub struct ControlSender {
+    queue: Sender<Outgoing>,
+    waker: Arc<Waker>,
+}
 
 impl ControlSender {
     pub fn send(&self, kind: u16, payload: &[u8], channel: u8, reliable: bool) -> bool {
-        self.0
+        let queued = self
+            .queue
             .send(Outgoing {
                 kind,
                 payload: payload.to_vec(),
                 channel,
                 reliable,
             })
-            .is_ok()
+            .is_ok();
+        if queued {
+            self.waker.wake();
+        }
+        queued
+    }
+}
+
+/// Wakes the control thread from its wait on the ENet socket: a one-byte
+/// datagram to that socket from loopback. ENet drops it unread, as it drops
+/// anything shorter than its own header.
+struct Waker {
+    socket: Option<UdpSocket>,
+    target: SocketAddr,
+}
+
+impl Waker {
+    fn for_socket(control: &UdpSocket) -> Self {
+        let target = match control.local_addr() {
+            Ok(local) => {
+                let ip = match local.ip() {
+                    IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+                    ip => ip,
+                };
+                SocketAddr::new(ip, local.port())
+            }
+            Err(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        };
+        let bind = if target.is_ipv6() {
+            "[::1]:0"
+        } else {
+            "127.0.0.1:0"
+        };
+        // Without a waker socket the thread still wakes every IDLE_WAIT.
+        let socket = UdpSocket::bind(bind).ok();
+        Waker { socket, target }
+    }
+
+    fn wake(&self) {
+        if let Some(socket) = &self.socket {
+            let _ = socket.send_to(&[0], self.target);
+        }
+    }
+}
+
+/// Blocks until a datagram waits on `socket` or `timeout` passes, without
+/// taking the datagram: ENet reads it next. The socket stays in ENet's
+/// non-blocking mode outside this wait.
+fn wait_readable(socket: &UdpSocket, timeout: Duration) {
+    let waited = socket
+        .set_nonblocking(false)
+        .and_then(|()| socket.set_read_timeout(Some(timeout)))
+        .map(|()| {
+            let mut probe = [0u8; 1];
+            // A datagram longer than the probe is still "something to read":
+            // Windows says so with an error (WSAEMSGSIZE), which is fine here.
+            let _ = socket.peek_from(&mut probe);
+        });
+    if socket.set_nonblocking(true).is_err() || waited.is_err() {
+        // The socket cannot block: fall back to waiting the bound out.
+        std::thread::sleep(timeout);
     }
 }
 
@@ -171,6 +243,7 @@ enum Role {
 fn run(socket: UdpSocket, key: [u8; 16], client: bool, role: Role) -> Control {
     let (events_tx, events) = mpsc::channel();
     let (outgoing, outgoing_rx) = mpsc::channel::<Outgoing>();
+    let waker = Arc::new(Waker::for_socket(&socket));
     std::thread::spawn(move || {
         let Ok(mut host) = Host::new(
             socket,
@@ -280,14 +353,20 @@ fn run(socket: UdpSocket, key: [u8; 16], client: bool, role: Role) -> Control {
                         let _ = events_tx.send(ControlEvent::Disconnected);
                         return;
                     }
-                    std::thread::sleep(Duration::from_millis(1));
+                    // Nothing came and nothing is queued: wait on the socket
+                    // until traffic, a queued message (the waker) or ENet's
+                    // timers need another look.
+                    wait_readable(host.socket(), IDLE_WAIT);
                 }
             }
         }
     });
     Control {
         events,
-        sender: ControlSender(outgoing),
+        sender: ControlSender {
+            queue: outgoing,
+            waker,
+        },
     }
 }
 
@@ -306,6 +385,28 @@ mod tests {
         let mut tampered = sealed.clone();
         *tampered.last_mut().unwrap() ^= 1;
         assert_eq!(open(&key, true, &tampered), None);
+    }
+
+    #[test]
+    fn a_queued_message_wakes_the_wait_and_the_socket_stays_non_blocking() {
+        let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let waker = Waker::for_socket(&socket);
+        assert!(waker.target.ip().is_loopback());
+        let started = Instant::now();
+        let wake = std::thread::spawn(move || waker.wake());
+        // A long bound: only the waker's datagram ends the wait early.
+        wait_readable(&socket, Duration::from_secs(30));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        wake.join().unwrap();
+        // The wait only peeked: the datagram is still there, then nothing,
+        // without blocking.
+        let mut buf = [0u8; 8];
+        assert_eq!(socket.recv_from(&mut buf).unwrap().0, 1);
+        assert_eq!(
+            socket.recv_from(&mut buf).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]
