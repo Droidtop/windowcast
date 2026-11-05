@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Droidtop/tracker#760).
 
 ### Added
+- An Android host (Droidtop/tracker#615): `dev.windowcast.host.AndroidHost` runs each app on a virtual display of
+  its own, encoded by MediaCodec straight from the display's surface, and `windowcast-agent-android` serves them
+  as one window per app. It runs as the shell user, through Shizuku or Sui. Input, sound and the in-container
+  client come next.
+
+### Added
 - `windowcast_discovery::macs::local()`: this computer's hardware addresses for Wake-on-LAN (Linux sysfs, Windows
   `getmac`), shown in the reference app's host window (Droidtop/tracker#113). Not sent over the wire.
 

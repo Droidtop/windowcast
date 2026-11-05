@@ -1,0 +1,17 @@
+[package]
+name = "windowcast-agent-android"
+description = "windowcast's Android host: apps on virtual displays, encoded by MediaCodec, served by windowcast's host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "windowcast_host_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+windowcast-protocol = { path = "../protocol" }
+windowcast-host = { path = "../host-core" }
+serde = { workspace = true }
+serde_json = "1"
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }

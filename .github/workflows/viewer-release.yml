@@ -70,7 +70,7 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           cargo ndk -t arm64-v8a -t x86_64 -P 26 \
             -o android/windowcast/src/main/jniLibs \
-            build --release -p windowcast-client-core
+            build --release -p windowcast-client-core -p windowcast-agent-android
 
       - name: Build the signed viewer
         working-directory: android

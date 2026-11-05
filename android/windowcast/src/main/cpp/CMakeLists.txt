@@ -10,3 +10,13 @@ set_target_properties(windowcast_client PROPERTIES
 add_library(windowcast_jni SHARED windowcast_jni.c)
 target_include_directories(windowcast_jni PRIVATE ${WINDOWCAST_INCLUDE})
 target_link_libraries(windowcast_jni windowcast_client log)
+
+# windowcast's Android host (agent-android, Droidtop/tracker#615), built by
+# `cargo ndk` into the same jniLibs; its own bridge links against it.
+add_library(windowcast_host_android SHARED IMPORTED)
+set_target_properties(windowcast_host_android PROPERTIES
+    IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libwindowcast_host_android.so)
+
+add_library(windowcast_host_jni SHARED windowcast_host_jni.c)
+target_include_directories(windowcast_host_jni PRIVATE ${WINDOWCAST_HOST_INCLUDE})
+target_link_libraries(windowcast_host_jni windowcast_host_android log)

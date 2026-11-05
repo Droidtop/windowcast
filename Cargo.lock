@@ -7446,6 +7446,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "windowcast-agent-android"
+version = "0.37.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+ "windowcast-host",
+ "windowcast-protocol",
+]
+
+[[package]]
 name = "windowcast-agent-linux"
 version = "0.37.0"
 dependencies = [
