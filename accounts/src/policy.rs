@@ -53,17 +53,32 @@ pub struct Decision {
     pub windows: Vec<String>,
     pub input: Option<bool>,
     pub commands: Option<bool>,
+    /// The host application's own limit for this one device, on top of
+    /// the policy's: window globs it may see, empty for no limit
+    /// ([`Decision::limited_to`], Droidtop/tracker#116). A window must
+    /// pass both.
+    pub device_windows: Vec<String>,
 }
 
 impl Decision {
     /// Whether a window with this app id and title may be listed,
     /// streamed and given input.
     pub fn window_allowed(&self, app_id: &str, title: &str) -> bool {
-        self.windows.is_empty()
-            || self
-                .windows
-                .iter()
-                .any(|pattern| glob(pattern, app_id) || glob(pattern, title))
+        let passes = |globs: &[String]| {
+            globs.is_empty()
+                || globs
+                    .iter()
+                    .any(|pattern| glob(pattern, app_id) || glob(pattern, title))
+        };
+        passes(&self.windows) && passes(&self.device_windows)
+    }
+
+    /// This decision, with the device further limited to the windows
+    /// `globs` match (app id or title), as a host application sets it for
+    /// one device. Empty takes the limit away.
+    pub fn limited_to(mut self, globs: &[String]) -> Self {
+        self.device_windows = globs.to_vec();
+        self
     }
 }
 
@@ -77,6 +92,7 @@ impl Policy {
                 windows: Vec::new(),
                 input: None,
                 commands: None,
+                device_windows: Vec::new(),
             };
         }
         let rule = self.rules.iter().find(|rule| {
@@ -89,12 +105,14 @@ impl Policy {
                 windows: rule.windows.clone(),
                 input: rule.input,
                 commands: rule.commands,
+                device_windows: Vec::new(),
             },
             None => Decision {
                 allow: false,
                 windows: Vec::new(),
                 input: Some(false),
                 commands: Some(false),
+                device_windows: Vec::new(),
             },
         }
     }
@@ -252,5 +270,30 @@ mod tests {
         assert_eq!(policy.rules.len(), 3);
         assert!(policy.rules[0].allow);
         assert!(!policy.rules[2].allow);
+    }
+}
+
+#[cfg(test)]
+mod device_limit_tests {
+    use super::*;
+
+    #[test]
+    fn a_device_limit_narrows_the_policy_and_both_must_pass() {
+        let open = Policy::default().decide(None, "host");
+        assert!(open.window_allowed("notepad.exe", "Untitled"));
+        let limited = open.clone().limited_to(&["sandustry*".to_string()]);
+        assert!(limited.window_allowed("Sandustry.exe", "Sandustry"));
+        assert!(!limited.window_allowed("notepad.exe", "Untitled"));
+        // A policy that allows only notepad and a limit to the game: nothing passes both.
+        let mut notepad = open.clone();
+        notepad.windows = vec!["notepad*".into()];
+        assert!(!notepad
+            .clone()
+            .limited_to(&["sandustry*".to_string()])
+            .window_allowed("notepad.exe", "Untitled"));
+        // Empty takes the limit away.
+        assert!(limited
+            .limited_to(&[])
+            .window_allowed("notepad.exe", "Untitled"));
     }
 }
