@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The reference app's client role shows streams on Linux (Droidtop/tracker#615): each streamed window opens as a
+  Wayland window of its own (xdg-shell), H.264 decoded by OpenH264 into `wl_shm` buffers, with pointer, wheel and
+  keys going to the host while input is on. Before, Linux said "this platform has no native stream window yet".
+  It is the client inside droidtop's Linux container for the Android host.
+
+### Added
 - `windowcast_discovery::macs::local()`: this computer's hardware addresses for Wake-on-LAN (Linux sysfs, Windows
   `getmac`), shown in the reference app's host window (Droidtop/tracker#113). Not sent over the wire.
 

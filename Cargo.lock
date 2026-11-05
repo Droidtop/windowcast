@@ -7575,7 +7575,11 @@ name = "windowcast-client-windows"
 version = "0.37.0"
 dependencies = [
  "audiopus_sys",
+ "openh264",
  "opus",
+ "rustix 1.1.4",
+ "wayland-client",
+ "wayland-protocols",
  "windowcast-client-core",
  "windowcast-protocol",
  "windows 0.62.2",

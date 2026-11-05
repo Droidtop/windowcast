@@ -13,6 +13,13 @@ license.workspace = true
 windowcast-protocol = { path = "../protocol" }
 windowcast-client-core = { path = "../client-core" }
 
+# The Linux stream window: Wayland (xdg-shell, wl_shm) and OpenH264.
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+rustix = { version = "1", features = ["fs", "mm"] }
+openh264 = "0.9"
+
 [target.'cfg(windows)'.dependencies]
 # Opus for window audio (BSD-3-Clause), libopus built from source.
 opus = "0.3"

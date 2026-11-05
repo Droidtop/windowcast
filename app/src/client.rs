@@ -31,7 +31,7 @@ struct Stream {
     /// Compatibility mode: how third-party clients reach the window, or
     /// why it was refused; `None` while off.
     compatibility: Option<(Vec<String>, Option<String>)>,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     window: Option<windowcast_client_windows::StreamWindow>,
 }
 
@@ -45,13 +45,13 @@ impl Stream {
             shared: Arc::default(),
             quality: None,
             compatibility: None,
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             window: None,
         }
     }
 
     fn close_window(&mut self) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         if let Some(mut window) = self.window.take() {
             window.close();
         }
@@ -773,7 +773,7 @@ impl ClientRole {
         });
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn open_window(
         &self,
         session: &Arc<ClientSession>,
@@ -815,7 +815,7 @@ impl ClientRole {
         ));
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     fn open_window(
         &self,
         _: &Arc<ClientSession>,
