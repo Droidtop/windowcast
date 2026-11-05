@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-11-05
+
 ### Changed
 - IronRDP comes from its repository at master (`f96f664abf0b`), on `sspi` 0.23.1 and `winscard` 0.4.1 as published, instead
   of patched copies of `ironrdp-connector` 0.10, `sspi` 0.21.3 and `winscard` 0.3.4 under `vendor/`, which are gone.
