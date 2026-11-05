@@ -3,7 +3,6 @@ package dev.windowcast.viewer
 import dev.windowcast.Letterbox
 import android.app.Activity
 import android.app.AlertDialog
-import android.app.Dialog
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -29,7 +28,6 @@ import android.widget.ScrollView
 import android.widget.TextView
 import dev.windowcast.AudioPlayer
 import dev.windowcast.CarrierSwitcher
-import dev.windowcast.Codec
 import dev.windowcast.ConnectRequest
 import dev.windowcast.Event
 import dev.windowcast.EventPump
@@ -41,7 +39,6 @@ import dev.windowcast.WatchSet
 import dev.windowcast.WindowDecoder
 import dev.windowcast.WindowRenderer
 import dev.windowcast.WindowInfo
-import dev.windowcast.WindowLayout
 import dev.windowcast.WindowRenderers
 import dev.windowcast.InputAdapter
 import dev.windowcast.WindowcastClient
@@ -161,23 +158,26 @@ class MainActivity : Activity() {
     private val session: WindowcastSession? get() = sessions.session
     private var decoder: WindowRenderer? = null
 
-    /** A shown window's dialog, popup or menu, in a floating window of its own. */
-    private class PopupView(val dialog: Dialog, var renderer: WindowRenderer?)
-
-    /** The open popups, by window id. */
-    private val popups = mutableMapOf<Long, PopupView>()
-
     /** Which windows are showing, and what asking to watch one does (docs/ANDROID-VIEWER.md). */
     private val watchSet = WatchSet()
 
-    /**
-     * A window watched beside the one that fills the screen: a floating window with its own
-     * surface, decoder and sound, kept until it is closed, the host closes the window, or the
-     * session ends.
-     */
-    private class StreamWindow(val dialog: Dialog, var renderer: WindowRenderer?, var audio: AudioPlayer?)
-
-    private val extras = mutableMapOf<Long, StreamWindow>()
+    /** The windows shown floating beside the one that fills the screen: popups and extras. */
+    private val floating by lazy {
+        StreamWindows(
+            this,
+            worker,
+            watchSet,
+            object : StreamWindows.Host {
+                override val session: WindowcastSession? get() = this@MainActivity.session
+                override val windows: List<WindowInfo> get() = this@MainActivity.windows
+                override val watching: WindowInfo? get() = this@MainActivity.watching
+                override val ownerSurface: SurfaceView? get() = if (this@MainActivity::surface.isInitialized) surface else null
+                override fun touch(window: Long, view: View, event: MotionEvent) = touchWindow(window, view, event)
+                override fun send(input: Input) = this@MainActivity.send(input)
+                override fun streamKey(event: KeyEvent) = this@MainActivity.streamKey(event)
+            },
+        )
+    }
     private var audio: AudioPlayer? = null
     @Volatile private var soundPackets = 0L
     private var windows: List<WindowInfo> = emptyList()
@@ -472,7 +472,7 @@ class MainActivity : Activity() {
         val c = client ?: return
         status.text = progress
         // Windows watched beside the others belong to the session being replaced.
-        closeStreamWindows(notifyHost = false)
+        floating.closeExtras(notifyHost = false)
         worker.execute {
             try {
                 lateinit var done: (WindowcastSession) -> String
@@ -539,10 +539,8 @@ class MainActivity : Activity() {
                     // library opened as it appeared.
                     if (event.window == watching?.id) {
                         startDecoding(event)
-                    } else if (watchSet.isExtra(event.window)) {
-                        openStreamWindow(event)
                     } else {
-                        openPopup(event)
+                        floating.opened(event)
                     }
                 }
             }
@@ -582,9 +580,7 @@ class MainActivity : Activity() {
 
             override fun onStreamStopped(event: Event.StreamStopped) {
                 main.post {
-                    if (popups.containsKey(event.window)) closePopup(event.window)
-                    else if (extras.containsKey(event.window)) closeStreamWindow(event.window, notifyHost = false)
-                    else if (event.window == watching?.id) stopDecoding()
+                    if (!floating.stopped(event.window) && event.window == watching?.id) stopDecoding()
                 }
             }
 
@@ -655,7 +651,7 @@ class MainActivity : Activity() {
                 main.post {
                     status.text = "Disconnected"
                     stopMicrophone()
-                    closeStreamWindows(notifyHost = false)
+                    floating.closeExtras(notifyHost = false)
                     stopDecoding()
                 }
             }
@@ -1037,7 +1033,7 @@ class MainActivity : Activity() {
     private fun streaming(): Boolean = surface.visibility == View.VISIBLE && watching != null
 
     /** Whether any window is showing, filling the screen or beside it. */
-    private fun streamingAny(): Boolean = streaming() || extras.isNotEmpty()
+    private fun streamingAny(): Boolean = streaming() || floating.anyExtra
 
     private fun send(input: Input) {
         val s = session ?: return
@@ -1078,181 +1074,6 @@ class MainActivity : Activity() {
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
         if (streaming() && gamepads.onMotion(event)) return true
         return super.dispatchGenericMotionEvent(event)
-    }
-
-    /**
-     * Shows a window the watched one owns (a dialog, popup or menu) in a floating window of
-     * its own, at its own size as far as the screen allows; taps on it go to it.
-     */
-    private fun openPopup(event: Event.StreamStarted) {
-        val s = session ?: return
-        val info = windows.firstOrNull { it.id == event.window } ?: return
-        if (popups.containsKey(event.window)) return
-        val view = SurfaceView(this)
-        val dialog = Dialog(this)
-        val popup = PopupView(dialog, null)
-        popups[event.window] = popup
-        dialog.setTitle("${info.title} (${info.kind})")
-        dialog.setContentView(view)
-        sizeStreamWindow(dialog, info.width, info.height)
-        placeAgainstOwner(dialog, info)
-        view.setOnTouchListener { v, e -> touchWindow(event.window, v, e) }
-        dialog.setOnDismissListener {
-            // Closed here (Back, a tap outside): the host stops sending it.
-            if (popups.remove(event.window) != null) {
-                popup.renderer?.let { r -> worker.execute { r.stop() } }
-                worker.execute { s.stopWindow(event.window) }
-            }
-        }
-        view.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) {
-                popup.renderer = WindowRenderers.create(s, info, event.backend, event.codec, holder).also { it.start() }
-            }
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-            override fun surfaceDestroyed(holder: SurfaceHolder) {
-                popup.renderer?.let { r -> worker.execute { r.stop() } }
-                popup.renderer = null
-            }
-        })
-        dialog.show()
-    }
-
-    /**
-     * Puts a popup's floating window where it is on the host against its owner, as the owner is
-     * shown on screen now (the watched window's surface), when the host gives both positions.
-     */
-    private fun placeAgainstOwner(dialog: Dialog, info: WindowInfo) {
-        val owner = windows.firstOrNull { it.id == info.owner } ?: return
-        if (owner.id != watching?.id || surface.visibility != View.VISIBLE) return
-        val origin = IntArray(2)
-        surface.getLocationOnScreen(origin)
-        val box = WindowLayout.againstOwner(info, owner, origin[0], origin[1], surface.width, surface.height) ?: return
-        val attributes = dialog.window?.attributes ?: return
-        attributes.gravity = android.view.Gravity.TOP or android.view.Gravity.START
-        attributes.x = box.x
-        attributes.y = box.y
-        attributes.width = box.width
-        attributes.height = box.height
-        dialog.window?.attributes = attributes
-    }
-
-    /** The host stopped a popup (it closed): its floating window goes. */
-    private fun closePopup(window: Long) {
-        val popup = popups.remove(window) ?: return
-        popup.renderer?.let { r -> worker.execute { r.stop() } }
-        popup.dialog.dismiss()
-    }
-
-    /**
-     * Opens a window watched beside the one that fills the screen as a floating window of its
-     * own: its own surface, decoder and sound, with buttons to type into it and to close it. It
-     * stays until the user closes it (Close, or Back), the host closes the window, or the
-     * session ends. It is not closed when the full-screen window is.
-     */
-    private fun openStreamWindow(event: Event.StreamStarted) {
-        val s = session ?: return
-        val info = windows.firstOrNull { it.id == event.window }
-        if (info == null) {
-            watchSet.extraEnded(event.window)
-            return
-        }
-        if (extras.containsKey(event.window)) return
-        val view = StreamSurfaceView(this) { send(Input.text(it)) }
-        view.setOnTouchListener { v, e -> touchWindow(event.window, v, e) }
-        val dialog = object : Dialog(this@MainActivity) {
-            // Keys typed while this window is up go to the host like any others; Back closes it.
-            override fun dispatchKeyEvent(e: KeyEvent): Boolean =
-                (e.keyCode != KeyEvent.KEYCODE_BACK && streamKey(e)) || super.dispatchKeyEvent(e)
-        }
-        val buttons = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            addView(
-                Button(this@MainActivity).apply {
-                    text = "Keyboard"
-                    setOnClickListener { showKeyboard(view) }
-                },
-                WRAP_CONTENT,
-                WRAP_CONTENT,
-            )
-            addView(
-                Button(this@MainActivity).apply {
-                    text = "Close"
-                    setOnClickListener { dialog.dismiss() }
-                },
-                WRAP_CONTENT,
-                WRAP_CONTENT,
-            )
-        }
-        val content = FrameLayout(this).apply {
-            addView(view, MATCH_PARENT, MATCH_PARENT)
-            addView(
-                buttons,
-                FrameLayout.LayoutParams(
-                    WRAP_CONTENT,
-                    WRAP_CONTENT,
-                    android.view.Gravity.TOP or android.view.Gravity.END,
-                ),
-            )
-        }
-        val shown = StreamWindow(dialog, null, null)
-        extras[event.window] = shown
-        dialog.setTitle(info.title)
-        dialog.setContentView(content)
-        dialog.setCanceledOnTouchOutside(false)
-        sizeStreamWindow(dialog, info.width, info.height)
-        // The keyboard covers the bottom of the window instead of pushing it about.
-        dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
-        dialog.setOnDismissListener {
-            // Closed here (Close, Back): stop it and tell the host. A window the host closed, or
-            // one closed with the session, left the map first, so this does nothing for them.
-            if (extras.remove(event.window) != null) {
-                watchSet.extraEnded(event.window)
-                release(shown)
-                worker.execute { s.stopWindow(event.window) }
-            }
-        }
-        view.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) {
-                shown.renderer = WindowRenderers.create(s, info, event.backend, event.codec, holder).also { it.start() }
-            }
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-            override fun surfaceDestroyed(holder: SurfaceHolder) {
-                shown.renderer?.let { r -> worker.execute { r.stop() } }
-                shown.renderer = null
-            }
-        })
-        shown.audio = AudioPlayer(s, event.window).also { it.start() }
-        dialog.show()
-    }
-
-    /** Stops what a floating stream window is running; the window itself is not touched. */
-    private fun release(shown: StreamWindow) {
-        shown.renderer?.let { r -> worker.execute { r.stop() } }
-        shown.renderer = null
-        shown.audio?.let { a -> worker.execute { a.stop() } }
-        shown.audio = null
-    }
-
-    /** Closes one floating stream window; with [notifyHost] the host is told to stop sending it. */
-    private fun closeStreamWindow(window: Long, notifyHost: Boolean) {
-        val shown = extras.remove(window) ?: return
-        watchSet.extraEnded(window)
-        release(shown)
-        shown.dialog.dismiss()
-        if (notifyHost) session?.let { s -> worker.execute { s.stopWindow(window) } }
-    }
-
-    /** Closes every floating stream window: the session they belong to is ending or gone. */
-    private fun closeStreamWindows(notifyHost: Boolean) {
-        for (window in extras.keys.toList()) closeStreamWindow(window, notifyHost)
-        watchSet.clear()
-    }
-
-    /** Brings up the soft keyboard for [view], a stream's surface. */
-    private fun showKeyboard(view: View) {
-        view.requestFocus()
-        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-        imm.showSoftInput(view, 0)
     }
 
     /** Lists the host's windows not yet showing, and watches the one picked beside the others. */
@@ -1357,7 +1178,7 @@ class MainActivity : Activity() {
     private fun stopDecoding() {
         cancelSwitch()
         // A watched window's popups go with it.
-        for (window in popups.keys.toList()) closePopup(window)
+        floating.closePopups()
         gamepads.releaseAll()
         decoder?.let { d -> worker.execute { d.stop() } }
         decoder = null
@@ -1398,14 +1219,7 @@ class MainActivity : Activity() {
                 lastCursor?.let { showPointer(it) }
             }
         }
-        extras[event.window]?.let { sizeStreamWindow(it.dialog, event.width, event.height) }
-    }
-
-    /** Sizes a floating stream window to a [width] by [height] picture, shrunk to fit the screen. */
-    private fun sizeStreamWindow(dialog: Dialog, width: Int, height: Int) {
-        val screen = resources.displayMetrics
-        val (w, h) = WindowLayout.floatingSize(width, height, screen.widthPixels, screen.heightPixels)
-        dialog.window?.setLayout(w, h)
+        floating.resized(event)
     }
 
     /** What the status line says when nothing is going on, so no old message outlives its screen. */
@@ -1492,8 +1306,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        val extraIds = extras.keys.toList()
-        closeStreamWindows(notifyHost = false)
+        val extraIds = floating.extraIds
+        floating.closeExtras(notifyHost = false)
         clipboardListener?.let { clipboard.removePrimaryClipChangedListener(it) }
         inputWorker.shutdown()
         // Sign-in waits end with the activity, and nothing it posted runs after.
