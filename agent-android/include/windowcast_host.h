@@ -17,6 +17,8 @@ typedef struct AndroidHost WindowcastAndroidHost;
 WindowcastAndroidHost *windowcast_android_host_start(const char *data_dir, const char *listen, bool pairing,
                                                      char *error, size_t error_cap);
 void windowcast_android_host_free(WindowcastAndroidHost *host);
+/* The host's windowcast id (hex), which a client pins; its length. */
+int64_t windowcast_android_host_id(const WindowcastAndroidHost *host, char *out, size_t cap);
 /* The app windows now, as JSON [{"id","title","package","width","height"}]. 0, or -1. */
 int64_t windowcast_android_host_set_windows(const WindowcastAndroidHost *host, const char *json);
 /* The codecs the device encodes (1 H.264, 2 H.265, 3 AV1), most preferred first. */

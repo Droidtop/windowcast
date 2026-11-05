@@ -9,6 +9,7 @@ internal object HostNative {
 
     @JvmStatic external fun start(dataDir: String, listen: String, pairing: Boolean): Long
     @JvmStatic external fun lastError(): String
+    @JvmStatic external fun id(host: Long): String
     @JvmStatic external fun free(host: Long)
     @JvmStatic external fun setWindows(host: Long, json: String): Long
     @JvmStatic external fun setEncoders(host: Long, codecs: IntArray)
