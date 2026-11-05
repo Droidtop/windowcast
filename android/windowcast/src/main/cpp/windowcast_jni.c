@@ -131,6 +131,27 @@ Java_dev_windowcast_Native_stopWindow(JNIEnv *env, jclass cls, jlong session, jl
     return windowcast_session_stop_window(SESSION(session), (uint64_t)window);
 }
 
+/* Local recording of a shown window; 0, or WINDOWCAST_ERROR with the reason in lastError. */
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_startRecording(JNIEnv *env, jclass cls, jlong session, jlong window,
+                                          jstring path, jint width, jint height) {
+    const char *file = (*env)->GetStringUTFChars(env, path, NULL);
+    last_error[0] = 0;
+    int64_t result = windowcast_session_start_recording(SESSION(session), (uint64_t)window, file,
+                                                        (uint32_t)width, (uint32_t)height,
+                                                        last_error, sizeof last_error);
+    (*env)->ReleaseStringUTFChars(env, path, file);
+    return result;
+}
+
+/* Ends a window's recording: its frames, or WINDOWCAST_ERROR with the reason in lastError. */
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_Native_stopRecording(JNIEnv *env, jclass cls, jlong session, jlong window) {
+    last_error[0] = 0;
+    return windowcast_session_stop_recording(SESSION(session), (uint64_t)window, last_error,
+                                             sizeof last_error);
+}
+
 JNIEXPORT jlong JNICALL
 Java_dev_windowcast_Native_sendInput(JNIEnv *env, jclass cls, jlong session, jstring json) {
     const char *chars = (*env)->GetStringUTFChars(env, json, NULL);

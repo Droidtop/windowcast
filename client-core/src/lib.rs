@@ -17,6 +17,7 @@ mod command;
 pub mod ffi;
 pub mod ffi_terminal;
 pub mod files;
+pub mod recording;
 mod selector;
 
 pub use command::SshSession;
@@ -982,6 +983,8 @@ pub struct ClientSession {
     selection: Mutex<(HashMap<WindowId, selector::Window>, Option<Instant>)>,
     /// Frames each window's video has handed out, for the selector.
     frames_seen: Mutex<HashMap<WindowId, u64>>,
+    /// The windows being recorded here (Droidtop/tracker#429).
+    recordings: Mutex<HashMap<WindowId, recording::Recording>>,
 }
 
 impl ClientSession {
@@ -1046,6 +1049,7 @@ impl ClientSession {
             auto_switch: AtomicBool::new(true),
             selection: Mutex::default(),
             frames_seen: Mutex::default(),
+            recordings: Mutex::default(),
         }
     }
 
@@ -1602,6 +1606,41 @@ impl ClientSession {
         }
     }
 
+    /// Starts recording `window` into `path` (Droidtop/tracker#429): the
+    /// frames and sound this session hands out from now on are also written
+    /// there as received, from the next keyframe. `width` and `height` are
+    /// the window's, as listed. A window already recorded keeps its
+    /// recording.
+    pub fn start_recording(
+        &self,
+        window: WindowId,
+        path: &Path,
+        width: u32,
+        height: u32,
+    ) -> Result<(), ClientError> {
+        let mut recordings = self.recordings.lock().expect("recordings");
+        if recordings.contains_key(&window) {
+            return Ok(());
+        }
+        let started = recording::Recording::start(path.to_path_buf(), width, height)?;
+        recordings.insert(window, started);
+        // The file starts at a keyframe: ask for one rather than wait for the next.
+        self.request_keyframe(window);
+        Ok(())
+    }
+
+    /// Ends `window`'s recording and finishes its file: how many frames it
+    /// holds. A window not being recorded has none.
+    pub fn stop_recording(&self, window: WindowId) -> Result<u64, ClientError> {
+        let recording = self.recordings.lock().expect("recordings").remove(&window);
+        match recording {
+            Some(r) => r
+                .stop()
+                .map_err(|why| ClientError::Io(std::io::Error::other(why))),
+            None => Ok(0),
+        }
+    }
+
     /// The next frame of `window`, waiting up to `timeout`.
     pub fn next_frame(&self, window: WindowId, timeout: Duration) -> FramePoll {
         let Some(slot) = self.shared.existing_slot(window) else {
@@ -1619,6 +1658,9 @@ impl ClientSession {
                     .expect("frames seen")
                     .entry(window)
                     .or_insert(0) += 1;
+                if let Some(recording) = self.recordings.lock().expect("recordings").get(&window) {
+                    recording.video(&frame);
+                }
                 FramePoll::Frame(frame)
             }
             Err(RecvTimeoutError::Timeout) => FramePoll::Timeout,
@@ -1653,7 +1695,12 @@ impl ClientSession {
         };
         let received = queue.lock().expect("audio queue").recv_timeout(timeout);
         match received {
-            Ok(packet) => AudioPoll::Packet(packet),
+            Ok(packet) => {
+                if let Some(recording) = self.recordings.lock().expect("recordings").get(&window) {
+                    recording.audio(&packet);
+                }
+                AudioPoll::Packet(packet)
+            }
             Err(RecvTimeoutError::Timeout) => AudioPoll::Timeout,
             Err(RecvTimeoutError::Disconnected) => {
                 let mut audio = self.shared.audio.lock().expect("audio");

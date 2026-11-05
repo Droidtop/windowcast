@@ -7566,6 +7566,7 @@ dependencies = [
  "windowcast-identity",
  "windowcast-protocol",
  "windowcast-rdp",
+ "windowcast-record",
  "windowcast-terminal",
  "windowcast-transport",
 ]

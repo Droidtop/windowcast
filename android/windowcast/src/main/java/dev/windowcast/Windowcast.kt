@@ -367,6 +367,30 @@ class WindowcastSession internal constructor(handle: Long) : Closeable, HostedSe
         withHandle(Unit) { Native.stopWindow(it, window) }
     }
 
+    /**
+     * Starts recording [window] into [file] (Droidtop/tracker#429): its frames and sound as
+     * received, with no decoding or encoding, in Matroska, from the next keyframe. [width] and
+     * [height] are the window's, as listed. Only H.264 windows can be recorded yet. Blocks on the
+     * file: never on the main thread.
+     */
+    @Throws(IOException::class)
+    fun startRecording(window: Long, file: java.io.File, width: Int, height: Int) {
+        val result = withHandle(Native.ERROR) { Native.startRecording(it, window, file.path, width, height) }
+        if (result < 0) throw IOException(if (isOpen) Native.lastError() else "the session is closed")
+    }
+
+    /**
+     * Ends [window]'s recording and finishes its file: the frames in it (0 when it was not being
+     * recorded). Throws with the reason when the recording failed (a codec that cannot be recorded,
+     * a full disk). Blocks until the file is written: never on the main thread.
+     */
+    @Throws(IOException::class)
+    fun stopRecording(window: Long): Long {
+        val result = withHandle(Native.ERROR) { Native.stopRecording(it, window) }
+        if (result < 0) throw IOException(if (isOpen) Native.lastError() else "the session is closed")
+        return result
+    }
+
     /** Sends one input event (see [Input]). */
     fun send(input: Input) {
         withHandle(Unit) { Native.sendInput(it, input.json) }
