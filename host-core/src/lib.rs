@@ -1580,7 +1580,8 @@ impl Host {
 
     /// Whether policy lets this session stream `window`.
     async fn window_allowed(&self, decision: &Decision, window: WindowId) -> bool {
-        if decision.windows.is_empty() {
+        // No limit at all, neither the policy's nor the application's for this device.
+        if decision.windows.is_empty() && decision.device_windows.is_empty() {
             return true;
         }
         let source = Arc::clone(&self.source);
@@ -2730,5 +2731,73 @@ mod announce_tests {
         control.set_announce(None);
         assert!(control.beacon(47100).is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod limit_on_start_tests {
+    use super::*;
+
+    /// One window, for the stream-start check.
+    struct Notepad;
+
+    impl WindowSource for Notepad {
+        fn list_windows(&self) -> Vec<WindowInfo> {
+            vec![WindowInfo {
+                id: WindowId(5),
+                title: "Untitled".into(),
+                app_id: "notepad.exe".into(),
+                width: 640,
+                height: 480,
+                focused: true,
+                content: windowcast_protocol::ContentHint::Text,
+                owner: None,
+                kind: windowcast_protocol::WindowKind::Normal,
+                position: None,
+            }]
+        }
+        fn encoders(&self) -> Vec<VideoCodec> {
+            vec![VideoCodec::H264]
+        }
+        fn open(&self, _: WindowId, _: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
+            Err("not in this test".into())
+        }
+    }
+
+    /// Starting a stream honours a device's limit, not only listing
+    /// (Droidtop/tracker#116): with the policy open, the device's own limit
+    /// still refuses a window outside it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_device_limit_refuses_a_stream_outside_it() {
+        let dir =
+            std::env::temp_dir().join(format!("windowcast-limit-start-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let control = HostControl::open(&HostConfig {
+            listen: "127.0.0.1:0".into(),
+            pairing: false,
+            data_dir: dir.clone(),
+        })
+        .unwrap();
+        let viewer = Identity::generate().peer_id();
+        let host = Host {
+            control: Arc::clone(&control),
+            source: Arc::new(Notepad),
+        };
+        assert!(
+            host.window_allowed(&control.decision(&viewer), WindowId(5))
+                .await
+        );
+        control.limit_device(viewer, vec!["Sandustry*".into()]);
+        assert!(
+            !host
+                .window_allowed(&control.decision(&viewer), WindowId(5))
+                .await
+        );
+        control.limit_device(viewer, vec!["notepad*".into()]);
+        assert!(
+            host.window_allowed(&control.decision(&viewer), WindowId(5))
+                .await
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
