@@ -8,11 +8,12 @@
 //! trait.
 
 use std::mem::ManuallyDrop;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Once;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windowcast_protocol::VideoCodec;
-use windows::core::{Interface, GUID};
+use windows::core::{implement, Interface, GUID};
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Variant::VARIANT;
@@ -341,11 +342,91 @@ fn configure(api: &ICodecAPI, fps: u32) -> Vec<&'static str> {
         .collect()
 }
 
+/// Hands each event an asynchronous MFT raises to the encoding thread
+/// (Droidtop/tracker#760): Media Foundation calls [`IMFAsyncCallback::Invoke`]
+/// on its own work queue when the event `BeginGetEvent` asked for is there,
+/// and the thread waits on the channel with a timeout instead of polling
+/// `GetEvent` with `MF_EVENT_FLAG_NO_WAIT` every millisecond.
+#[implement(IMFAsyncCallback)]
+struct EventArrived {
+    generator: IMFMediaEventGenerator,
+    arrived: Sender<windows::core::Result<IMFMediaEvent>>,
+}
+
+impl IMFAsyncCallback_Impl for EventArrived_Impl {
+    fn GetParameters(&self, _flags: *mut u32, _queue: *mut u32) -> windows::core::Result<()> {
+        // The default work queue and behaviour.
+        Err(windows::Win32::Foundation::E_NOTIMPL.into())
+    }
+
+    fn Invoke(&self, result: windows::core::Ref<'_, IMFAsyncResult>) -> windows::core::Result<()> {
+        let event = result
+            .ok()
+            .and_then(|r| unsafe { self.generator.EndGetEvent(r) });
+        // The encoder may be gone (its stream ended): nobody waits then.
+        let _ = self.arrived.send(event);
+        Ok(())
+    }
+}
+
+/// An asynchronous MFT's events: one `BeginGetEvent` outstanding at a time,
+/// its answer on `arrived`. An event asked for in one `encode` and not yet
+/// come is waited for in the next, so none is lost.
+struct AsyncEvents {
+    generator: IMFMediaEventGenerator,
+    callback: IMFAsyncCallback,
+    arrived: Receiver<windows::core::Result<IMFMediaEvent>>,
+    asked: bool,
+}
+
+impl AsyncEvents {
+    fn new(generator: IMFMediaEventGenerator) -> Self {
+        let (sender, arrived) = mpsc::channel();
+        let callback: IMFAsyncCallback = EventArrived {
+            generator: generator.clone(),
+            arrived: sender,
+        }
+        .into();
+        AsyncEvents {
+            generator,
+            callback,
+            arrived,
+            asked: false,
+        }
+    }
+
+    /// The next event, waiting until `deadline`; `None` when none came by then.
+    fn next(&mut self, deadline: Instant) -> windows::core::Result<Option<IMFMediaEvent>> {
+        if !self.asked {
+            unsafe { self.generator.BeginGetEvent(&self.callback, None)? };
+            self.asked = true;
+        }
+        match self
+            .arrived
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            Ok(event) => {
+                self.asked = false;
+                event.map(Some)
+            }
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            // The callback is held by the generator while it is outstanding; it
+            // is never dropped while asked, so this is only after a shutdown.
+            Err(RecvTimeoutError::Disconnected) => Ok(None),
+        }
+    }
+}
+
+/// How long, once a picture's output is in hand, the encoder waits for an
+/// event Media Foundation already has: the callback's dispatch, not the
+/// encoder's work.
+const TAKE_QUEUED: Duration = Duration::from_millis(2);
+
 /// A Media Foundation encoder MFT, synchronous (Microsoft's) or
 /// asynchronous (every hardware one).
 struct MfEncoder {
     transform: IMFTransform,
-    events: Option<IMFMediaEventGenerator>,
+    events: Option<AsyncEvents>,
     codec_api: Option<ICodecAPI>,
     input_id: u32,
     output_id: u32,
@@ -400,11 +481,11 @@ impl MfEncoder {
                     attributes
                         .SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)
                         .map_err(err("unlock"))?;
-                    events = Some(
+                    events = Some(AsyncEvents::new(
                         transform
                             .cast::<IMFMediaEventGenerator>()
                             .map_err(err("events"))?,
-                    );
+                    ));
                 }
                 let _ = attributes.SetUINT32(&MF_LOW_LATENCY, 1);
             }
@@ -655,7 +736,7 @@ impl MfEncoder {
     /// after it (or what there is when the encoder holds on to it).
     fn encode_async(
         &mut self,
-        events: &IMFMediaEventGenerator,
+        events: &mut AsyncEvents,
         sample: &IMFSample,
     ) -> windows::core::Result<Vec<Vec<u8>>> {
         let mut given = false;
@@ -665,18 +746,21 @@ impl MfEncoder {
             given = true;
         }
         let mut out = Vec::new();
-        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        let deadline = Instant::now() + Duration::from_millis(500);
         loop {
-            let event = match unsafe { events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
-                Ok(event) => event,
-                Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => {
-                    if (given && !out.is_empty()) || std::time::Instant::now() >= deadline {
-                        return Ok(out);
-                    }
-                    std::thread::sleep(Duration::from_millis(1));
-                    continue;
-                }
-                Err(e) => return Err(e),
+            // Waits on Media Foundation's callback, not a 1 ms poll. Once this
+            // picture is in and some output came, only an event already there
+            // is taken (as `MF_EVENT_FLAG_NO_WAIT` did): an encoder whose
+            // pipeline holds this picture's output until the next one must not
+            // hold the stream up. Otherwise it waits until the deadline, and an
+            // encoder that gives nothing by then returns what there is.
+            let until = if given && !out.is_empty() {
+                Instant::now() + TAKE_QUEUED
+            } else {
+                deadline
+            };
+            let Some(event) = events.next(until)? else {
+                return Ok(out);
             };
             let kind = unsafe { event.GetType()? };
             if kind == METransformNeedInput.0 as u32 {
@@ -713,8 +797,12 @@ impl Encoder for MfEncoder {
             }
         }
         let sample = self.sample(picture, time)?;
-        match self.events.clone() {
-            Some(events) => self.encode_async(&events, &sample),
+        match self.events.take() {
+            Some(mut events) => {
+                let encoded = self.encode_async(&mut events, &sample);
+                self.events = Some(events);
+                encoded
+            }
             None => self.encode_sync(&sample),
         }
         .map_err(|e| e.to_string())
