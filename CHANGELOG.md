@@ -53,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remote description names it as the peer's one candidate, and the datagrams go through the `conduit::Conduit`
   queues. ICE, DTLS, the control channel and the media are unchanged. `Session::conduit_counts` says how many
   datagrams went each way.
+- `windowcast-record`: local recording (Droidtop/tracker#429). `Recorder` writes a watched window's H.264 frames and
+  its Opus sound into a Matroska file exactly as they arrived, with no decoding or encoding. It is written as it
+  goes, so a recording that is cut short still plays. Each stream is placed by the wall clock at its first packet,
+  then by its own RTP clock. H.265 and AV1 are refused with a reason for now.
 - `windowcast_discovery::macs::local()`: this computer's hardware addresses for Wake-on-LAN (Linux sysfs, Windows
   `getmac`), shown in the reference app's host window (Droidtop/tracker#113). Not sent over the wire.
 

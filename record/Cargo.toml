@@ -1,0 +1,18 @@
+[package]
+name = "windowcast-record"
+description = "Local recording: a watched window's video and sound written to a Matroska file as received, without re-encoding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "windowcast_record"
+path = "src/lib.rs"
+
+[dependencies]
+windowcast-protocol = { path = "../protocol" }
+thiserror.workspace = true
+
+[dev-dependencies]
+# Real Opus packets for the test that plays a recording back with ffprobe.
+opus = "0.3"
