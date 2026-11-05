@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- GameStream's control thread waits on its socket instead of waking every millisecond: traffic and a queued
+  message (a loopback datagram from the sender) wake it at once, and ENet's timers get a look every 10 ms at most
+  (Droidtop/tracker#760).
+
 ### Added
 - `windowcast_discovery::macs::local()`: this computer's hardware addresses for Wake-on-LAN (Linux sysfs, Windows
   `getmac`), shown in the reference app's host window (Droidtop/tracker#113). Not sent over the wire.
