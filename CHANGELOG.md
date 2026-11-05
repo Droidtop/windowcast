@@ -57,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its Opus sound into a Matroska file exactly as they arrived, with no decoding or encoding. It is written as it
   goes, so a recording that is cut short still plays. Each stream is placed by the wall clock at its first packet,
   then by its own RTP clock. H.265 and AV1 are refused with a reason for now.
+- Recording a shown window from a client: `ClientSession::start_recording` and `stop_recording`, in C
+  `windowcast_session_start_recording` and `windowcast_session_stop_recording`, and in the Android library
+  `WindowcastSession.startRecording` and `stopRecording`. What the session hands out is also written on a thread of
+  its own, so the decode thread never waits on the file, and a keyframe is asked for so the file starts at once.
 - `windowcast_discovery::macs::local()`: this computer's hardware addresses for Wake-on-LAN (Linux sysfs, Windows
   `getmac`), shown in the reference app's host window (Droidtop/tracker#113). Not sent over the wire.
 

@@ -401,6 +401,63 @@ pub unsafe extern "C" fn windowcast_session_stop_window(
     }
 }
 
+/// Starts recording `window` into the file at `path` (Droidtop/tracker#429):
+/// its frames and sound as received, from the next keyframe, in Matroska.
+/// `width` and `height` are the window's. Returns 0, or
+/// [`WINDOWCAST_ERROR`] with the reason in `error`.
+///
+/// # Safety
+/// `session` must be valid, `path` a NUL-terminated string, and `error`
+/// null or valid for `error_cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_start_recording(
+    session: *const ClientSession,
+    window: u64,
+    path: *const c_char,
+    width: u32,
+    height: u32,
+    error: *mut c_char,
+    error_cap: usize,
+) -> i64 {
+    let (Some(session), Some(path)) = (session.as_ref(), str_arg(path)) else {
+        write_text("no session or no file to record into", error, error_cap);
+        return WINDOWCAST_ERROR;
+    };
+    match session.start_recording(WindowId(window), std::path::Path::new(path), width, height) {
+        Ok(()) => 0,
+        Err(e) => {
+            write_text(&e.to_string(), error, error_cap);
+            WINDOWCAST_ERROR
+        }
+    }
+}
+
+/// Ends `window`'s recording and finishes its file. Returns the frames it
+/// holds (0 when it was not being recorded), or [`WINDOWCAST_ERROR`] with
+/// the reason in `error` (the codec cannot be recorded, the disk is full).
+///
+/// # Safety
+/// `session` must be valid, and `error` null or valid for `error_cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_session_stop_recording(
+    session: *const ClientSession,
+    window: u64,
+    error: *mut c_char,
+    error_cap: usize,
+) -> i64 {
+    let Some(session) = session.as_ref() else {
+        write_text("no session", error, error_cap);
+        return WINDOWCAST_ERROR;
+    };
+    match session.stop_recording(WindowId(window)) {
+        Ok(frames) => i64::try_from(frames).unwrap_or(i64::MAX),
+        Err(e) => {
+            write_text(&e.to_string(), error, error_cap);
+            WINDOWCAST_ERROR
+        }
+    }
+}
+
 /// Sends one input event, given as JSON in serde's form of
 /// `windowcast_protocol::InputEvent`, e.g.
 /// `{"PointerMove":{"window":7,"x":0.5,"y":0.25}}`,

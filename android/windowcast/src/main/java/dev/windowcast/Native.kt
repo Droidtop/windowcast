@@ -29,6 +29,8 @@ internal object Native {
     @JvmStatic external fun carrierShown(session: Long, window: Long, generation: Int): Long
     @JvmStatic external fun autoSwitch(session: Long, on: Boolean): Long
     @JvmStatic external fun stopWindow(session: Long, window: Long): Long
+    @JvmStatic external fun startRecording(session: Long, window: Long, path: String, width: Int, height: Int): Long
+    @JvmStatic external fun stopRecording(session: Long, window: Long): Long
     @JvmStatic external fun sendInput(session: Long, json: String): Long
     @JvmStatic external fun setClipboard(session: Long, text: String): Long
     @JvmStatic external fun nextEvent(session: Long, timeoutMs: Int): String?

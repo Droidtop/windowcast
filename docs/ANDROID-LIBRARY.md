@@ -22,6 +22,7 @@ belongs in the library, not in `MainActivity`.
 | Sign in with an account | `signInOptions` → `SignInPlan.of(options)` (confirmation, methods, words) → `connectAccount`; `SignInAttempts` for waiting sign-ins |
 | Open a host from another app | `ConnectRequest` (parses the link / intent contract of docs/ANDROID-VIEWER.md) |
 | Stream a window | `startWindow`, `switchWindow`, `stopWindow`; `WindowDecoder`, `WindowPictures` render |
+| Record a window (Droidtop/tracker#429) | `startRecording(window, file, width, height)`, `stopRecording(window)`: its frames and sound as received, no decode or encode, Matroska; H.264 only for now. Off the main thread |
 | Fit a picture, size and place a floating window or popup | `Letterbox.fit`, `WindowLayout.floatingSize`, `WindowLayout.againstOwner` (plain Kotlin; the client draws the result) |
 | Show a started stream | `WindowRenderers.create(session, event, window, holder)`: RDP pictures or decoded video by the stream's backend, one progress shape |
 | Touch and keys as input | `InputAdapter.touches(window, view, event)` and `InputAdapter.key(event)` (the rules are plain Kotlin and tested) |
