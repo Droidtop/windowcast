@@ -86,7 +86,7 @@ internal class InputInjector(context: Context, private val displayId: Int, priva
             if (downAt == 0L) now else downAt, now, action, 1, properties, coords, 0, buttons, 1f, 1f, 0, 0,
             InputDevice.SOURCE_MOUSE, 0,
         )
-        if (actionButton != 0) event.actionButton = actionButton
+        if (actionButton != 0) setActionButton(event, actionButton)
         send(event)
         if (action == MotionEvent.ACTION_UP) downAt = 0L
     }
@@ -152,5 +152,16 @@ internal class InputInjector(context: Context, private val displayId: Int, priva
 
         val injectInputEvent = InputManager::class.java.getMethod("injectInputEvent", InputEvent::class.java, Int::class.javaPrimitiveType)
         val setDisplayId = InputEvent::class.java.getMethod("setDisplayId", Int::class.javaPrimitiveType)
+
+        /** `MotionEvent.setActionButton` is hidden; a button press without it reads as no button. */
+        private val setActionButtonMethod = MotionEvent::class.java.getMethod("setActionButton", Int::class.javaPrimitiveType)
+
+        fun setActionButton(event: MotionEvent, button: Int) {
+            try {
+                setActionButtonMethod.invoke(event, button)
+            } catch (e: ReflectiveOperationException) {
+                android.util.Log.w("windowcast.AndroidHost", "button $button not set on its press", e)
+            }
+        }
     }
 }
