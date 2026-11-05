@@ -338,6 +338,36 @@ impl Client {
         Ok(self.started(established, host_ip))
     }
 
+    /// Connects over a signaling stream another program carries, with the
+    /// session's datagrams through `conduit` (Droidtop/tracker#113):
+    /// droidtop-agent's WireGuard tunnel, its side link and its datagrams.
+    /// Only a host this client already trusts: no PIN over it. Backends with
+    /// their own connection (RDP) are not offered, as away from the LAN.
+    pub fn connect_over<S>(
+        &self,
+        stream: S,
+        conduit: windowcast_transport::conduit::Conduit,
+    ) -> Result<ClientSession, ClientError>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+    {
+        let trusted = self.trust.lock().expect("trust store").clone();
+        let identity = Arc::clone(&self.identity);
+        let established = self.runtime.block_on(async {
+            let session = Session::over_conduit(conduit).await?;
+            Ok::<_, ClientError>(
+                connect(
+                    stream,
+                    session,
+                    &identity,
+                    ClientCredential::Pinned(&trusted),
+                )
+                .await?,
+            )
+        })?;
+        Ok(self.started(established, None))
+    }
+
     /// One connection attempt: pairing with `pin`, or resuming when there is none.
     fn connect_once(
         &self,

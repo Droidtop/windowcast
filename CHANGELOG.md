@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `serve_over` (host) and `WindowcastClient::connect_over` (client): one session over a signaling stream and a
+  conduit another program carries (Droidtop/tracker#113), as droidtop-agent's WireGuard tunnel carries them (its side
+  link and its datagrams). Only a host or client already trusted gets in; there is no PIN pairing over it.
+
 ## [0.38.0] - 2026-11-05
 
 ### Changed
