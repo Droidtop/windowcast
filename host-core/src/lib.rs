@@ -904,6 +904,27 @@ pub async fn serve(
     serve_with(listener, control, source).await
 }
 
+/// Serves one client over a signaling stream another program carries, with
+/// the session's datagrams through `conduit` (Droidtop/tracker#113): droidtop-
+/// agent's WireGuard tunnel, its side link for the signaling and its datagrams
+/// for the media, so the agent's tunnel is also the streaming tunnel. Only a
+/// client the host already trusts gets in: no PIN pairing over it. Ends when
+/// the session does.
+pub async fn serve_over<S>(
+    stream: S,
+    address: String,
+    control: Arc<HostControl>,
+    source: Arc<dyn WindowSource>,
+    conduit: windowcast_transport::conduit::Conduit,
+) -> Result<(), TransportError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let host = Arc::new(Host { control, source });
+    let session = Session::over_conduit(conduit).await?;
+    host.serve_session(stream, address, session, false).await
+}
+
 /// Runs a host on an already bound listener, watched and steered through
 /// `control`.
 pub async fn serve_with(
@@ -2730,5 +2751,115 @@ mod announce_tests {
         control.set_announce(None);
         assert!(control.beacon(47100).is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod serve_over_tests {
+    use super::*;
+    use windowcast_transport::{conduit, ClientCredential};
+
+    /// A host with no windows: enough to answer a session.
+    struct NoWindows;
+
+    impl WindowSource for NoWindows {
+        fn list_windows(&self) -> Vec<WindowInfo> {
+            Vec::new()
+        }
+        fn encoders(&self) -> Vec<VideoCodec> {
+            vec![VideoCodec::H264]
+        }
+        fn open(&self, _: WindowId, _: VideoCodec) -> Result<Box<dyn FrameSource>, String> {
+            Err("no windows".into())
+        }
+    }
+
+    /// A session over a stream and a conduit another program carries
+    /// (Droidtop/tracker#113): a trusted client gets in and is answered; an
+    /// unknown one is refused, since there is no PIN pairing over it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_trusted_client_is_served_over_a_carried_stream_and_conduit() {
+        let dir =
+            std::env::temp_dir().join(format!("windowcast-serve-over-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let client = Identity::generate();
+        let mut trusted = TrustStore::default();
+        trusted.pin(client.peer_id());
+        trusted
+            .save(&dir.join(windowcast_identity::HOST_TRUST_FILE))
+            .unwrap();
+        let control = HostControl::open(&HostConfig {
+            listen: "127.0.0.1:0".into(),
+            pairing: false,
+            data_dir: dir.clone(),
+        })
+        .unwrap();
+        let mut client_trust = TrustStore::default();
+        client_trust.pin(control.peer_id());
+
+        let (host_end, client_end) = conduit::pair();
+        let (host_pipe, client_pipe) = tokio::io::duplex(64 * 1024);
+        let host = tokio::spawn(serve_over(
+            host_pipe,
+            "the tunnel".into(),
+            Arc::clone(&control),
+            Arc::new(NoWindows),
+            host_end,
+        ));
+        let session = Session::over_conduit(client_end).await.unwrap();
+        let established = tokio::time::timeout(
+            Duration::from_secs(40),
+            windowcast_transport::connect(
+                client_pipe,
+                session,
+                &client,
+                ClientCredential::Pinned(&client_trust),
+            ),
+        )
+        .await
+        .expect("signaling hung")
+        .expect("a trusted client gets in");
+        established
+            .session
+            .send_control(&ControlMessage::Ping)
+            .await
+            .unwrap();
+        // The host says other things first (its rendezvous id): the Pong comes after them.
+        let answered = tokio::time::timeout(Duration::from_secs(20), async {
+            while established.session.recv_control().await.unwrap() != ControlMessage::Pong {}
+        })
+        .await;
+        assert!(answered.is_ok(), "no Pong");
+        let (sent, received) = established.session.conduit_counts().unwrap();
+        assert!(sent > 0 && received > 0);
+        established.session.close().await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(20), host).await;
+
+        // A client the host does not know is refused: nothing pairs over a carried stream.
+        let stranger = Identity::generate();
+        let (host_end, client_end) = conduit::pair();
+        let (host_pipe, client_pipe) = tokio::io::duplex(64 * 1024);
+        let host = tokio::spawn(serve_over(
+            host_pipe,
+            "the tunnel".into(),
+            control,
+            Arc::new(NoWindows),
+            host_end,
+        ));
+        let session = Session::over_conduit(client_end).await.unwrap();
+        let refused = tokio::time::timeout(
+            Duration::from_secs(40),
+            windowcast_transport::connect(
+                client_pipe,
+                session,
+                &stranger,
+                ClientCredential::Pinned(&client_trust),
+            ),
+        )
+        .await
+        .expect("signaling hung");
+        assert!(refused.is_err());
+        let _ = tokio::time::timeout(Duration::from_secs(20), host).await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
