@@ -28,6 +28,11 @@ android {
         }
     }
 
+    buildFeatures {
+        // IAndroidHost: the Android host's binder, as a Shizuku user service.
+        aidl = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -39,5 +44,8 @@ kotlin {
 }
 
 dependencies {
+    // Shizuku's client (Apache-2.0), to start the Android host as the shell user. The embedding
+    // app ships it (droidtop does); this library only compiles against it.
+    compileOnly("dev.rikka.shizuku:api:13.1.5")
     testImplementation("junit:junit:4.13.2")
 }

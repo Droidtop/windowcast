@@ -42,9 +42,12 @@ injected into each app's display (pointer, wheel, touch with several
 fingers, keys through the evdev map, text through the virtual keyboard's
 key map; `InputInjector`), and each app's sound (`AppSound`: an AudioMix
 matching the app's UID, looped back into an AudioRecord, encoded with Opus
-by the host; an app that opts out of capture stays silent). Next: raw pictures over shared memory for the client in the device's
-own Linux container, that client, and the Shizuku `UserService` call that
-starts the host.
+by the host; an app that opts out of capture stays silent). It starts through Shizuku or Sui: `AndroidHostConnection` binds
+`AndroidHostService`, a Shizuku user service in a process of the shell
+user, whose binder (`IAndroidHost`) starts the host, opens an app as a
+window and closes it. Its identity lives in `/data/local/tmp`, where shell
+may write. Next: raw pictures over shared memory for the client in the device's
+own Linux container, and that client.
 
 ## The window abstraction
 

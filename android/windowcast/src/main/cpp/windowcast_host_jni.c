@@ -26,6 +26,13 @@ Java_dev_windowcast_host_HostNative_lastError(JNIEnv *env, jclass cls) {
     return (*env)->NewStringUTF(env, last_error);
 }
 
+JNIEXPORT jstring JNICALL
+Java_dev_windowcast_host_HostNative_id(JNIEnv *env, jclass cls, jlong host) {
+    char out[128];
+    windowcast_android_host_id(HOST(host), out, sizeof out);
+    return (*env)->NewStringUTF(env, out);
+}
+
 JNIEXPORT void JNICALL
 Java_dev_windowcast_host_HostNative_free(JNIEnv *env, jclass cls, jlong host) {
     windowcast_android_host_free((WindowcastAndroidHost *)(intptr_t)host);

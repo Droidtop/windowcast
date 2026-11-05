@@ -39,6 +39,9 @@ class AndroidHost(
     private val handle: Long = HostNative.start(dataDir.path, listen, pairing)
         .also { if (it == 0L) throw IOException(HostNative.lastError()) }
 
+    /** The host's windowcast id (hex): what a client pins. */
+    val id: String get() = HostNative.id(handle)
+
     private val displays = context.getSystemService(DisplayManager::class.java)
     private val nextWindow = AtomicLong(1)
     private val apps = ConcurrentHashMap<Long, Shown>()

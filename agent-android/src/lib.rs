@@ -320,6 +320,8 @@ impl Drop for AndroidSound {
 /// A running host: the bridge and the runtime serving it.
 pub struct AndroidHost {
     bridge: Arc<Bridge>,
+    /// The host's windowcast id (hex), which a client pins.
+    id: String,
     _runtime: tokio::runtime::Runtime,
 }
 
@@ -339,6 +341,7 @@ impl AndroidHost {
             data_dir: data_dir.into(),
         };
         let control = windowcast_host::HostControl::open(&config)?;
+        let id = control.peer_id().to_hex();
         let listener = runtime.block_on(tokio::net::TcpListener::bind(listen))?;
         let source = Arc::new(AndroidSource(Arc::clone(&bridge)));
         runtime.spawn(async move {
@@ -348,12 +351,18 @@ impl AndroidHost {
         });
         Ok(AndroidHost {
             bridge,
+            id,
             _runtime: runtime,
         })
     }
 
     pub fn bridge(&self) -> &Arc<Bridge> {
         &self.bridge
+    }
+
+    /// The host's windowcast id, in hex.
+    pub fn id(&self) -> &str {
+        &self.id
     }
 }
 
@@ -406,6 +415,22 @@ pub unsafe extern "C" fn windowcast_android_host_start(
             write_text(&e.to_string(), error, error_cap);
             std::ptr::null_mut()
         }
+    }
+}
+
+/// The host's windowcast id (hex) in `out`; its length.
+///
+/// # Safety
+/// `host` must be valid and `out` valid for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn windowcast_android_host_id(
+    host: *const AndroidHost,
+    out: *mut c_char,
+    cap: usize,
+) -> i64 {
+    match host.as_ref() {
+        Some(host) => write_text(host.id(), out, cap) as i64,
+        None => 0,
     }
 }
 
