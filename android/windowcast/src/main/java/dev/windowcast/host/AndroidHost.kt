@@ -28,7 +28,7 @@ import java.util.concurrent.atomic.AtomicLong
  * Linux container needs. Pairing is the windowcast identity in [dataDir].
  *
  * Built so far: the displays, the encoders, the frames, the host's commands, and input into each
- * display ([InputInjector]). Per-app sound and raw pictures for loopback are the next steps.
+ * display ([InputInjector]), and each app's sound ([AppSound]). Raw pictures for loopback are next.
  */
 class AndroidHost(
     private val context: Context,
@@ -46,8 +46,9 @@ class AndroidHost(
     @Volatile private var closed = false
 
     /** One app's display, and its encoder while someone watches it. */
-    private class Shown(val app: HostApp, val display: VirtualDisplay, val input: InputInjector) {
+    private class Shown(val app: HostApp, val display: VirtualDisplay, val input: InputInjector, val uid: Int) {
         @Volatile var encoder: Encoder? = null
+        @Volatile var sound: AppSound? = null
     }
 
     private val commands = Thread({ takeCommands() }, "windowcast-host-commands")
@@ -73,7 +74,8 @@ class AndroidHost(
         val display = displays.createVirtualDisplay("windowcast-$window", width, height, dpi, null, DISPLAY_FLAGS)
             ?: throw IOException("no display could be made for $packageName")
         val input = InputInjector(context, display.display.displayId, width, height)
-        apps[window] = Shown(HostApp(window, packageName, title, width, height), display, input)
+        val uid = context.packageManager.getApplicationInfo(packageName, 0).uid
+        apps[window] = Shown(HostApp(window, packageName, title, width, height), display, input, uid)
         publish()
         val options = ActivityOptions.makeBasic().setLaunchDisplayId(display.display.displayId)
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
@@ -84,6 +86,7 @@ class AndroidHost(
     /** Ends [window]: its encoder, its display, and its app's place in the list. */
     fun closeApp(window: Long) {
         val shown = apps.remove(window) ?: return
+        shown.sound?.stop()
         shown.encoder?.stop()
         shown.display.release()
         HostNative.ended(handle, window)
@@ -116,6 +119,20 @@ class AndroidHost(
                 }
                 continue
             }
+            if (command is HostCommand.OpenAudio || command is HostCommand.CloseAudio) {
+                shown.sound?.stop()
+                shown.sound = null
+                if (command is HostCommand.OpenAudio) {
+                    // Reflection on system APIs and the audio policy can refuse: the window stays, silent.
+                    try {
+                        shown.sound = AppSound(handle, command.window, shown.uid).also { it.start() }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "window ${command.window}: its app's sound cannot be captured", e)
+                        HostNative.soundEnded(handle, command.window)
+                    }
+                }
+                continue
+            }
             try {
                 when (command) {
                     is HostCommand.Open -> {
@@ -130,7 +147,7 @@ class AndroidHost(
                     }
                     is HostCommand.Keyframe -> shown.encoder?.keyframe()
                     is HostCommand.Bitrate -> shown.encoder?.bitrate(command.bitrate)
-                    is HostCommand.Input -> Unit
+                    is HostCommand.Input, is HostCommand.OpenAudio, is HostCommand.CloseAudio -> Unit
                 }
             } catch (e: Exception) {
                 // MediaCodec reports a failed configure or start as IllegalStateException or

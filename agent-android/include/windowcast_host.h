@@ -24,9 +24,14 @@ void windowcast_android_host_set_encoders(const WindowcastAndroidHost *host, con
 /* One encoded frame; width and height when the size is new, else 0. 1 taken, 0 nobody streams it. */
 int64_t windowcast_android_host_frame(const WindowcastAndroidHost *host, uint64_t window, const uint8_t *data,
                                       size_t len, uint64_t duration_us, uint32_t width, uint32_t height);
+/* count interleaved stereo 16-bit samples at 48 kHz of the window's app. 1 taken, 0 nobody listens. */
+int64_t windowcast_android_host_sound(const WindowcastAndroidHost *host, uint64_t window, const int16_t *samples,
+                                      size_t count);
+/* The window's sound cannot be captured: its audio ends, its picture goes on. */
+void windowcast_android_host_sound_ended(const WindowcastAndroidHost *host, uint64_t window);
 /* The window's app is gone. */
 void windowcast_android_host_ended(const WindowcastAndroidHost *host, uint64_t window);
-/* The next command as JSON ({"command":"open"|"close"|"keyframe"|"bitrate",...}), waiting up to
+/* The next command as JSON ({"command":"open"|"close"|"keyframe"|"bitrate"|"input"|"open_audio"|"close_audio",...}), waiting up to
  * timeout_ms: its length, or 0 when none came. */
 int64_t windowcast_android_host_next_command(const WindowcastAndroidHost *host, uint32_t timeout_ms, char *out,
                                              size_t cap);

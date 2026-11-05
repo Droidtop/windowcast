@@ -62,6 +62,22 @@ Java_dev_windowcast_host_HostNative_frame(JNIEnv *env, jclass cls, jlong host, j
     return taken;
 }
 
+JNIEXPORT jlong JNICALL
+Java_dev_windowcast_host_HostNative_sound(JNIEnv *env, jclass cls, jlong host, jlong window, jshortArray samples,
+                                          jint count) {
+    jshort *values = (*env)->GetPrimitiveArrayCritical(env, samples, NULL);
+    if (values == NULL) return 0;
+    int64_t taken = windowcast_android_host_sound(HOST(host), (uint64_t)window, (const int16_t *)values,
+                                                  (size_t)count);
+    (*env)->ReleasePrimitiveArrayCritical(env, samples, values, JNI_ABORT);
+    return taken;
+}
+
+JNIEXPORT void JNICALL
+Java_dev_windowcast_host_HostNative_soundEnded(JNIEnv *env, jclass cls, jlong host, jlong window) {
+    windowcast_android_host_sound_ended(HOST(host), (uint64_t)window);
+}
+
 JNIEXPORT void JNICALL
 Java_dev_windowcast_host_HostNative_ended(JNIEnv *env, jclass cls, jlong host, jlong window) {
     windowcast_android_host_ended(HOST(host), (uint64_t)window);

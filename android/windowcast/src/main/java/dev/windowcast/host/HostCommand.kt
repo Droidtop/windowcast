@@ -13,6 +13,9 @@ sealed class HostCommand {
     data class Keyframe(override val window: Long) : HostCommand()
     data class Bitrate(override val window: Long, val bitrate: Int) : HostCommand()
 
+    data class OpenAudio(override val window: Long) : HostCommand()
+    data class CloseAudio(override val window: Long) : HostCommand()
+
     /** An input event for [window]'s display, as the host's JSON (`{"PointerMove":{...}}`). */
     data class Input(override val window: Long, val event: String) : HostCommand()
 
@@ -39,6 +42,8 @@ sealed class HostCommand {
                 "keyframe" -> Keyframe(window)
                 "bitrate" -> Bitrate(window, number(json, "bitrate")?.toInt() ?: return null)
                 "input" -> Input(window, event(json) ?: return null)
+                "open_audio" -> OpenAudio(window)
+                "close_audio" -> CloseAudio(window)
                 else -> null
             }
         }
